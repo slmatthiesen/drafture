@@ -7,9 +7,9 @@ export function SecurityPanel({ floor }: { floor: string[] }): JSX.Element | nul
   if (floor.length === 0) return null;
 
   return (
-    // Collapsed by default — it's the same non-negotiable floor on every design,
-    // so it stays out of the way until you want to confirm it.
-    <details className="card security">
+    // Expanded by default (it's the safe-by-default posture worth seeing), but
+    // collapsible to get it out of the way.
+    <details className="card security" open>
       <summary className="security__summary" aria-label="Security floor">
         Security floor (applied to every tier)
         <span className="security__count"> · {floor.length} controls</span>

@@ -13,7 +13,7 @@ import {
   formatRange,
   onDemandDisclaimer,
   ASSUMED_MONTHLY_VOLUME,
-  TIER_CAPACITY_MULTIPLIER,
+  TIER_COST_MULTIPLIER,
 } from "./cost.js";
 
 const REGION = "us-east-1";
@@ -118,7 +118,7 @@ describe("estimateCosts", () => {
     // multiplier (always-on capacity scales with tier redundancy; no drift).
     const albPrice = stores.pricing.get("ALB", REGION).find((r) => r.unit === "hour")!;
     const band = ASSUMED_MONTHLY_VOLUME["hour"]!;
-    const mult = TIER_CAPACITY_MULTIPLIER.balanced;
+    const mult = TIER_COST_MULTIPLIER.balanced;
     const albDriver = balanced.costDrivers.find((d) => d.service === "ALB" && d.unit === "$/hr")!;
     expect(albDriver.estimateRange).toBe(
       formatRange(albPrice.usd * band.low * mult, albPrice.usd * band.high * mult),
@@ -142,9 +142,9 @@ describe("estimateCosts", () => {
     expect(egress!.note).toMatch(/private-subnet security default/i);
   });
 
-  it("scales always-on capacity cost by tier (resilient > balanced > budget)", () => {
-    // Same capacity service (ALB) in all three tiers — the only difference is the
-    // tier redundancy multiplier, so the $/hr range must grow budget→balanced→resilient.
+  it("scales cost by tier (resilient > balanced > budget)", () => {
+    // Same service (ALB) in all three tiers — the only difference is the tier
+    // robustness multiplier, so the range must grow budget→balanced→resilient.
     const sameNodes = [node("ALB")];
     const differentiated: ArchitectureResult = {
       assumptions: [],

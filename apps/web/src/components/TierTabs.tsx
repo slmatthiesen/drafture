@@ -69,8 +69,9 @@ export function TierTabs({
       </div>
 
       <section className="tier" role="tabpanel" aria-label={`${TAB_LABELS[tier.name]} tier`}>
-        {/* Diagram first — the design is the thing to look at right away. */}
-        <DiagramView chart={graphToMermaid(tier.nodes, tier.edges)} />
+        {/* Diagram first — the design is the thing to look at right away. Top-to-
+            bottom flow keeps it from sprawling wide off the right of the screen. */}
+        <DiagramView chart={graphToMermaid(tier.nodes, tier.edges, "TB")} />
 
         <header className="tier__header">
           <h2>

@@ -28,32 +28,23 @@ import type { ArchitectureResult, CostDriver, Tier, TierName } from "../schema/a
 import type { PriceRecord, PricingStore } from "../store/types.js";
 
 /**
- * Per-tier REDUNDANCY multiplier on always-on capacity (KTD6). The three tiers
- * differ along the robustness axis — single-AZ → multi-AZ → multi-AZ + replicas /
- * provisioned concurrency / backups — and that robustness costs real money, so a
- * resilient tier must NOT show the same per-service ranges as budget. We model it
- * deterministically: the base volume band captures within-tier volume uncertainty,
- * and this multiplier scales the always-on CAPACITY units (compute hours, LB
- * hours, stored GB incl. replicas/backups, cross-AZ replication) by tier. Request-
- * and throughput-priced units (per-1k-*, GB-seconds, per-MAU, internet egress)
- * track the WORKLOAD, not redundancy, so they are NOT multiplied — the same
- * traffic costs the same to serve regardless of tier.
+ * Per-tier ROBUSTNESS multiplier (KTD6). The three tiers differ along the
+ * robustness axis — single-AZ → multi-AZ → multi-AZ + replicas / provisioned
+ * concurrency / cross-region / backups — and that robustness costs real money, so
+ * a resilient tier must NOT show the same totals as budget. We model it
+ * deterministically by scaling each tier's whole estimate: the base volume band
+ * captures within-tier volume uncertainty, and this factor captures the
+ * redundancy premium each higher tier layers on the SAME workload (more always-on
+ * capacity, provisioned concurrency, replicas/backups, retries, cross-AZ/region
+ * duplication). Applied to ALL units so the tiers are always monotonic
+ * (budget < balanced < resilient) even for a pure-serverless design where there
+ * are no always-on capacity lines to scale.
  */
-export const TIER_CAPACITY_MULTIPLIER: Record<TierName, number> = {
+export const TIER_COST_MULTIPLIER: Record<TierName, number> = {
   budget: 1,
   balanced: 2,
   resilient: 3,
 };
-
-/** Native units whose cost scales with tier redundancy (see multiplier above). */
-export const CAPACITY_UNITS = new Set<string>([
-  "hour",
-  "lcu-hour",
-  "vcpu-hour",
-  "gb-hour",
-  "gb-month",
-  "gb-cross-az",
-]);
 
 /** Assumed MONTHLY consumption per native unit, used to turn a per-unit list
  *  price into a range. Numbers are the count of native units consumed per month
@@ -210,14 +201,16 @@ function driversForService(
   region: string,
   pricing: PricingStore,
   isPrivateSubnetDefault: boolean,
-  capacityMultiplier: number,
+  tierMultiplier: number,
 ): CostDriver[] {
   const { records, approximate } = lookupPrices(service, region, pricing);
   return records.map((r) => {
     const band = ASSUMED_MONTHLY_VOLUME[r.unit] ?? DEFAULT_BAND;
-    // Always-on capacity scales with tier redundancy; workload-priced units don't.
-    const mult = CAPACITY_UNITS.has(r.unit) ? capacityMultiplier : 1;
-    const estimateRange = formatRange(r.usd * band.low * mult, r.usd * band.high * mult);
+    // Scale the whole estimate by the tier's robustness premium.
+    const estimateRange = formatRange(
+      r.usd * band.low * tierMultiplier,
+      r.usd * band.high * tierMultiplier,
+    );
     let note = r.note;
     if (isPrivateSubnetDefault) {
       note =
@@ -262,23 +255,18 @@ const VPC_PRIVATE_SERVICE_KEYWORDS = [
 ] as const;
 
 /**
- * Detect a tier that egresses from a private subnet, which forces a NAT gateway
- * + internet-egress recurring cost (R7 #5 / KTD6) — surfaced CONSISTENTLY across
- * every tier that runs VPC-bound services, not just whichever tier the model
- * happened to tag "private subnet".
+ * Detect a tier that actually runs VPC-bound resources, which forces a NAT gateway
+ * + internet-egress recurring cost (R7 #5 / KTD6).
  *
- * Signals (either trips it): an affirmative private-subnet mention on a node tag /
- * role / delta, OR any VPC-bound service in the tier (the deterministic signal
- * that doesn't depend on the model's tagging being consistent). We deliberately
- * do NOT trip on a bare "NAT" token — it appears in negative phrasing too
- * ("no NAT required").
+ * The ONLY trigger is the presence of a real VPC-bound service. We deliberately do
+ * NOT trip on a "private subnet" text tag: the model sprinkles that phrase
+ * inconsistently — even onto pure-serverless tiers (Lambda + DynamoDB + S3, no
+ * VPC) — which produced a PHANTOM NAT line on some tiers and not others, making a
+ * serverless budget tier look like it cost $40+/mo for a gateway it doesn't have.
+ * Anchoring on the service list makes NAT correct (only when there's VPC compute/
+ * data) and consistent across every tier that has it.
  */
 function egressesFromPrivateSubnet(tier: Tier): boolean {
-  const tierSurface = [...tier.delta, ...tier.nodes.flatMap((n) => [n.role, ...n.security])]
-    .join(" ")
-    .toLowerCase();
-  if (/private[ -]?subnet/.test(tierSurface)) return true;
-
   return tier.nodes.some((n) => {
     const serviceSurface = `${n.awsService} ${n.role}`.toLowerCase();
     return VPC_PRIVATE_SERVICE_KEYWORDS.some((kw) => serviceSurface.includes(kw));
@@ -295,19 +283,19 @@ function estimateTier(tier: Tier, pricing: PricingStore, region: string): Tier {
     drivers.push(d);
   };
 
-  const capacityMultiplier = TIER_CAPACITY_MULTIPLIER[tier.name];
+  const tierMultiplier = TIER_COST_MULTIPLIER[tier.name];
 
   const services = uniqueOrdered(tier.nodes.map((n) => normalizeService(n.awsService)));
   for (const service of services) {
-    for (const d of driversForService(service, region, pricing, false, capacityMultiplier)) add(d);
+    for (const d of driversForService(service, region, pricing, false, tierMultiplier)) add(d);
   }
 
-  // Surface the recurring NAT/egress cost the private-subnet default imposes,
-  // even though no node "is" the NAT gateway — hiding it would make the secure
-  // choice look free (KTD6).
+  // Surface the recurring NAT/egress cost a VPC-bound tier imposes, even though no
+  // node "is" the NAT gateway — hiding it would make the secure choice look free
+  // (KTD6).
   if (egressesFromPrivateSubnet(tier)) {
     for (const service of DATA_TRANSFER_DEFAULT_SERVICES) {
-      for (const d of driversForService(service, region, pricing, true, capacityMultiplier)) add(d);
+      for (const d of driversForService(service, region, pricing, true, tierMultiplier)) add(d);
     }
   }
 
