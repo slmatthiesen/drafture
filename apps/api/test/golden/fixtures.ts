@@ -243,6 +243,9 @@ export function fakeProvider(arch: ArchitectureResult): FakeProvider {
     async clarify(): Promise<ProviderResult<Clarification>> {
       return { result: { needsClarification: false, questions: [] }, usage: USAGE };
     },
+    async generateConfig(): Promise<ProviderResult<string>> {
+      return { result: 'resource "aws_lambda_function" "api" {}', usage: USAGE };
+    },
     async countTokens(text: string): Promise<number> {
       return text.length;
     },

@@ -28,6 +28,9 @@ function makeFake(needsClarification: boolean, questions: string[] = []): Fake {
       calls.generate += 1;
       throw new Error("clarify route must never generate");
     },
+    async generateConfig(): Promise<ProviderResult<string>> {
+      throw new Error("clarify route must never generate config");
+    },
     async countTokens(text: string): Promise<number> {
       return text.length;
     },

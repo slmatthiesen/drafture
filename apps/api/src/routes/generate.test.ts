@@ -94,6 +94,9 @@ function makeFake(opts: FakeOpts = {}): Fake {
       if (opts.generateError) throw new Error("upstream boom");
       return { result: opts.arch ?? validArchitecture(), usage: USAGE };
     },
+    async generateConfig(): Promise<ProviderResult<string>> {
+      return { result: 'resource "aws_lambda_function" "api" {}', usage: USAGE };
+    },
     async countTokens(text: string): Promise<number> {
       return text.length;
     },
@@ -145,6 +148,10 @@ describe("POST /api/generate", () => {
     const body = res.json();
     expect(body.tiers.map((t: { name: string }) => t.name)).toEqual(["budget", "balanced", "resilient"]);
     expect(Array.isArray(body.assumptions)).toBe(true);
+    // Staff-level signal is surfaced alongside the tiers.
+    expect(body.recommendedTier).toBe("balanced");
+    expect(typeof body.recommendationRationale).toBe("string");
+    expect(body.keyDecisions[0].chosen).toBe("Lambda behind API Gateway");
     expect(body.assumptions.some((a: string) => /on-demand list prices/i.test(a))).toBe(true);
     // Cost drivers were filled deterministically (U7), not left as the canned stub only.
     expect(body.tiers[0].costDrivers.length).toBeGreaterThan(0);

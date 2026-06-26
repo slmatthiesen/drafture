@@ -32,13 +32,31 @@ function tier(name: TierName, summary: string, security: string): Tier {
   };
 }
 
+const baseTiers: Tier[] = [
+  tier("budget", "Budget single-AZ design", "Budget security floor intact"),
+  tier("balanced", "Balanced multi-AZ design", "Balanced security note"),
+  tier("resilient", "Resilient multi-region design", "Resilient security note"),
+];
+
 const fullResult: GenerateResponse = {
   assumptions: ["Prices are AWS on-demand list prices for us-east-1."],
-  tiers: [
-    tier("budget", "Budget single-AZ design", "Budget security floor intact"),
-    tier("balanced", "Balanced multi-AZ design", "Balanced security note"),
-    tier("resilient", "Resilient multi-region design", "Resilient security note"),
+  tiers: baseTiers,
+  recommendedTier: "budget",
+  recommendationRationale: "Budget covers the stated launch traffic with the full security floor.",
+  keyDecisions: [
+    {
+      decision: "Compute model",
+      chosen: "Serverless (Lambda + API Gateway)",
+      alternativesConsidered: ["ECS Fargate", "EC2 Auto Scaling"],
+      rationale: "Lowest idle cost at launch traffic; scales to zero.",
+    },
   ],
+};
+
+const balancedRecommended: GenerateResponse = {
+  ...fullResult,
+  recommendedTier: "balanced",
+  recommendationRationale: "Balanced is the safest default for mission-critical uptime.",
 };
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -74,20 +92,89 @@ function typeAndSubmit(description: string): void {
   fireEvent.click(screen.getByRole("button", { name: /design it/i }));
 }
 
-describe("App (U10)", () => {
-  it("moves the prompt into the header and shows a loading state on submit", () => {
-    // Pending fetch so we can observe the loading phase before it resolves.
-    const pending = deferred<Response>();
-    fetchMock.mockReturnValueOnce(pending.promise);
+function skipIntake(): void {
+  fireEvent.click(screen.getByRole("button", { name: /^skip$/i }));
+}
 
+describe("App (U10 + E6 intake)", () => {
+  it("moves the prompt into the header and shows the intake before generating", () => {
     render(<App />);
     typeAndSubmit("A photo-sharing API");
 
     // Prompt is now the page goal/header (the textbox is gone).
     expect(screen.getByRole("heading", { name: "A photo-sharing API" })).toBeInTheDocument();
     expect(screen.queryByLabelText("System description")).not.toBeInTheDocument();
-    // Loading state visible.
+    // Intake (E6) is shown once before generation — no fetch yet.
+    expect(screen.getByText(/answer 3 quick questions/i)).toBeInTheDocument();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("skipping the intake generates with no answers and a forced round", async () => {
+    const pending = deferred<Response>();
+    fetchMock.mockReturnValueOnce(pending.promise);
+
+    render(<App />);
+    typeAndSubmit("A photo-sharing API");
+    skipIntake();
+
+    // Loading state visible while the (skipped-answers) request is in flight.
     expect(screen.getByRole("status")).toHaveTextContent(/designing/i);
+    const body = JSON.parse((fetchMock.mock.calls[0]![1] as RequestInit).body as string);
+    expect(body.answers).toBeUndefined();
+    expect(body.round).toBe(2);
+
+    pending.resolve(jsonResponse(fullResult));
+    await screen.findByText("Budget single-AZ design");
+  });
+
+  it("answering intake chips passes labeled answers to generate", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(fullResult));
+
+    render(<App />);
+    typeAndSubmit("A photo-sharing API");
+
+    fireEvent.click(screen.getByRole("radio", { name: "Millions a day" }));
+    fireEvent.click(screen.getByRole("radio", { name: "Mission-critical" }));
+    fireEvent.click(screen.getByRole("button", { name: /^design it$/i }));
+
+    await screen.findByText("Budget single-AZ design");
+    const body = JSON.parse((fetchMock.mock.calls[0]![1] as RequestInit).body as string);
+    expect(body.answers).toEqual([
+      "Expected traffic: Millions a day",
+      "Downtime tolerance: Mission-critical",
+    ]);
+    expect(body.round).toBe(2);
+  });
+
+  it("leads with a recommendation banner and preselects the recommended tier", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(balancedRecommended));
+
+    render(<App />);
+    typeAndSubmit("A REST API");
+    skipIntake();
+
+    // Recommendation is the headline.
+    const banner = await screen.findByLabelText("Recommendation");
+    expect(banner).toHaveTextContent(/Recommended:\s*Balanced/i);
+    expect(banner).toHaveTextContent(/safest default/i);
+
+    // Balanced (not the first tier) is auto-selected and badged.
+    const balancedTab = screen.getByRole("tab", { name: /balanced/i });
+    expect(balancedTab).toHaveAttribute("aria-selected", "true");
+    expect(balancedTab).toHaveTextContent(/recommended/i);
+    expect(screen.getByText("Balanced multi-AZ design")).toBeInTheDocument();
+  });
+
+  it("renders the key-decisions (ADR) card", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(fullResult));
+
+    render(<App />);
+    typeAndSubmit("A REST API");
+    skipIntake();
+
+    await screen.findByText("Key decisions");
+    expect(screen.getByText("Serverless (Lambda + API Gateway)")).toBeInTheDocument();
+    expect(screen.getByText(/Alternatives considered: ECS Fargate, EC2 Auto Scaling/i)).toBeInTheDocument();
   });
 
   it("renders clarification questions, then advances to results after answering", async () => {
@@ -97,6 +184,7 @@ describe("App (U10)", () => {
 
     render(<App />);
     typeAndSubmit("An async job processor");
+    skipIntake();
 
     // Round 1: clarification form.
     const question = await screen.findByText("Expected traffic?");
@@ -121,9 +209,10 @@ describe("App (U10)", () => {
 
     render(<App />);
     typeAndSubmit("A REST API");
+    skipIntake();
 
     await screen.findByText("Budget single-AZ design");
-    // Budget is framed as minimum safe cost (KTD9) — tab sublabel + tier tag.
+    // Budget is framed as minimum safe cost (KTD9) — tier tag.
     expect(screen.getAllByText(/minimum safe cost/i).length).toBeGreaterThan(0);
     expect(renderMock).toHaveBeenCalled();
     const callsAfterBudget = renderMock.mock.calls.length;
@@ -142,6 +231,7 @@ describe("App (U10)", () => {
 
     render(<App />);
     typeAndSubmit("Anything");
+    skipIntake();
 
     expect(await screen.findByRole("alert")).toHaveTextContent(/going a little fast/i);
   });

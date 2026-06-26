@@ -75,6 +75,28 @@ const PROMPT: GroundedPrompt = {
   volatileSuffix: "matched patterns + memory + user description",
 };
 
+/** Mirrors a plain (non-structured) `messages.create()` response: text blocks, no parsed_output. */
+function textMessage(text: string, usage: FakeUsage = {}): Anthropic.Message {
+  return {
+    id: "msg_test",
+    type: "message",
+    role: "assistant",
+    model: "claude-sonnet-4-6",
+    stop_reason: "end_turn",
+    stop_sequence: null,
+    content: [{ type: "text", text }],
+    usage: {
+      input_tokens: usage.input_tokens ?? 100,
+      output_tokens: usage.output_tokens ?? 50,
+      cache_read_input_tokens: usage.cache_read_input_tokens ?? 0,
+      cache_creation_input_tokens: usage.cache_creation_input_tokens ?? 0,
+      cache_creation: null,
+      server_tool_use: null,
+      service_tier: "standard",
+    },
+  } as unknown as Anthropic.Message;
+}
+
 // --- Fixtures ---------------------------------------------------------------
 
 function makeTier(name: TierName): ArchitectureResult["tiers"][number] {
@@ -208,6 +230,53 @@ describe("ClaudeProvider.generate", () => {
     expect(err).toBeInstanceOf(ProviderError);
     expect((err as ProviderError).retryable).toBe(false);
     expect(parse).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("ClaudeProvider.generateConfig", () => {
+  const HCL = 'resource "aws_lambda_function" "api" {\n  function_name = "api"\n}';
+
+  it("returns reference-only HCL and propagates usage, as a plain-text (non-structured) call", async () => {
+    const { client, create } = fakeClient();
+    create.mockResolvedValueOnce(textMessage(HCL, { input_tokens: 420, output_tokens: 1300 }));
+
+    const { result, usage } = await makeProvider(client).generateConfig(makeTier("balanced"));
+
+    expect(result).toBe(HCL);
+    expect(usage.inputTokens).toBe(420);
+    expect(usage.outputTokens).toBe(1300);
+
+    const params = create.mock.calls.at(-1)?.[0] as Anthropic.MessageCreateParamsNonStreaming;
+    // cache_control stays on the static system prefix; plain text means no output_config.
+    const system = params.system as Anthropic.TextBlockParam[];
+    expect(system[0]?.cache_control).toEqual({ type: "ephemeral" });
+    expect(params.output_config).toBeUndefined();
+    expect(params.max_tokens).toBe(2500);
+    const userText = (params.messages[0]?.content as Anthropic.ContentBlockParam[])[0] as Anthropic.TextBlockParam;
+    expect(userText.text).toContain("balanced");
+  });
+
+  it("honors a maxTokens override and strips a stray markdown fence", async () => {
+    const { client, create } = fakeClient();
+    create.mockResolvedValueOnce(textMessage("```hcl\n" + HCL + "\n```"));
+
+    const { result } = await makeProvider(client).generateConfig(makeTier("budget"), { maxTokens: 1000 });
+
+    expect(result).toBe(HCL);
+    const params = create.mock.calls.at(-1)?.[0] as Anthropic.MessageCreateParamsNonStreaming;
+    expect(params.max_tokens).toBe(1000);
+  });
+
+  it("maps SDK errors to a ProviderError", async () => {
+    const { client, create } = fakeClient();
+    create.mockRejectedValueOnce(new RateLimitError(429, undefined, "rate limited", new Headers()));
+
+    const err = await makeProvider(client)
+      .generateConfig(makeTier("resilient"))
+      .catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(ProviderError);
+    expect((err as ProviderError).retryable).toBe(true);
   });
 });
 

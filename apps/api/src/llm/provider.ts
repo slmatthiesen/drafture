@@ -1,4 +1,4 @@
-import type { ArchitectureResult, Clarification } from "../schema/architecture.js";
+import type { ArchitectureResult, Clarification, Tier } from "../schema/architecture.js";
 
 /**
  * Token accounting surfaced by every provider call so the SpendLedger can debit
@@ -47,6 +47,17 @@ export interface LlmProvider {
 
   /** Generate the three-tier architecture as a validated typed graph (KTD3). */
   generate(prompt: GroundedPrompt, opts?: GenerateOptions): Promise<ProviderResult<ArchitectureResult>>;
+
+  /**
+   * Generate idiomatic, REFERENCE-ONLY Terraform (HCL) for a single tier of an
+   * already-generated design — a starting point a human must review and harden,
+   * not production-ready output (one best-fit artifact, generated on demand and
+   * cached to respect the cost ceiling; not a multi-format export). Returns the
+   * raw HCL (no prose, no markdown fences) plus usage so the ledger can debit the
+   * call. Bounded by `opts.maxTokens` (provider picks a small default). Plain
+   * text — NOT structured/json_schema output.
+   */
+  generateConfig(tier: Tier, opts?: { maxTokens?: number }): Promise<ProviderResult<string>>;
 
   /** Pre-flight input-token count for the hard input cap (U8). */
   countTokens(text: string): Promise<number>;

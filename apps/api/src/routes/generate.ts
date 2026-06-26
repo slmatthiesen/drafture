@@ -226,7 +226,16 @@ async function handleGenerate(
     const actualUsd = llmCostUsd(usage, ctx.pricing);
     ctx.stores.spendLedger.reconcile(reservationId, actualUsd);
 
-    const responseBody = { tiers: estimated.tiers, assumptions: estimated.assumptions };
+    // Surface the staff-level signal alongside the tiers: the opinionated
+    // recommendation + its rationale and the ADR-style key decisions. The full
+    // shape is what gets cached, so a later cache HIT returns these fields too.
+    const responseBody = {
+      tiers: estimated.tiers,
+      assumptions: estimated.assumptions,
+      recommendedTier: estimated.recommendedTier,
+      recommendationRationale: estimated.recommendationRationale,
+      keyDecisions: estimated.keyDecisions,
+    };
     ctx.stores.responseCache.set(cacheKey, JSON.stringify(responseBody));
 
     emit("ok", { costUsd: actualUsd, researchCalls });

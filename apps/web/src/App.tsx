@@ -11,15 +11,27 @@
 import { useState } from "react";
 import { generate, type ApiOutcome } from "./lib/api.js";
 import { ClarifyForm } from "./components/ClarifyForm.js";
+import { IntakeForm } from "./components/IntakeForm.js";
+import { KeyDecisions } from "./components/KeyDecisions.js";
 import { TierTabs } from "./components/TierTabs.js";
-import type { GenerateResponse } from "./lib/types.js";
+import type { GenerateResponse, TierName } from "./lib/types.js";
 
-type Phase = "idle" | "loading" | "clarify" | "result" | "error";
+type Phase = "idle" | "intake" | "loading" | "clarify" | "result" | "error";
 
 interface ClarifyState {
   questions: string[];
   round: number;
 }
+
+// Forcing a later round when the user has gone through intake tells the backend
+// this is the final input — generate now, no model clarify round-trip (E6).
+const INTAKE_ROUND = 2;
+
+const TIER_DISPLAY: Record<TierName, string> = {
+  budget: "Budget",
+  balanced: "Balanced",
+  resilient: "Resilient",
+};
 
 const ERROR_MESSAGES: Record<string, string> = {
   rate_limited: "You're going a little fast — wait a moment and try again.",
@@ -48,6 +60,10 @@ export function App(): JSX.Element {
   const [clarifyState, setClarifyState] = useState<ClarifyState | null>(null);
   const [result, setResult] = useState<GenerateResponse | null>(null);
   const [errorMessage, setErrorMessage] = useState<string>("");
+  // Remembered so the error "Try again" reissues the same generation.
+  const [lastAttempt, setLastAttempt] = useState<{ answers?: string[]; round: number }>({
+    round: 1,
+  });
 
   const submitted = phase !== "idle";
 
@@ -58,7 +74,13 @@ export function App(): JSX.Element {
         setPhase("clarify");
         return;
       case "result":
-        setResult({ tiers: outcome.tiers, assumptions: outcome.assumptions });
+        setResult({
+          tiers: outcome.tiers,
+          assumptions: outcome.assumptions,
+          recommendedTier: outcome.recommendedTier,
+          recommendationRationale: outcome.recommendationRationale,
+          keyDecisions: outcome.keyDecisions,
+        });
         setPhase("result");
         return;
       case "error":
@@ -68,20 +90,32 @@ export function App(): JSX.Element {
     }
   };
 
-  const startGeneration = async (description: string): Promise<void> => {
+  const startGeneration = async (
+    description: string,
+    answers?: string[],
+    round = 1,
+  ): Promise<void> => {
     setGoal(description);
     setPhase("loading");
     setResult(null);
     setClarifyState(null);
     setErrorMessage("");
-    applyOutcome(await generate({ description, round: 1 }));
+    setLastAttempt({ answers, round });
+    applyOutcome(await generate({ description, answers, round }));
   };
 
   const handleSubmit = (e: React.FormEvent): void => {
     e.preventDefault();
     const description = draft.trim();
     if (!description) return;
-    void startGeneration(description);
+    // Surface the quick intake (E6) before generating; goal animates into header.
+    setGoal(description);
+    setPhase("intake");
+  };
+
+  const handleIntake = (answers: string[]): void => {
+    // Skip sends no answers; either way force a final round (no clarify trip).
+    void startGeneration(goal, answers.length > 0 ? answers : undefined, INTAKE_ROUND);
   };
 
   const handleAnswers = async (answers: string[]): Promise<void> => {
@@ -117,6 +151,8 @@ export function App(): JSX.Element {
         </form>
       )}
 
+      {phase === "intake" && <IntakeForm onComplete={handleIntake} />}
+
       {phase === "loading" && (
         <p className="status" role="status">
           Designing a safe, costed AWS architecture…
@@ -126,7 +162,12 @@ export function App(): JSX.Element {
       {phase === "error" && (
         <div className="banner banner--error" role="alert">
           <p>{errorMessage}</p>
-          <button type="button" onClick={() => void startGeneration(goal)}>
+          <button
+            type="button"
+            onClick={() =>
+              void startGeneration(goal, lastAttempt.answers, lastAttempt.round)
+            }
+          >
             Try again
           </button>
         </div>
@@ -138,6 +179,17 @@ export function App(): JSX.Element {
 
       {phase === "result" && result && (
         <>
+          <section className="banner banner--recommend" role="note" aria-label="Recommendation">
+            <p className="recommend__lead">
+              Recommended: <strong>{TIER_DISPLAY[result.recommendedTier]}</strong>
+            </p>
+            {result.recommendationRationale && (
+              <p className="recommend__why">{result.recommendationRationale}</p>
+            )}
+          </section>
+
+          <KeyDecisions decisions={result.keyDecisions} />
+
           {result.assumptions.length > 0 && (
             <section className="card assumptions" aria-label="Assumptions">
               <h2>Assumptions</h2>
@@ -148,7 +200,11 @@ export function App(): JSX.Element {
               </ul>
             </section>
           )}
-          <TierTabs tiers={result.tiers} assumptions={result.assumptions} />
+          <TierTabs
+            tiers={result.tiers}
+            assumptions={result.assumptions}
+            recommendedTier={result.recommendedTier}
+          />
         </>
       )}
     </main>

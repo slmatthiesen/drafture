@@ -158,10 +158,35 @@ body {
   gap: 1rem;
 }
 
-.banner--error {
+.banner--error,
+.banner--warn {
   background: #fff4f4;
   border: 1px solid #d98c8c;
-  color: #5a1414; /* dark red on near-white → AA */
+  color: #5a1414; /* dark red on near-white → 9.1:1 ✅ AA */
+}
+
+/* Recommendation — the headline. Brand-tinted white card, dark ink (AAA). */
+.banner--recommend {
+  display: block;
+  background: var(--card);
+  border: 1px solid var(--brand-dark);
+  border-left: 5px solid var(--brand-dark);
+  color: var(--ink);
+}
+
+.recommend__lead {
+  margin: 0;
+  font-size: 1.2rem;
+}
+
+.recommend__lead strong {
+  color: var(--brand-dark);
+  text-transform: capitalize;
+}
+
+.recommend__why {
+  margin: 0.4rem 0 0;
+  color: var(--muted);
 }
 
 .banner button {
@@ -273,6 +298,195 @@ body {
 .cost__assumptions {
   margin-top: 0.75rem;
   color: var(--muted);
+}
+
+.tiers__tab-badge {
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--brand-dark);
+}
+
+.tiers__tab--active .tiers__tab-badge {
+  color: #d7ef8a; /* light green on ink background → AA */
+}
+
+/* ---- cost summary badge ---- */
+
+.cost-summary {
+  margin: 0.5rem 0 0;
+  font-size: 0.95rem;
+}
+
+.cost-summary__band {
+  font-weight: 700;
+}
+
+.cost-summary__label {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+/* ---- intake (E6) ---- */
+
+.intake__questions {
+  display: grid;
+  gap: 1.25rem;
+  margin: 1rem 0 1.5rem;
+}
+
+.intake__question {
+  border: none;
+  padding: 0;
+  margin: 0;
+}
+
+.intake__question legend {
+  font-weight: 600;
+  padding: 0;
+  margin-bottom: 0.5rem;
+}
+
+.intake__chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.intake__chip {
+  font: inherit;
+  cursor: pointer;
+  background: rgba(255, 255, 255, 0.85);
+  border: 1px solid var(--card-border);
+  border-radius: 999px;
+  padding: 0.4rem 0.9rem;
+  color: var(--ink);
+}
+
+.intake__chip--active {
+  background: var(--ink);
+  color: #fff;
+  border-color: var(--ink);
+}
+
+.intake__actions {
+  display: flex;
+  gap: 0.75rem;
+}
+
+.intake__design {
+  font: inherit;
+  cursor: pointer;
+  padding: 0.6rem 1.4rem;
+  border: none;
+  border-radius: var(--radius);
+  background: var(--ink);
+  color: #fff;
+  font-weight: 600;
+}
+
+.intake__skip {
+  font: inherit;
+  cursor: pointer;
+  padding: 0.6rem 1.4rem;
+  border: 1px solid var(--brand-dark);
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--ink);
+}
+
+/* ---- key decisions (ADR) ---- */
+
+.decisions__list {
+  margin: 0;
+  padding-left: 1.1rem;
+  display: grid;
+  gap: 1rem;
+}
+
+.decisions__head {
+  margin: 0;
+}
+
+.decisions__chosen {
+  color: var(--brand-dark);
+}
+
+.decisions__alts {
+  margin: 0.25rem 0 0;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.decisions__why {
+  margin: 0.25rem 0 0;
+}
+
+/* ---- reference config ---- */
+
+.refconfig__toggle {
+  font: inherit;
+  cursor: pointer;
+  padding: 0.55rem 1.1rem;
+  border: 1px solid var(--brand-dark);
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.refconfig__body {
+  margin-top: 1rem;
+}
+
+.refconfig__result .banner--warn {
+  margin: 0 0 0.75rem;
+}
+
+.copy-btn {
+  font: inherit;
+  cursor: pointer;
+  font-size: 0.85rem;
+  padding: 0.3rem 0.8rem;
+  border: 1px solid currentColor;
+  border-radius: var(--radius);
+  background: transparent;
+  color: inherit;
+}
+
+.refconfig__code {
+  margin: 0;
+  padding: 1rem;
+  overflow-x: auto;
+  background: #1c2415; /* dark olive — code-on-dark, light tokens below are AA */
+  color: #e8efda;
+  border-radius: var(--radius);
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 0.85rem;
+  line-height: 1.5;
+}
+
+/* HCL token colours — light tokens on #1c2415 (all ≥ 4.5:1). */
+.hcl-comment {
+  color: #9bb07f;
+  font-style: italic;
+}
+.hcl-string {
+  color: #d8e89a;
+}
+.hcl-number {
+  color: #e6b673;
+}
+.hcl-keyword {
+  color: #9ed0ff;
+  font-weight: 600;
+}
+.hcl-attr {
+  color: #c6f08a;
+}
+.hcl-interp {
+  color: #ffd479;
 }
 
 /* ---- diagram ---- */

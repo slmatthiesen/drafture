@@ -8,7 +8,7 @@ import {
   architectureJsonSchema,
   clarificationJsonSchema,
 } from "../schema/architecture.js";
-import type { ArchitectureResult, Clarification } from "../schema/architecture.js";
+import type { ArchitectureResult, Clarification, Tier } from "../schema/architecture.js";
 import { ProviderError } from "./provider.js";
 import type {
   GenerateOptions,
@@ -34,6 +34,21 @@ import type {
  * text block (see {@link extractStructuredOutput}).
  */
 const STREAMING_THRESHOLD = 16_000;
+
+/**
+ * Default output budget for a reference-config call. Deliberately small: the
+ * artifact is one focused, reference-only Terraform file for a single tier, and a
+ * tight ceiling keeps the on-demand generation cheap against the $5/day budget.
+ */
+const CONFIG_MAX_TOKENS = 2500;
+
+const CONFIG_SYSTEM = [
+  "You are an AWS architect writing REFERENCE-ONLY Terraform (HCL) for the following",
+  "tier of a design. Output ONLY valid HCL, no prose, no markdown fences. It is a",
+  "STARTING POINT a human must review and harden — not production-ready. Reflect the",
+  "tier's services, the security controls (encryption, least-priv, private subnets),",
+  "and any queue's DLQ. Keep it focused.",
+].join(" ");
 
 const CLARIFY_SYSTEM = [
   "You are the clarification gate for an AWS architecture design tool.",
@@ -125,6 +140,30 @@ export class ClaudeProvider implements LlmProvider {
     return this.structuredCall(params, ClarificationSchema);
   }
 
+  async generateConfig(
+    tier: Tier,
+    opts?: { maxTokens?: number },
+  ): Promise<ProviderResult<string>> {
+    const maxTokens = opts?.maxTokens ?? CONFIG_MAX_TOKENS;
+    // KTD11: cache_control sits ONLY on the static system prefix (identical every
+    // call); the per-tier content rides in the user turn with no cache_control so
+    // the per-request payload never poisons the cache key.
+    const params: Anthropic.MessageCreateParamsNonStreaming = {
+      model: this.settings.model,
+      max_tokens: maxTokens,
+      system: [
+        {
+          type: "text",
+          text: CONFIG_SYSTEM,
+          cache_control: { type: "ephemeral" },
+        },
+      ],
+      messages: [{ role: "user", content: [{ type: "text", text: buildConfigInput(tier) }] }],
+    };
+
+    return this.textCall(params);
+  }
+
   async countTokens(text: string): Promise<number> {
     try {
       const res = await this.client.messages.countTokens({
@@ -196,6 +235,73 @@ export class ClaudeProvider implements LlmProvider {
     // constrained response into `parsed_output`.
     return this.client.messages.parse(params);
   }
+
+  /**
+   * Run a PLAIN-TEXT (non-structured) call and return the concatenated text plus
+   * usage. Unlike {@link structuredCall} there is no schema to validate against
+   * and so no retry loop — HCL is free-form by nature. API/transport errors are
+   * mapped to the typed ProviderError chain; a model refusal is non-retryable.
+   */
+  private async textCall(
+    params: Anthropic.MessageCreateParamsNonStreaming,
+  ): Promise<ProviderResult<string>> {
+    let message: Anthropic.Message;
+    try {
+      // Large outputs stream to dodge the SDK HTTP timeout; the bounded config
+      // default stays well under the threshold and uses the simple create path.
+      message =
+        params.max_tokens >= STREAMING_THRESHOLD
+          ? await this.client.messages.stream(params).finalMessage()
+          : await this.client.messages.create(params);
+    } catch (err) {
+      throw mapError(err);
+    }
+
+    if (message.stop_reason === "refusal") {
+      throw new ProviderError("Model refused the request", false, message.stop_reason);
+    }
+
+    return { result: extractText(message), usage: mapUsage(message.usage) };
+  }
+}
+
+/**
+ * Serialize just the fields the model needs to write the config: the tier name +
+ * summary, each node's service/purpose/security controls, and the labeled edges
+ * (so any queue's DLQ and the data flow are reflected). Kept compact and stable.
+ */
+function buildConfigInput(tier: Tier): string {
+  const payload = {
+    name: tier.name,
+    summary: tier.summary,
+    nodes: tier.nodes.map((n) => ({
+      awsService: n.awsService,
+      purpose: n.purpose,
+      security: n.security,
+    })),
+    edges: tier.edges.map((e) => ({
+      from: e.from,
+      to: e.to,
+      payload: e.payload,
+      protocol: e.protocol,
+    })),
+  };
+  return JSON.stringify(payload, null, 2);
+}
+
+/**
+ * Concatenate the text blocks of a plain (non-structured) message. We defensively
+ * strip a stray ```hcl ... ``` fence in case the model wraps the output despite
+ * the system instruction, so callers always get raw HCL.
+ */
+function extractText(message: Anthropic.Message): string {
+  const text = message.content
+    .filter((block): block is Anthropic.TextBlock => block.type === "text")
+    .map((block) => block.text)
+    .join("")
+    .trim();
+  const fenced = /^```(?:hcl|terraform)?\s*\n([\s\S]*?)\n```$/.exec(text);
+  return fenced?.[1]?.trim() ?? text;
 }
 
 function buildClarifyInput(description: string, priorAnswers?: string[]): string {

@@ -12,7 +12,9 @@ import { graphToMermaid } from "../lib/mermaid.js";
 import { DiagramView } from "./DiagramView.js";
 import { SetupSteps } from "./SetupSteps.js";
 import { CostTable } from "./CostTable.js";
+import { CostSummary } from "./CostSummary.js";
 import { SecurityPanel } from "./SecurityPanel.js";
+import { ReferenceConfig } from "./ReferenceConfig.js";
 
 const TAB_LABELS: Record<TierName, string> = {
   budget: "Budget",
@@ -27,11 +29,18 @@ const TAB_SUBLABELS: Partial<Record<TierName, string>> = {
 export function TierTabs({
   tiers,
   assumptions,
+  recommendedTier,
 }: {
   tiers: Tier[];
   assumptions: string[];
+  recommendedTier?: TierName;
 }): JSX.Element {
-  const [selected, setSelected] = useState<TierName>(tiers[0]?.name ?? "budget");
+  // Lead with the architect's recommendation: preselect it when present.
+  const initial =
+    (recommendedTier && tiers.some((t) => t.name === recommendedTier) && recommendedTier) ||
+    tiers[0]?.name ||
+    "budget";
+  const [selected, setSelected] = useState<TierName>(initial);
   const tier = tiers.find((t) => t.name === selected) ?? tiers[0];
 
   if (!tier) return <p>No tiers to display.</p>;
@@ -48,8 +57,12 @@ export function TierTabs({
             onClick={() => setSelected(t.name)}
           >
             <span className="tiers__tab-name">{TAB_LABELS[t.name]}</span>
-            {TAB_SUBLABELS[t.name] && (
-              <span className="tiers__tab-sub">{TAB_SUBLABELS[t.name]}</span>
+            {t.name === recommendedTier ? (
+              <span className="tiers__tab-badge">Recommended</span>
+            ) : (
+              TAB_SUBLABELS[t.name] && (
+                <span className="tiers__tab-sub">{TAB_SUBLABELS[t.name]}</span>
+              )
             )}
           </button>
         ))}
@@ -64,6 +77,7 @@ export function TierTabs({
             )}
           </h2>
           <p className="tier__summary">{tier.summary}</p>
+          <CostSummary drivers={tier.costDrivers} />
           {tier.name === "budget" && (
             <p className="tier__safe-note">
               Lowest cost that still keeps the full security floor — never a security-relaxed option.
@@ -96,6 +110,8 @@ export function TierTabs({
             ))}
           </ul>
         </section>
+
+        <ReferenceConfig tier={tier} />
       </section>
     </div>
   );

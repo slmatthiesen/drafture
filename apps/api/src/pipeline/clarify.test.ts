@@ -19,6 +19,9 @@ function fakeProvider(clar: Clarification): { provider: LlmProvider; seen: { des
     async generate(_prompt: GroundedPrompt): Promise<ProviderResult<ArchitectureResult>> {
       throw new Error("generate not used in clarify tests");
     },
+    async generateConfig(): Promise<ProviderResult<string>> {
+      throw new Error("generateConfig not used in clarify tests");
+    },
     async countTokens(text: string): Promise<number> {
       return text.length;
     },

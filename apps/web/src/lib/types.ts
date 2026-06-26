@@ -52,10 +52,31 @@ export interface Tier {
   tradeoffs: string[];
 }
 
+/**
+ * A staff-level architecture decision (ADR-style): the call that was made, what
+ * was chosen, the alternatives weighed, and why. Surfaced in the KeyDecisions card.
+ */
+export interface KeyDecision {
+  decision: string;
+  chosen: string;
+  alternativesConsidered: string[];
+  rationale: string;
+}
+
 /** 200 response from `/api/generate` when a full design is produced. */
 export interface GenerateResponse {
   tiers: Tier[];
   assumptions: string[];
+  /** The tier the architect leads with — auto-selected and badged in the UI. */
+  recommendedTier: TierName;
+  recommendationRationale: string;
+  keyDecisions: KeyDecision[];
+}
+
+/** 200 response from `/api/config` — an on-demand reference Terraform config. */
+export interface ConfigResponse {
+  format: string;
+  code: string;
 }
 
 /** 200 response from `/api/generate` when the model needs more information (R2). */
