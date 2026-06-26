@@ -25,7 +25,10 @@ export type PropertyName =
   | "everyTierCoversAllBaselines"
   | "allEdgesPayloadLabeled"
   | "onDemandDisclaimerPresent"
-  | "noBannedServices";
+  | "noBannedServices"
+  | "recommendsATier"
+  | "hasKeyDecisions"
+  | "queuesAreResilient";
 
 export interface PropertyResult {
   name: PropertyName;
@@ -191,6 +194,92 @@ export const noBannedServices: Property = (result) => {
   };
 };
 
+// --- Opinionated recommendation (the design COMMITS to a tier) --------------
+
+/** The output must recommend a real tier for this workload and justify it. */
+export const recommendsATier: Property = (result) => {
+  const validTier = (TIER_NAMES as readonly string[]).includes(result.recommendedTier);
+  const justified = result.recommendationRationale.trim().length > 0;
+  const ok = validTier && justified;
+  return {
+    name: "recommendsATier",
+    ok,
+    reason: ok
+      ? `recommends '${result.recommendedTier}' with a rationale`
+      : !validTier
+        ? `recommendedTier '${result.recommendedTier}' is not one of [${TIER_NAMES.join(",")}]`
+        : "recommendationRationale is empty",
+  };
+};
+
+// --- ADR-style key decisions (alternatives weighed + why) -------------------
+
+/** Load-bearing decisions must be present and each must actually reason. */
+export const hasKeyDecisions: Property = (result) => {
+  if (result.keyDecisions.length === 0) {
+    return { name: "hasKeyDecisions", ok: false, reason: "keyDecisions is empty — no load-bearing decisions surfaced" };
+  }
+  const weak: string[] = [];
+  result.keyDecisions.forEach((d, i) => {
+    if (d.chosen.trim().length === 0) weak.push(`decision[${i}] missing 'chosen'`);
+    if (d.rationale.trim().length === 0) weak.push(`decision[${i}] missing 'rationale'`);
+    if (d.alternativesConsidered.length === 0) weak.push(`decision[${i}] no alternativesConsidered`);
+  });
+  return {
+    name: "hasKeyDecisions",
+    ok: weak.length === 0,
+    reason: weak.length === 0 ? `${result.keyDecisions.length} key decisions with chosen+rationale+alternatives` : weak.join(", "),
+  };
+};
+
+// --- Resilient queues (at-least-once → idempotency + DLQ) -------------------
+//
+// A queue/topic implies at-least-once delivery, so the senior-architect floor is:
+// the tier that introduces it MUST evidence a dead-letter path AND idempotent
+// consumption. We detect a queue by service/purpose keyword, then require both
+// signals somewhere in that tier's combined reasoning surface. Tiers with no
+// queue pass trivially.
+
+const QUEUE_KEYWORDS = ["sqs", "queue", "sns", "eventbridge", "kinesis", "message"] as const;
+const DLQ_KEYWORDS = ["dead-letter", "dead letter", "dlq"] as const;
+const IDEMPOTENCY_KEYWORDS = ["idempotent", "idempotency", "dedupe", "deduplicat"] as const;
+
+function tierHasQueue(tier: Tier): boolean {
+  return tier.nodes.some((n) => {
+    const surface = `${n.awsService} ${n.purpose}`.toLowerCase();
+    return QUEUE_KEYWORDS.some((kw) => surface.includes(kw));
+  });
+}
+
+/** The combined free-text reasoning a tier can evidence resilience in. */
+function tierResilienceSurface(tier: Tier): string {
+  return [
+    ...tier.securityNotes,
+    ...tier.burstHandling,
+    ...tier.setupSteps,
+    ...tier.tradeoffs,
+  ]
+    .join(" ")
+    .toLowerCase();
+}
+
+export const queuesAreResilient: Property = (result) => {
+  const offenders: string[] = [];
+  for (const tier of result.tiers) {
+    if (!tierHasQueue(tier)) continue; // no queue → trivially resilient
+    const surface = tierResilienceSurface(tier);
+    const hasDlq = DLQ_KEYWORDS.some((kw) => surface.includes(kw));
+    const hasIdempotency = IDEMPOTENCY_KEYWORDS.some((kw) => surface.includes(kw));
+    if (!hasDlq) offenders.push(`${tier.name}: queue without a dead-letter/DLQ mention`);
+    if (!hasIdempotency) offenders.push(`${tier.name}: queue without idempotency/dedupe mention`);
+  }
+  return {
+    name: "queuesAreResilient",
+    ok: offenders.length === 0,
+    reason: offenders.length === 0 ? "every queue-bearing tier covers DLQ + idempotency" : offenders.join("; "),
+  };
+};
+
 /** R3 — exactly budget/balanced/resilient, no more, no fewer. */
 export const exactlyThreeTiers: Property = (result) => {
   const names = result.tiers.map((t) => t.name);
@@ -210,6 +299,9 @@ export const ALL_PROPERTIES: readonly Property[] = [
   allEdgesPayloadLabeled,
   onDemandDisclaimerPresent,
   noBannedServices,
+  recommendsATier,
+  hasKeyDecisions,
+  queuesAreResilient,
 ];
 
 export interface AggregateResult {

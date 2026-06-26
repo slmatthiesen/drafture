@@ -48,7 +48,21 @@ function makeTier(name: TierName): ArchitectureResult["tiers"][number] {
 }
 
 function validArchitecture(): ArchitectureResult {
-  return { assumptions: ["single region us-east-1"], clarificationsUsed: [], tiers: TIER_NAMES.map(makeTier) };
+  return {
+    assumptions: ["single region us-east-1"],
+    clarificationsUsed: [],
+    tiers: TIER_NAMES.map(makeTier),
+    recommendedTier: "balanced",
+    recommendationRationale: "Balanced fits moderate, bursty traffic with multi-AZ availability.",
+    keyDecisions: [
+      {
+        decision: "Compute model",
+        chosen: "Lambda behind API Gateway",
+        alternativesConsidered: ["Fargate"],
+        rationale: "Serverless scales to zero and removes capacity management.",
+      },
+    ],
+  };
 }
 
 // --- Fake provider (no network) ---------------------------------------------

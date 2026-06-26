@@ -45,10 +45,27 @@ function tier(name: Tier["name"], nodes: ArchitectureNode[], securityNotes: stri
 
 // A container tier whose data tier (RDS) sits in a private subnet → NAT/egress
 // cost is forced (R6/R7 #5). A serverless tier with no private subnet → no NAT.
+const RECOMMENDATION: Pick<
+  ArchitectureResult,
+  "recommendedTier" | "recommendationRationale" | "keyDecisions"
+> = {
+  recommendedTier: "balanced",
+  recommendationRationale: "Balanced fits the assumed ~1M req/mo with multi-AZ availability.",
+  keyDecisions: [
+    {
+      decision: "Compute model",
+      chosen: "Fargate behind an ALB",
+      alternativesConsidered: ["Lambda", "EC2 ASG"],
+      rationale: "Long-running, steady CPU work suits containers over per-request billing.",
+    },
+  ],
+};
+
 function result(): ArchitectureResult {
   return {
     assumptions: ["assumes ~1M requests/month"],
     clarificationsUsed: [],
+    ...RECOMMENDATION,
     tiers: [
       tier(
         "balanced",
@@ -127,6 +144,7 @@ describe("estimateCosts", () => {
     const serverless: ArchitectureResult = {
       assumptions: [],
       clarificationsUsed: [],
+      ...RECOMMENDATION,
       tiers: [
         tier("budget", [node("Lambda"), node("DynamoDB")], ["No public data stores; no NAT required."]),
       ],

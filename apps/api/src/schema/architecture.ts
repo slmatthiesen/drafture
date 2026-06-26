@@ -68,11 +68,37 @@ export const TierSchema = z
   })
   .strict();
 
+/**
+ * An ADR-style record of a load-bearing architectural decision: not just WHAT was
+ * chosen, but the alternatives weighed and WHY this one wins (trade-offs through
+ * the Well-Architected pillars). This is the senior-architect signal — the output
+ * commits to a choice and shows the reasoning that makes it trustworthy.
+ */
+export const KeyDecisionSchema = z
+  .object({
+    decision: z.string().describe("The architectural question being decided, e.g. 'Compute model for the API tier'."),
+    chosen: z.string().describe("The option committed to, e.g. 'Lambda behind API Gateway'."),
+    alternativesConsidered: z
+      .array(z.string())
+      .describe("The viable alternatives weighed and rejected, e.g. ['Fargate', 'EC2 ASG']."),
+    rationale: z.string().describe("Why the chosen option wins — the trade-off framed through the WAF pillars."),
+  })
+  .strict();
+
 export const ArchitectureResultSchema = z
   .object({
     assumptions: z.array(z.string()),
     clarificationsUsed: z.array(z.string()),
     tiers: z.array(TierSchema).length(3).describe("Exactly three tiers: budget, balanced, resilient."),
+    recommendedTier: z
+      .enum(TIER_NAMES)
+      .describe("The single tier to actually ship for THIS workload — the opinionated recommendation."),
+    recommendationRationale: z
+      .string()
+      .describe("1–2 sentences justifying why that tier fits this specific problem (traffic, availability, compliance)."),
+    keyDecisions: z
+      .array(KeyDecisionSchema)
+      .describe("The handful of load-bearing decisions: chosen vs alternatives + why, framed through the WAF pillars."),
   })
   .strict();
 
@@ -80,6 +106,7 @@ export type ArchitectureNode = z.infer<typeof NodeSchema>;
 export type ArchitectureEdge = z.infer<typeof EdgeSchema>;
 export type CostDriver = z.infer<typeof CostDriverSchema>;
 export type Tier = z.infer<typeof TierSchema>;
+export type KeyDecision = z.infer<typeof KeyDecisionSchema>;
 export type ArchitectureResult = z.infer<typeof ArchitectureResultSchema>;
 
 /** Clarification gate result (R2). */

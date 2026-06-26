@@ -13,6 +13,9 @@ import {
   onDemandDisclaimerPresent,
   noBannedServices,
   exactlyThreeTiers,
+  recommendsATier,
+  hasKeyDecisions,
+  queuesAreResilient,
 } from "./properties.js";
 
 const PASS_RATE_FLOOR = 0.9;
@@ -33,16 +36,19 @@ describe("property checkers on the known-good result", () => {
       allEdgesPayloadLabeled,
       onDemandDisclaimerPresent,
       noBannedServices,
+      recommendsATier,
+      hasKeyDecisions,
+      queuesAreResilient,
     ]) {
       const r = property(good);
       expect(r.ok, `${r.name}: ${r.reason}`).toBe(true);
     }
   });
 
-  it("the aggregator reports ok with all five properties green", () => {
+  it("the aggregator reports ok with all eight properties green", () => {
     const agg = runAllProperties(good);
     expect(agg.ok).toBe(true);
-    expect(agg.results).toHaveLength(5);
+    expect(agg.results).toHaveLength(8);
     expect(agg.results.every((r) => r.ok)).toBe(true);
   });
 });
@@ -55,6 +61,14 @@ describe("property checkers detect the known-bad regression", () => {
     expect(r.ok).toBe(false);
     // The budget tier specifically lost the audit/access-logging baseline.
     expect(r.reason).toContain("budget:audit-and-access-logging");
+  });
+
+  it("queuesAreResilient flips to FAIL when a queue-bearing tier drops DLQ + idempotency", () => {
+    const r = queuesAreResilient(bad);
+    expect(r.ok).toBe(false);
+    // Each tier keeps its SQS node but lost the dead-letter + idempotency reasoning.
+    expect(r.reason).toMatch(/dead-letter|DLQ/i);
+    expect(r.reason).toMatch(/idempotenc|dedupe/i);
   });
 
   it("the aggregate is not ok for the bad result", () => {

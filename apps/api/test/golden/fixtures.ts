@@ -30,6 +30,12 @@ const USAGE: Usage = { inputTokens: 1500, outputTokens: 1200, cacheReadTokens: 4
 interface TierOptions {
   /** When false, the audit/access-logging baseline is omitted (regression). */
   includeAuditLogging?: boolean;
+  /**
+   * When false, the queue node stays but its DLQ + idempotency reasoning is
+   * dropped — a regression `queuesAreResilient` must catch (at-least-once
+   * delivery without idempotent consumers / a DLQ is a poison-message footgun).
+   */
+  includeQueueResilience?: boolean;
 }
 
 /**
@@ -95,6 +101,20 @@ function makeTier(name: TierName, opts: TierOptions = {}): Tier {
         security: ["S3 Block Public Access", "SSE-KMS at rest", "TLS-only bucket policy"],
         scaling: { burst: "S3 scales automatically", trivialInCore: true },
       },
+      {
+        id: "queue",
+        awsService: "SQS",
+        purpose: "Decouples upload processing from the request path; buffers bursty async work",
+        security: ["SSE-KMS at rest", "TLS in transit", "least-privilege IAM role"],
+        scaling: { burst: "SQS absorbs producer spikes; consumer scales independently", trivialInCore: false },
+      },
+      {
+        id: "worker",
+        awsService: "Lambda",
+        purpose: "Idempotent consumer that processes queued upload jobs",
+        security: ["least-privilege IAM execution role", "no long-lived keys"],
+        scaling: { burst: "reserved concurrency bounds blast radius on the worker", trivialInCore: true },
+      },
     ],
     edges: [
       { from: "client", to: "cdn", payload: "HTTPS page and API request", protocol: "HTTPS" },
@@ -102,12 +122,20 @@ function makeTier(name: TierName, opts: TierOptions = {}): Tier {
       { from: "api", to: "fn", payload: "Invocation event (JSON)", protocol: "AWS SDK" },
       { from: "fn", to: "db", payload: "Item read/write", protocol: "HTTPS" },
       { from: "fn", to: "assets", payload: "Object get/put", protocol: "HTTPS" },
+      { from: "fn", to: "queue", payload: "Upload-processing job message", protocol: "SQS" },
+      { from: "queue", to: "worker", payload: "Job message (at-least-once delivery)", protocol: "SQS" },
     ],
     setupSteps: [
       "Create the DynamoDB table with encryption and on-demand capacity.",
       "Deploy the Lambda function with a scoped execution role.",
       "Create the API Gateway REST API with throttling and TLS.",
       "Put CloudFront + WAF in front and enable logging.",
+      ...(opts.includeQueueResilience !== false
+        ? [
+            "Create the SQS queue with a redrive policy to a dead-letter queue (maxReceiveCount=5) for poison messages, and alarm on DLQ depth.",
+            "Make the worker idempotent: dedupe on a message idempotency key with a DynamoDB conditional write so at-least-once redelivery is safe; retries use exponential backoff with jitter and per-call timeouts.",
+          ]
+        : ["Create the SQS queue and wire the worker to consume from it."]),
     ],
     costDrivers: [
       { service: "API Gateway", unit: "per 1k requests", estimateRange: "$0.0035–$0.01", note: "" },
@@ -149,18 +177,50 @@ export function goodArchitecture(): ArchitectureResult {
     ],
     clarificationsUsed: [],
     tiers: TIER_NAMES.map((name) => makeTier(name)),
+    recommendedTier: "balanced",
+    recommendationRationale:
+      "Balanced ships multi-AZ availability for the stated moderate-but-bursty traffic without the cross-region cost of resilient; it scales to the next order of magnitude by configuration.",
+    keyDecisions: [
+      {
+        decision: "Compute model for the API tier",
+        chosen: "Lambda behind API Gateway",
+        alternativesConsidered: ["Fargate service", "EC2 Auto Scaling group"],
+        rationale:
+          "Serverless removes capacity management and scales to zero (cost optimization + operational excellence); the bursty, request/response shape doesn't justify always-on containers.",
+      },
+      {
+        decision: "Decoupling upload processing from the request path",
+        chosen: "SQS queue with an idempotent Lambda consumer and a DLQ",
+        alternativesConsidered: ["Synchronous in-request processing", "Kinesis stream"],
+        rationale:
+          "Queue-based load leveling protects the request path and limited downstream capacity under bursts (reliability + performance efficiency); ordering isn't required so SQS beats Kinesis.",
+      },
+      {
+        decision: "Primary datastore",
+        chosen: "DynamoDB on-demand",
+        alternativesConsidered: ["RDS (Postgres)", "Aurora Serverless v2"],
+        rationale:
+          "On-demand absorbs short spikes with no capacity planning and no NAT cost (cost optimization + reliability); the access pattern is key-value, not relational.",
+      },
+    ],
   };
 }
 
 /**
- * A known-BAD result: the budget tier drops the audit/access-logging baseline.
- * `everyTierCoversAllBaselines` must flip to fail (and the aggregate pass-rate
- * must drop), proving the regression detector works.
+ * A known-BAD result with TWO realistic regressions the gate must catch:
+ *   1. the budget tier drops the audit/access-logging baseline
+ *      (`everyTierCoversAllBaselines` flips to fail), and
+ *   2. every tier keeps its SQS node but drops the DLQ + idempotency reasoning
+ *      (`queuesAreResilient` flips to fail) — at-least-once delivery with no
+ *      idempotent consumer / DLQ is the classic poison-message footgun.
+ * Either alone collapses the aggregate; together they prove the new gate fires.
  */
 export function badArchitecture(): ArchitectureResult {
   return {
     ...goodArchitecture(),
-    tiers: TIER_NAMES.map((name) => makeTier(name, { includeAuditLogging: name !== "budget" })),
+    tiers: TIER_NAMES.map((name) =>
+      makeTier(name, { includeAuditLogging: name !== "budget", includeQueueResilience: false }),
+    ),
   };
 }
 

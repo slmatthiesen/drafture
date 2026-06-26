@@ -106,6 +106,16 @@ function validArchitecture(): ArchitectureResult {
     assumptions: ["single region"],
     clarificationsUsed: [],
     tiers: [makeTier("budget"), makeTier("balanced"), makeTier("resilient")],
+    recommendedTier: "balanced",
+    recommendationRationale: "Balanced fits moderate, bursty traffic with multi-AZ availability.",
+    keyDecisions: [
+      {
+        decision: "Compute model",
+        chosen: "Lambda behind API Gateway",
+        alternativesConsidered: ["Fargate"],
+        rationale: "Serverless scales to zero and removes capacity management.",
+      },
+    ],
   };
 }
 

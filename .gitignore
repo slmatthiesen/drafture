@@ -7,6 +7,17 @@ dist/
 build/
 *.tsbuildinfo
 
+# Stray compiled output emitted next to TS sources by a bare `tsc` run.
+# Under ESM `.js` import specifiers these shadow the real `.ts` (vitest/node load
+# the stale `.js`), so they must never be tracked. Real source here is .ts/.tsx.
+apps/api/src/**/*.js
+apps/api/src/**/*.d.ts
+apps/api/src/**/*.js.map
+apps/api/test/**/*.js
+apps/api/test/**/*.d.ts
+apps/api/jobs/**/*.js
+apps/api/scripts/**/*.js
+
 # Local databases (never commit runtime data)
 *.db
 *.db-shm
