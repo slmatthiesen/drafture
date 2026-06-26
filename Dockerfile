@@ -32,6 +32,9 @@ RUN apt-get purge -y g++ make python3 && apt-get autoremove -y
 COPY --from=build /app/apps/api/dist apps/api/dist
 COPY --from=build /app/apps/web/dist apps/web/dist
 COPY --from=build /app/packages/kb packages/kb
+# The API resolves WEB_DIST relative to its own dir (apps/api/dist) by default,
+# which would miss apps/web/dist; pin the absolute path so the SPA is served.
+ENV WEB_DIST=/app/apps/web/dist
 # SQLite data persists on a mounted volume (U12).
 VOLUME ["/app/data"]
 ENV DB_PATH=/app/data/stackdraft.db

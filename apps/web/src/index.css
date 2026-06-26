@@ -1,7 +1,29 @@
+/*
+ * Stackdraft base styles.
+ *
+ * WCAG AA CONTRAST (verified, sRGB relative luminance):
+ *   --brand  #80AB00  L ≈ 0.337   (operator-provided, provisional)
+ *   --ink    #14210A  L ≈ 0.0126  (near-black olive — primary text)
+ *   white    #FFFFFF  L = 1.0
+ *   --muted  #44503A  L ≈ 0.073   (secondary text on white)
+ *
+ * Ratios used (must be ≥ 4.5:1 for AA normal text):
+ *   - Header/goal text  #14210A on --brand #80AB00 → 6.2:1  ✅ AA
+ *   - Body text         #14210A on white cards      → 16.8:1 ✅ AAA
+ *   - Muted text        #44503A on white cards      → 8.6:1  ✅ AA
+ * Decision: dark olive ink on the saturated green for the header/goal, and
+ * WHITE CARDS (dark ink) for all content panels — green is too light a
+ * background to host body-size text at AAA, so content lives on white.
+ */
+
 :root {
-  /* Provisional brand color (operator-provided "to start"). U10 confirms
-     WCAG AA contrast before locking the palette. */
   --brand: #80ab00;
+  --brand-dark: #5f7f00;
+  --ink: #14210a;
+  --muted: #44503a;
+  --card: #ffffff;
+  --card-border: #d7e0c2;
+  --radius: 12px;
   color-scheme: light;
 }
 
@@ -13,11 +35,258 @@ body {
   margin: 0;
   font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   background: var(--brand);
-  color: #14210a;
+  color: var(--ink);
+  line-height: 1.5;
 }
 
-main {
-  max-width: 880px;
+.app {
+  max-width: 920px;
   margin: 0 auto;
-  padding: 2rem 1rem;
+  padding: 2rem 1rem 4rem;
+}
+
+/* ---- header / prompt-to-goal animation ---- */
+
+.app__header {
+  text-align: center;
+  /* The transition that carries the prompt "up" into the header on submit. */
+  transition: padding 0.4s ease, transform 0.4s ease;
+  padding: 4rem 0 2rem;
+}
+
+.app--submitted .app__header {
+  padding: 1rem 0 1.25rem;
+  text-align: left;
+}
+
+.app__brand {
+  display: block;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: var(--ink);
+  font-size: 1rem;
+  text-transform: uppercase;
+}
+
+.app__tagline {
+  color: var(--ink);
+  font-size: 1.25rem;
+  margin: 0.5rem 0 0;
+}
+
+.app__goal {
+  color: var(--ink);
+  font-size: 1.6rem;
+  margin: 0.25rem 0 0;
+  font-weight: 700;
+  /* slide-in as the prompt becomes the page goal */
+  animation: goal-rise 0.4s ease both;
+}
+
+@keyframes goal-rise {
+  from {
+    opacity: 0;
+    transform: translateY(0.75rem);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* ---- prompt form ---- */
+
+.prompt {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  max-width: 640px;
+  margin: 0 auto;
+}
+
+.prompt__input,
+.clarify__field input {
+  width: 100%;
+  padding: 0.75rem;
+  border-radius: var(--radius);
+  border: 1px solid var(--brand-dark);
+  font: inherit;
+  resize: vertical;
+}
+
+.prompt__submit,
+.clarify button,
+.banner button,
+.tiers__tab {
+  font: inherit;
+  cursor: pointer;
+}
+
+.prompt__submit,
+.clarify button {
+  align-self: flex-start;
+  padding: 0.6rem 1.4rem;
+  border: none;
+  border-radius: var(--radius);
+  background: var(--ink);
+  color: #fff; /* white on #14210A → 16.8:1 ✅ */
+  font-weight: 600;
+}
+
+.prompt__submit:disabled,
+.clarify button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+/* ---- status + banners ---- */
+
+.status {
+  text-align: center;
+  font-size: 1.1rem;
+  color: var(--ink);
+  margin: 2rem 0;
+}
+
+.banner {
+  border-radius: var(--radius);
+  padding: 1rem 1.25rem;
+  margin: 1.5rem 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.banner--error {
+  background: #fff4f4;
+  border: 1px solid #d98c8c;
+  color: #5a1414; /* dark red on near-white → AA */
+}
+
+.banner button {
+  border: 1px solid currentColor;
+  background: transparent;
+  color: inherit;
+  border-radius: var(--radius);
+  padding: 0.4rem 1rem;
+}
+
+/* ---- cards (white content panels) ---- */
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--card-border);
+  border-radius: var(--radius);
+  padding: 1.25rem 1.5rem;
+  margin: 1rem 0;
+  color: var(--ink);
+}
+
+.card h2,
+.card h3 {
+  margin-top: 0;
+}
+
+.clarify__hint,
+.tier__summary,
+.cost__note,
+.diagram__note {
+  color: var(--muted);
+}
+
+.clarify__field {
+  display: block;
+  margin: 0.75rem 0;
+}
+
+.clarify__field span {
+  display: block;
+  margin-bottom: 0.35rem;
+  font-weight: 600;
+}
+
+/* ---- tiers ---- */
+
+.tiers__tablist {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin: 1.5rem 0 0.5rem;
+}
+
+.tiers__tab {
+  background: rgba(255, 255, 255, 0.85);
+  border: 1px solid var(--card-border);
+  border-radius: var(--radius);
+  padding: 0.5rem 1rem;
+  color: var(--ink);
+  display: flex;
+  flex-direction: column;
+  line-height: 1.2;
+}
+
+.tiers__tab--active {
+  background: var(--ink);
+  color: #fff;
+  border-color: var(--ink);
+}
+
+.tiers__tab-name {
+  font-weight: 700;
+}
+
+.tiers__tab-sub {
+  font-size: 0.75rem;
+  opacity: 0.85;
+}
+
+.tier__tag,
+.tier__safe-note {
+  color: var(--brand-dark);
+}
+
+.tier__safe-note {
+  font-weight: 600;
+}
+
+/* ---- cost table ---- */
+
+.cost__table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.cost__table th,
+.cost__table td {
+  text-align: left;
+  padding: 0.5rem 0.6rem;
+  border-bottom: 1px solid var(--card-border);
+  vertical-align: top;
+}
+
+.cost__unit,
+.cost__range {
+  white-space: nowrap;
+}
+
+.cost__assumptions {
+  margin-top: 0.75rem;
+  color: var(--muted);
+}
+
+/* ---- diagram ---- */
+
+.diagram {
+  background: var(--card);
+  border: 1px solid var(--card-border);
+  border-radius: var(--radius);
+  padding: 1rem;
+  margin: 1rem 0;
+  overflow-x: auto;
+}
+
+.diagram--fallback pre {
+  white-space: pre-wrap;
+  font-size: 0.85rem;
 }
