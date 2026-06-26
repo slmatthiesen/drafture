@@ -40,6 +40,10 @@ BURST HANDLING: when absorbing burst is a trivial add, build it into the core an
 
 NAT / EGRESS COST: when a tier places data stores in private subnets (security baseline 'no-public-data-tier'), call out the recurring NAT-gateway processing cost plus internet egress in that tier's securityNotes and burstHandling. The secure private-subnet default is NOT free and must never be presented as if it were.
 
+OBSERVABILITY & LOGGING (automate it; never an afterthought): treat operational observability as first-class infrastructure in EVERY tier. Include centralized structured application logging (CloudWatch Logs with an explicit retention period), metrics with CloudWatch alarms on the golden signals (latency, error rate, saturation/throttles), and distributed tracing (AWS X-Ray / OpenTelemetry) wherever a request crosses a service boundary. AUTOMATE collection and alerting — native log/metric integration or the CloudWatch agent, metric filters that drive alarms, and log subscriptions/forwarding — not dashboards bolted on after the fact. Scale by robustness tier: budget = managed CloudWatch Logs + a few high-value alarms; balanced = + dashboards, structured log forwarding, tracing on critical paths; resilient = + centralized/multi-account log aggregation, anomaly detection, SLO-based alarms, and log-derived metrics. Represent the telemetry flow in the graph (service → CloudWatch Logs/metrics → alarm/dashboard) with payload-labeled edges and put the concrete wiring in setupSteps. This is OPERATIONAL observability — distinct from and additional to the CloudTrail/access-logging SECURITY baseline (which is for audit).
+
+ASYNC MESSAGING & QUEUES (decouple by default when work can be deferred): actively reach for message queues and event-driven decoupling instead of defaulting to synchronous request/response. Use SQS to decouple producers from consumers and absorb spiky load (ALWAYS pair a queue with a dead-letter queue for poison messages, and state the visibility-timeout/retry semantics); SNS or EventBridge for fan-out and event routing; and queue-based load leveling to protect limited downstream capacity. Recommend a queue/topic whenever the workload has bursty or long-running/retryable work, fan-out to multiple consumers, or cross-service events — and explain WHY in the tier summary. Model the queue/topic as an explicit node with payload-labeled edges (producer → queue → consumer), include the DLQ, and note the trade-off (eventual consistency + added operational surface) in tradeoffs. Scale by tier: budget = a single SQS queue + DLQ where async clearly helps; balanced = SQS/SNS decoupling with DLQs and retries; resilient = an EventBridge event bus, FIFO queues where ordering matters, and multi-consumer fan-out.
+
 EDGES: label every edge with the payload moving across it and its protocol — no unlabeled connections.
 
 OUTPUT: assumptions, clarificationsUsed, and exactly three tiers; each tier has nodes, payload-labeled edges, ordered plain-language setupSteps, costDrivers in each service's native cost unit, burstHandling notes, NON-EMPTY securityNotes, and tradeoffs versus the other two tiers.`;
@@ -72,32 +76,152 @@ const STATIC_PREFIX = `${SYSTEM_PROMPT}\n\n${renderSecurityBaselines()}`;
 // "uploads", "async"→"asynchronously") without matching mid-word noise.
 
 const PATTERN_KEYWORDS: Record<string, readonly string[]> = {
-  "serverless-api": ["serverless", "lambda", "rest api", "rest", "api gateway", "json api"],
-  "container-api": ["container", "docker", "fargate", "ecs", "kubernetes", "long-running", "long running", "steady", "cpu-bound", "cpu bound"],
-  "queue-based-async": ["queue", "async", "background", "etl", "webhook", "upload", "notification", "decouple"],
-  "static-site-api": ["static site", "static", "single-page", "spa", "website", "landing page", "blog", "marketing site"],
+  "serverless-api": [
+    "serverless",
+    "lambda",
+    "rest api",
+    "rest",
+    "api gateway",
+    "json api",
+  ],
+  "container-api": [
+    "container",
+    "docker",
+    "fargate",
+    "ecs",
+    "kubernetes",
+    "long-running",
+    "long running",
+    "steady",
+    "cpu-bound",
+    "cpu bound",
+  ],
+  "queue-based-async": [
+    "queue",
+    "async",
+    "background",
+    "etl",
+    "webhook",
+    "upload",
+    "notification",
+    "decouple",
+    "message",
+    "messaging",
+    "sqs",
+    "sns",
+    "eventbridge",
+    "event-driven",
+    "event driven",
+    "pub/sub",
+    "pub sub",
+    "fan-out",
+    "fan out",
+    "stream",
+    "kinesis",
+    "kafka",
+  ],
+  "static-site-api": [
+    "static site",
+    "static",
+    "single-page",
+    "spa",
+    "website",
+    "landing page",
+    "blog",
+    "marketing site",
+  ],
 };
 
 const TOPIC_KEYWORDS: Record<string, readonly string[]> = {
-  "file-uploads": ["upload", "image", "photo", "video", "media", "attachment", "file storage"],
-  "async-processing": ["queue", "async", "background", "worker", "etl", "batch"],
-  authentication: ["auth", "login", "sign in", "sign-in", "signup", "sign up", "user account", "accounts"],
+  "file-uploads": [
+    "upload",
+    "image",
+    "photo",
+    "video",
+    "media",
+    "attachment",
+    "file storage",
+  ],
+  "async-processing": [
+    "queue",
+    "async",
+    "background",
+    "worker",
+    "etl",
+    "batch",
+  ],
+  messaging: [
+    "message",
+    "messaging",
+    "message queue",
+    "sqs",
+    "sns",
+    "eventbridge",
+    "pub/sub",
+    "pub sub",
+    "event-driven",
+    "event driven",
+    "fan-out",
+    "fan out",
+    "kinesis",
+    "kafka",
+    "stream",
+  ],
+  observability: [
+    "logging",
+    "logs",
+    // NOTE: no bare "log" — start-of-word matching would make it hit "login".
+    "observability",
+    "monitoring",
+    "metrics",
+    "tracing",
+    "alerting",
+    "alarm",
+    "dashboard",
+    "telemetry",
+  ],
+  authentication: [
+    "auth",
+    "login",
+    "sign in",
+    "sign-in",
+    "signup",
+    "sign up",
+    "user account",
+    "accounts",
+  ],
   notifications: ["notification", "email", "sms", "push notification"],
   realtime: ["realtime", "real-time", "websocket", "live update"],
   payments: ["payment", "billing", "checkout", "stripe", "subscription"],
   search: ["full-text search", "search", "elasticsearch", "opensearch"],
-  "high-throughput": ["high throughput", "high-throughput", "high volume", "high traffic", "millions of", "very large", "massive scale"],
+  "high-throughput": [
+    "high throughput",
+    "high-throughput",
+    "high volume",
+    "high traffic",
+    "millions of",
+    "very large",
+    "massive scale",
+  ],
 };
 
 function escapeRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-function matchesAnyKeyword(haystack: string, keywords: readonly string[]): boolean {
-  return keywords.some((kw) => new RegExp(`\\b${escapeRegExp(kw)}`, "i").test(haystack));
+function matchesAnyKeyword(
+  haystack: string,
+  keywords: readonly string[],
+): boolean {
+  return keywords.some((kw) =>
+    new RegExp(`\\b${escapeRegExp(kw)}`, "i").test(haystack),
+  );
 }
 
-function detectFrom(haystack: string, vocab: Record<string, readonly string[]>): string[] {
+function detectFrom(
+  haystack: string,
+  vocab: Record<string, readonly string[]>,
+): string[] {
   return Object.keys(vocab).filter((key) => {
     const keywords = vocab[key];
     return keywords !== undefined && matchesAnyKeyword(haystack, keywords);
@@ -182,11 +306,16 @@ export function assembleGrounding(input: GroundingInput): GroundingResult {
   if (memorySection) sections.push(memorySection);
   sections.push(`## User request\n${input.description}`);
   if (answers.length > 0) {
-    sections.push(`## Clarification answers\n${answers.map((a) => `- ${a}`).join("\n")}`);
+    sections.push(
+      `## Clarification answers\n${answers.map((a) => `- ${a}`).join("\n")}`,
+    );
   }
 
   return {
-    prompt: { staticPrefix: STATIC_PREFIX, volatileSuffix: sections.join("\n\n") },
+    prompt: {
+      staticPrefix: STATIC_PREFIX,
+      volatileSuffix: sections.join("\n\n"),
+    },
     matchedPatterns,
     memoryHits,
     missingTopics,

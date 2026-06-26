@@ -119,7 +119,11 @@ describe("researchMissingTopics", () => {
   it("a subsequent identical request reads from memory and does NOT re-research (R9)", async () => {
     const memory = memoryStore();
     const client = fakeClient(() => goodResponse());
-    const description = "Users sign up and login to their accounts.";
+    // "sign in" (not "login") so the description maps to exactly the
+    // authentication topic: observability's "log" keyword matches inside "login",
+    // which would split this into two missing topics and defeat the single-topic
+    // no-re-research assertion below.
+    const description = "Users sign up and sign in to their accounts.";
 
     // Round 1: the auth topic is a miss → research + quarantine it.
     const first = assembleGrounding({ description, memory });

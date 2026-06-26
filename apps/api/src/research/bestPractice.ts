@@ -28,18 +28,18 @@ import type { Usage } from "../llm/provider.js";
 
 /**
  * web_search server-tool block. Per the claude-api skill the current variant for
- * Opus 4.8 / Sonnet 4.6 is `web_search_20260209` (dynamic filtering). The
- * installed SDK (@anthropic-ai/sdk@0.65.0) predates it and only types the basic
- * `web_search_20250305`, so we pass the tool block as a plain object through our
- * own loosely-typed client interface rather than the SDK's typed params. Isolated
- * here as a single constant so swapping the variant (or the SDK upgrade that types
- * it) is a one-line change.
+ * Opus 4.8 / Sonnet 4.6 is `web_search_20260209` (dynamic filtering); the
+ * installed SDK (@anthropic-ai/sdk@0.106.0) now types it as
+ * `Anthropic.WebSearchTool20260209`, so the constant is typed against the SDK for
+ * ground-truth correctness. Still isolated as a single constant so swapping the
+ * variant stays a one-line change, and still passed through our own loosely-typed
+ * ResearchClient seam (below) so a fake can drive it without the full SDK.
  */
-const WEB_SEARCH_TOOL = {
+const WEB_SEARCH_TOOL: Anthropic.WebSearchTool20260209 = {
   type: "web_search_20260209",
   name: "web_search",
   max_uses: 3,
-} as const;
+};
 
 /** Per-topic token ceiling — research answers are short normalized facts. */
 const RESEARCH_MAX_TOKENS = 1024;
@@ -272,8 +272,8 @@ export async function researchMissingTopics(options: ResearchOptions): Promise<R
 /**
  * Construct the real Anthropic client only when research actually runs (callers
  * that inject a client — e.g. tests — never reach this). Cast to our minimal
- * interface in one place so the typed-but-stale SDK surface stays swappable: the
- * installed 0.65.0 SDK does not type the `web_search_20260209` tool block we send.
+ * ResearchClient interface in one place so a fake can satisfy it without the full
+ * SDK and so the response shape can drift underneath us without touching callers.
  */
 function buildClient(config: ResearchConfig): ResearchClient {
   return new Anthropic({ apiKey: config.ANTHROPIC_API_KEY }) as unknown as ResearchClient;

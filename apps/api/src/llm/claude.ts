@@ -19,18 +19,19 @@ import type {
 } from "./provider.js";
 
 /**
- * Structured output is delivered via forced tool use: SDK 0.65.0 predates the
- * `output_config.format` / `messages.parse()` structured-output surface the
- * claude-api skill documents, so we register the architecture JSON Schema as a
- * tool and force the model to call it. The `tool_use.input` block is the typed
- * object, validated with the matching zod schema. (See final-report note.)
+ * Structured output is delivered natively: SDK 0.106 exposes
+ * `output_config.format` (a server-enforced JSON Schema) plus `messages.parse()`,
+ * which JSON-parses the constrained response into `parsed_output`. We pass the
+ * architecture / clarification JSON Schema directly and still re-validate the
+ * result with the matching zod schema before returning (defense in depth). This
+ * replaces the 0.65 forced-tool-use shim (registering the schema as a tool).
  */
-const ARCHITECTURE_TOOL = "emit_architecture";
-const CLARIFICATION_TOOL = "emit_clarification";
 
 /**
  * Above this `max_tokens` a non-streaming request risks the SDK's HTTP timeout
- * (claude-api skill), so we stream and collect the final message instead.
+ * (claude-api skill), so we stream and collect the final message instead. The
+ * streamed message isn't auto-parsed, so the structured output is read from its
+ * text block (see {@link extractStructuredOutput}).
  */
 const STREAMING_THRESHOLD = 16_000;
 
@@ -47,9 +48,8 @@ interface ClaudeSettings {
   model: string;
   maxTokens: number;
   /**
-   * Resolved generation effort. SDK 0.65.0 exposes no `output_config.effort`,
-   * so this is carried for forward-compatibility and config parity but is not
-   * sent on the wire yet (see final-report note).
+   * Resolved generation effort. SDK 0.106 supports `output_config.effort`
+   * (`low | medium | high`), so this is now sent on the wire.
    */
   effort: "low" | "medium" | "high";
 }
@@ -79,6 +79,7 @@ export class ClaudeProvider implements LlmProvider {
     opts?: GenerateOptions,
   ): Promise<ProviderResult<ArchitectureResult>> {
     const maxTokens = opts?.maxTokens ?? this.settings.maxTokens;
+    const effort = opts?.effort ?? this.settings.effort;
     // KTD11: the cache breakpoint sits ONLY on the static prefix (system prompt
     // + full security baselines). The volatile suffix follows in the user turn
     // with no cache_control, so the per-request content never poisons the key.
@@ -95,19 +96,15 @@ export class ClaudeProvider implements LlmProvider {
       messages: [
         { role: "user", content: [{ type: "text", text: prompt.volatileSuffix }] },
       ],
-      tools: [
-        {
-          name: ARCHITECTURE_TOOL,
-          description:
-            "Return the three-tier AWS architecture as a single structured object. " +
-            "Call this exactly once with the complete design.",
-          input_schema: toToolInputSchema(architectureJsonSchema()),
-        },
-      ],
-      tool_choice: { type: "tool", name: ARCHITECTURE_TOOL, disable_parallel_tool_use: true },
+      // Native structured output: the model is constrained to the architecture
+      // JSON Schema; `effort` tunes generation depth (both new in 0.106).
+      output_config: {
+        effort,
+        format: { type: "json_schema", schema: toOutputSchema(architectureJsonSchema()) },
+      },
     };
 
-    return this.structuredCall(params, ARCHITECTURE_TOOL, ArchitectureResultSchema);
+    return this.structuredCall(params, ArchitectureResultSchema);
   }
 
   async clarify(
@@ -119,18 +116,13 @@ export class ClaudeProvider implements LlmProvider {
       max_tokens: 1024,
       system: CLARIFY_SYSTEM,
       messages: [{ role: "user", content: buildClarifyInput(description, priorAnswers) }],
-      tools: [
-        {
-          name: CLARIFICATION_TOOL,
-          description:
-            "Report whether clarification is needed and, if so, the questions to ask (at most two).",
-          input_schema: toToolInputSchema(clarificationJsonSchema()),
-        },
-      ],
-      tool_choice: { type: "tool", name: CLARIFICATION_TOOL, disable_parallel_tool_use: true },
+      output_config: {
+        effort: this.settings.effort,
+        format: { type: "json_schema", schema: toOutputSchema(clarificationJsonSchema()) },
+      },
     };
 
-    return this.structuredCall(params, CLARIFICATION_TOOL, ClarificationSchema);
+    return this.structuredCall(params, ClarificationSchema);
   }
 
   async countTokens(text: string): Promise<number> {
@@ -146,28 +138,39 @@ export class ClaudeProvider implements LlmProvider {
   }
 
   /**
-   * Run a forced-tool-use call and validate the result. On a schema-validation
-   * failure we retry exactly once (a fresh model call); a second failure throws
-   * a non-retryable ProviderError. API/transport errors propagate immediately
-   * (mapped in `send`) and are never retried here.
+   * Run a native structured-output call and validate the result. The server
+   * already constrains the response to the JSON Schema, but we re-validate with
+   * the matching zod schema (defense in depth). On a parse/validation failure we
+   * retry exactly once (a fresh model call); a second failure throws a
+   * non-retryable ProviderError. API/transport errors propagate immediately
+   * (mapped in `mapError`) and are never retried here.
    */
   private async structuredCall<T>(
     params: Anthropic.MessageCreateParamsNonStreaming,
-    toolName: string,
     schema: z.ZodType<T>,
   ): Promise<ProviderResult<T>> {
     let lastError: unknown;
 
     for (let attempt = 0; attempt < 2; attempt++) {
-      const message = await this.send(params);
+      let message: Anthropic.Message;
+      try {
+        message = await this.callModel(params);
+      } catch (err) {
+        // API/transport failures are mapped and thrown immediately, never
+        // retried. A structured-output *parse* failure surfaced by
+        // `messages.parse()` is not an API error, so fall through to the retry.
+        if (isApiFailure(err)) throw mapError(err);
+        lastError = err;
+        continue;
+      }
 
       if (message.stop_reason === "refusal") {
         throw new ProviderError("Model refused the request", false, message.stop_reason);
       }
 
       try {
-        const input = extractToolInput(message, toolName);
-        const result = schema.parse(input);
+        const candidate = extractStructuredOutput(message);
+        const result = schema.parse(candidate);
         return { result, usage: mapUsage(message.usage) };
       } catch (err) {
         lastError = err;
@@ -181,17 +184,17 @@ export class ClaudeProvider implements LlmProvider {
     );
   }
 
-  private async send(
+  private async callModel(
     params: Anthropic.MessageCreateParamsNonStreaming,
   ): Promise<Anthropic.Message> {
-    try {
-      if (params.max_tokens >= STREAMING_THRESHOLD) {
-        return await this.client.messages.stream(params).finalMessage();
-      }
-      return await this.client.messages.create(params);
-    } catch (err) {
-      throw mapError(err);
+    if (params.max_tokens >= STREAMING_THRESHOLD) {
+      // Streamed messages aren't auto-parsed; extractStructuredOutput reads the
+      // JSON text block produced under output_config.format.
+      return this.client.messages.stream(params).finalMessage();
     }
+    // messages.parse() runs output_config.format server-side and JSON-parses the
+    // constrained response into `parsed_output`.
+    return this.client.messages.parse(params);
   }
 }
 
@@ -201,14 +204,19 @@ function buildClarifyInput(description: string, priorAnswers?: string[]): string
   return `${description}\n\nPrior answers:\n${answers}`;
 }
 
-/** Pull the forced tool's `input` payload out of the response content blocks. */
-function extractToolInput(message: Anthropic.Message, toolName: string): unknown {
+/**
+ * Pull the structured object out of a response. `messages.parse()` attaches the
+ * JSON-parsed object as `parsed_output`; the streaming path returns a plain
+ * message, so we JSON-parse the constrained text block ourselves. zod validation
+ * runs afterward in {@link ClaudeProvider.structuredCall} regardless.
+ */
+function extractStructuredOutput(message: Anthropic.Message): unknown {
+  const parsed = (message as { parsed_output?: unknown }).parsed_output;
+  if (parsed != null) return parsed;
   for (const block of message.content) {
-    if (block.type === "tool_use" && block.name === toolName) {
-      return block.input;
-    }
+    if (block.type === "text") return JSON.parse(block.text);
   }
-  throw new Error(`response contained no '${toolName}' tool_use block`);
+  throw new Error("response contained no structured-output text block");
 }
 
 /** Map the SDK usage onto the ledger-facing Usage shape (KTD7/KTD11). */
@@ -219,6 +227,16 @@ function mapUsage(usage: Anthropic.Usage): Usage {
     cacheReadTokens: usage.cache_read_input_tokens ?? 0,
     cacheWriteTokens: usage.cache_creation_input_tokens ?? 0,
   };
+}
+
+/** True for SDK API/transport errors (and already-mapped ProviderErrors) — never retried. */
+function isApiFailure(err: unknown): boolean {
+  return (
+    err instanceof ProviderError ||
+    err instanceof RateLimitError ||
+    err instanceof APIConnectionError ||
+    err instanceof APIError
+  );
 }
 
 /**
@@ -250,11 +268,11 @@ function describe(err: unknown): string {
 
 /**
  * `architectureJsonSchema()` / `clarificationJsonSchema()` emit a named schema
- * wrapped as `{ $ref, definitions }`. The Anthropic tool `input_schema` needs a
+ * wrapped as `{ $ref, definitions }`. `output_config.format.schema` wants a
  * top-level `{ type: "object", ... }`, so resolve the single named definition
  * (no nested $refs exist — the schemas are emitted with `$refStrategy: "none"`).
  */
-function toToolInputSchema(jsonSchema: Record<string, unknown>): Anthropic.Tool.InputSchema {
+function toOutputSchema(jsonSchema: Record<string, unknown>): Record<string, unknown> {
   const ref = jsonSchema["$ref"];
   const definitions = jsonSchema["definitions"];
   if (typeof ref === "string" && definitions && typeof definitions === "object") {
@@ -262,9 +280,9 @@ function toToolInputSchema(jsonSchema: Record<string, unknown>): Anthropic.Tool.
     if (name) {
       const inner = (definitions as Record<string, unknown>)[name];
       if (inner && typeof inner === "object") {
-        return inner as Anthropic.Tool.InputSchema;
+        return inner as Record<string, unknown>;
       }
     }
   }
-  return jsonSchema as unknown as Anthropic.Tool.InputSchema;
+  return jsonSchema;
 }
