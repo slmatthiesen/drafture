@@ -187,9 +187,17 @@ export function App(): JSX.Element {
             )}
           </section>
 
-          <SecurityPanel floor={result.securityFloor} />
+          {/* Diagram leads: the tier section (diagram first) sits right under the
+              recommendation so the design is visible immediately. */}
+          <TierTabs
+            tiers={result.tiers}
+            assumptions={result.assumptions}
+            recommendedTier={result.recommendedTier}
+          />
 
           <KeyDecisions decisions={result.keyDecisions} />
+
+          <SecurityPanel floor={result.securityFloor} />
 
           {result.assumptions.length > 0 && (
             <section className="card assumptions" aria-label="Assumptions">
@@ -201,11 +209,6 @@ export function App(): JSX.Element {
               </ul>
             </section>
           )}
-          <TierTabs
-            tiers={result.tiers}
-            assumptions={result.assumptions}
-            recommendedTier={result.recommendedTier}
-          />
         </>
       )}
     </main>
