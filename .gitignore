@@ -22,6 +22,9 @@ data/
 *.log
 logs/
 
+# Agent worktrees (if used)
+.claude/worktrees/
+
 # OS / editor
 .DS_Store
 Thumbs.db
