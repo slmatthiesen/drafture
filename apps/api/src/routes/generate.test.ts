@@ -157,6 +157,10 @@ describe("POST /api/generate", () => {
     // Staff-level signal is surfaced alongside the tiers.
     expect(body.recommendedTier).toBe("balanced");
     expect(typeof body.recommendationRationale).toBe("string");
+    // The global security floor must survive into the response (a cherry-picking
+    // response body dropped it after the schema added it).
+    expect(Array.isArray(body.securityFloor)).toBe(true);
+    expect(body.securityFloor.length).toBeGreaterThan(0);
     expect(body.keyDecisions[0].chosen).toBe("Lambda behind API Gateway");
     expect(body.assumptions.some((a: string) => /on-demand list prices/i.test(a))).toBe(true);
     // Cost drivers were filled deterministically (U7), not left as the canned stub only.
