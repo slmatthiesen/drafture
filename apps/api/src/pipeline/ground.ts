@@ -52,6 +52,8 @@ WELL-ARCHITECTED & DECISIONS (be opinionated): frame the whole design through th
 
 SCALE BY DEFAULT: every tier must scale gracefully to the NEXT order of magnitude WITHOUT a redesign — the stated traffic only sets the starting point and cost, never whether the architecture CAN scale. Choose primitives (managed/serverless, horizontal-by-default, queue-buffered) that grow by configuration, not rearchitecture.
 
+CONCISENESS (be dense, not verbose): every array item is ONE short line — a crisp phrase or single sentence (aim ≤ ~20 words), never a paragraph. Prefer 2–4 high-signal items per array over exhaustive lists; include the load-bearing point, drop the filler. setupSteps are terse imperative steps. keyDecisions are tight (one-line rationale). This keeps the design scannable and the response fast — density over volume is itself the senior signal.
+
 EDGES: label every edge with the payload moving across it and its protocol — no unlabeled connections.
 
 OUTPUT: assumptions, clarificationsUsed, exactly three tiers, plus a recommendedTier with its recommendationRationale and the load-bearing keyDecisions (chosen vs alternatives + why). Each tier has nodes, payload-labeled edges, ordered plain-language setupSteps, costDrivers in each service's native cost unit, burstHandling notes, NON-EMPTY securityNotes, and tradeoffs versus the other two tiers.`;

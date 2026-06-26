@@ -381,14 +381,38 @@ function describe(err: unknown): string {
 function toOutputSchema(jsonSchema: Record<string, unknown>): Record<string, unknown> {
   const ref = jsonSchema["$ref"];
   const definitions = jsonSchema["definitions"];
+  let schema = jsonSchema;
   if (typeof ref === "string" && definitions && typeof definitions === "object") {
     const name = ref.split("/").pop();
     if (name) {
       const inner = (definitions as Record<string, unknown>)[name];
       if (inner && typeof inner === "object") {
-        return inner as Record<string, unknown>;
+        schema = inner as Record<string, unknown>;
       }
     }
   }
-  return jsonSchema;
+  stripUnsupportedArrayBounds(schema);
+  return schema;
+}
+
+/**
+ * Anthropic's `output_config.format` JSON Schema only supports array `minItems`
+ * (and `maxItems`) of 0 or 1; a `.length(3)` / `.max(3)` in zod emits bounds it
+ * rejects with a 400. Strip those bounds from the SENT schema — the zod schema
+ * keeps `.length(3)` etc. and still validates the response, so the guarantee
+ * holds; only the server-side hint is dropped (the system prompt already says
+ * "exactly three tiers"). Mutates the freshly-generated schema in place.
+ */
+function stripUnsupportedArrayBounds(node: unknown): void {
+  if (Array.isArray(node)) {
+    for (const item of node) stripUnsupportedArrayBounds(item);
+    return;
+  }
+  if (!node || typeof node !== "object") return;
+  const obj = node as Record<string, unknown>;
+  for (const key of ["minItems", "maxItems"] as const) {
+    const v = obj[key];
+    if (typeof v === "number" && v !== 0 && v !== 1) delete obj[key];
+  }
+  for (const key of Object.keys(obj)) stripUnsupportedArrayBounds(obj[key]);
 }

@@ -22,8 +22,13 @@ const ConfigSchema = z.object({
   // LLM
   ANTHROPIC_API_KEY: z.string().min(1, "ANTHROPIC_API_KEY is required"),
   LLM_MODEL: z.string().default("claude-sonnet-4-6"),
-  LLM_EFFORT: z.enum(["low", "medium", "high"]).default("medium"),
-  LLM_MAX_TOKENS: z.coerce.number().int().positive().default(8000),
+  // `low` keeps generation fast/cheap for a public tool; the system prompt is
+  // detailed enough that higher effort adds latency without much quality gain.
+  LLM_EFFORT: z.enum(["low", "medium", "high"]).default("low"),
+  // Headroom so a full three-tier design never truncates (truncation → parse
+  // failure → retry → multi-minute latency). The conciseness directive in the
+  // system prompt keeps actual output well under this.
+  LLM_MAX_TOKENS: z.coerce.number().int().positive().default(14000),
   LLM_MAX_INPUT_TOKENS: z.coerce.number().int().positive().default(12000),
 
   // Per-MTok USD list-price rates used to convert token usage to dollars for the

@@ -184,6 +184,23 @@ describe("ClaudeProvider.generate", () => {
     expect(params.output_config?.effort).toBe("medium");
     expect(params.tools).toBeUndefined();
     expect(params.tool_choice).toBeUndefined();
+
+    // Regression: Anthropic's output_config.format rejects array minItems/maxItems
+    // other than 0/1 (a `.length(3)` in zod 400'd live). The sent schema must
+    // carry no such bounds — zod still enforces them when validating the response.
+    const badBounds: string[] = [];
+    const scan = (node: unknown, path: string): void => {
+      if (Array.isArray(node)) return node.forEach((n, i) => scan(n, `${path}[${i}]`));
+      if (!node || typeof node !== "object") return;
+      const o = node as Record<string, unknown>;
+      for (const k of ["minItems", "maxItems"]) {
+        const v = o[k];
+        if (typeof v === "number" && v !== 0 && v !== 1) badBounds.push(`${path}.${k}=${v}`);
+      }
+      for (const k of Object.keys(o)) scan(o[k], `${path}/${k}`);
+    };
+    scan(params.output_config?.format?.schema, "schema");
+    expect(badBounds).toEqual([]);
   });
 
   it("propagates cache-token usage so the caller can debit the ledger", async () => {
