@@ -1,0 +1,61 @@
+[
+  {
+    "id": "serverless-api",
+    "name": "Serverless API",
+    "whenToUse": "Spiky or unpredictable traffic, pay-per-use economics, and minimal operations: a JSON/REST API with no servers to manage. Best when request volume is bursty and per-request work is short.",
+    "services": ["API Gateway", "Lambda", "DynamoDB", "S3", "CloudFront", "Cognito"],
+    "burstMechanisms": [
+      "DynamoDB on-demand absorbs read/write spikes with no capacity planning (trivial in core)",
+      "API Gateway request throttling caps protect downstream (trivial in core)",
+      "Lambda reserved concurrency bounds blast radius and guarantees headroom (trivial in core)",
+      "CloudFront caching offloads read-heavy GETs from the origin (trivial in core)",
+      "option: Lambda provisioned concurrency to remove cold starts for latency-sensitive spikes",
+      "option: SQS buffering in front of Lambda to smooth very large write bursts"
+    ],
+    "source": "https://docs.aws.amazon.com/whitepapers/latest/serverless-multi-tier-architectures-api-gateway-lambda/welcome.html"
+  },
+  {
+    "id": "container-api",
+    "name": "Container API",
+    "whenToUse": "Steady or high sustained traffic, long-running or CPU-bound work, or existing containerized services that need more control than Lambda's runtime model allows.",
+    "services": ["ALB", "Fargate", "RDS", "ElastiCache", "CloudFront", "WAF"],
+    "burstMechanisms": [
+      "Fargate service auto-scaling on CPU/memory and ALB request-count targets (trivial in core)",
+      "ALB spreads load across tasks across AZs (trivial in core)",
+      "CloudFront caching offloads read traffic from the origin (trivial in core)",
+      "ElastiCache absorbs hot read bursts and protects the database (trivial in core)",
+      "option: keep a minimum warm task count / over-provision for sub-minute spikes auto-scaling cannot catch",
+      "option: provisioned RDS read replicas for read-heavy growth"
+    ],
+    "source": "https://aws.amazon.com/architecture/reference-architecture-diagrams/"
+  },
+  {
+    "id": "queue-based-async",
+    "name": "Queue-Based Async Processing",
+    "whenToUse": "Work that can be processed asynchronously (uploads, notifications, ETL, webhooks). Decouples producers from consumers so spikes are buffered instead of dropped, with built-in retries.",
+    "services": ["API Gateway", "Lambda", "SQS", "DynamoDB", "SNS"],
+    "burstMechanisms": [
+      "SQS buffers producer spikes and decouples ingest from processing rate (trivial in core)",
+      "DynamoDB on-demand absorbs write spikes from the worker (trivial in core)",
+      "Lambda reserved concurrency on the worker controls drain rate and protects downstream (trivial in core)",
+      "SNS fan-out distributes events to multiple consumers without coupling",
+      "option: SQS dead-letter queue + redrive for poison messages",
+      "option: provisioned worker concurrency to cap throughput against a rate-limited dependency"
+    ],
+    "source": "https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/welcome.html"
+  },
+  {
+    "id": "static-site-api",
+    "name": "Static Site + API",
+    "whenToUse": "A single-page app or static frontend served from the edge, with a small dynamic API behind it. Cheapest robust pattern for content-heavy sites with light backend needs.",
+    "services": ["S3", "CloudFront", "WAF", "API Gateway", "Lambda", "DynamoDB"],
+    "burstMechanisms": [
+      "CloudFront caching serves static assets from the edge and absorbs read bursts (trivial in core)",
+      "API Gateway throttling caps protect the dynamic backend (trivial in core)",
+      "DynamoDB on-demand absorbs API write spikes (trivial in core)",
+      "option: API Gateway response caching for hot read endpoints",
+      "option: Lambda provisioned concurrency if the API is latency-sensitive under spikes"
+    ],
+    "source": "https://docs.aws.amazon.com/AmazonS3/latest/userguide/WebsiteHosting.html"
+  }
+]

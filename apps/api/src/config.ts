@@ -26,6 +26,15 @@ const ConfigSchema = z.object({
   LLM_MAX_TOKENS: z.coerce.number().int().positive().default(8000),
   LLM_MAX_INPUT_TOKENS: z.coerce.number().int().positive().default(12000),
 
+  // Per-MTok USD list-price rates used to convert token usage to dollars for the
+  // spend ledger + telemetry. Defaults are Sonnet-class on-demand list prices;
+  // override when the model or negotiated pricing changes. Approximate by design
+  // (the ledger reconciles actuals; the guard stays conservative).
+  LLM_PRICE_INPUT_PER_MTOK: z.coerce.number().nonnegative().default(3),
+  LLM_PRICE_OUTPUT_PER_MTOK: z.coerce.number().nonnegative().default(15),
+  LLM_PRICE_CACHE_WRITE_PER_MTOK: z.coerce.number().nonnegative().default(3.75),
+  LLM_PRICE_CACHE_READ_PER_MTOK: z.coerce.number().nonnegative().default(0.3),
+
   // Region / pricing
   DEFAULT_REGION: z.string().default("us-east-1"),
   PRICING_REFRESH_CRON: z.string().default("0 3 1 * *"),
