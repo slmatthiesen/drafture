@@ -46,3 +46,6 @@ Thumbs.db
 # Test / coverage
 coverage/
 .vitest/
+
+# Personal ops runbook — never track (droplet/IP-specific)
+deploy\ safely\ on\ DigitalOcean.md
