@@ -79,7 +79,8 @@ export interface ResearchConfig {
   RESEARCH_ON_MISS: boolean;
   RESEARCH_MAX_CALLS_PER_REQUEST: number;
   LLM_MODEL: string;
-  ANTHROPIC_API_KEY: string;
+  /** Optional: research is Anthropic-specific, so a GLM-only deploy (no key) skips it. */
+  ANTHROPIC_API_KEY?: string;
 }
 
 export interface ResearchOptions {
@@ -229,6 +230,10 @@ export async function researchMissingTopics(options: ResearchOptions): Promise<R
 
   // GATE: off by default — no web calls, no client construction.
   if (!config.RESEARCH_ON_MISS) return empty;
+  // Research uses the Anthropic web_search server tool, so it needs either an
+  // injected client or an Anthropic key to build one. A GLM-only deploy (no key)
+  // has neither — skip gracefully instead of constructing a keyless client.
+  if (!anthropic && !config.ANTHROPIC_API_KEY) return empty;
   const cap = config.RESEARCH_MAX_CALLS_PER_REQUEST;
   if (cap <= 0 || topics.length === 0) return empty;
 

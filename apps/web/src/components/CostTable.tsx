@@ -25,7 +25,7 @@ export function CostTable({
         <thead>
           <tr>
             <th scope="col">Service</th>
-            <th scope="col">Unit</th>
+            <th scope="col">Basis</th>
             <th scope="col">Estimate</th>
             <th scope="col">Note</th>
           </tr>

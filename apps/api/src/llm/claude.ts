@@ -2,13 +2,9 @@ import Anthropic, { APIConnectionError, APIError, RateLimitError } from "@anthro
 import type { z } from "zod";
 
 import type { Config } from "../config.js";
-import {
-  GeneratedArchitectureSchema,
-  ClarificationSchema,
-  architectureJsonSchema,
-  clarificationJsonSchema,
-} from "../schema/architecture.js";
+import { GeneratedArchitectureSchema, ClarificationSchema } from "../schema/architecture.js";
 import type { GeneratedArchitecture, Clarification, Tier } from "../schema/architecture.js";
+import { architectureToolSchema, clarificationToolSchema } from "./schema-utils.js";
 import { ProviderError } from "./provider.js";
 import type {
   GenerateOptions,
@@ -19,12 +15,16 @@ import type {
 } from "./provider.js";
 
 /**
- * Structured output is delivered natively: SDK 0.106 exposes
- * `output_config.format` (a server-enforced JSON Schema) plus `messages.parse()`,
- * which JSON-parses the constrained response into `parsed_output`. We pass the
- * architecture / clarification JSON Schema directly and still re-validate the
- * result with the matching zod schema before returning (defense in depth). This
- * replaces the 0.65 forced-tool-use shim (registering the schema as a tool).
+ * Structured output is delivered via FORCED TOOL USE: the architecture /
+ * clarification JSON Schema is registered as a tool and `tool_choice` is forced,
+ * so the API guarantees the response is a `tool_use` block whose `input` is valid
+ * JSON conforming to the schema. We read `input` and re-validate with the matching
+ * zod schema before returning (defense in depth).
+ *
+ * WHY not native `output_config.format` (json_schema): it is NOT enforced for our
+ * model — the API returns free-form text (sometimes a fenced ```graphql block),
+ * which `messages.parse()` rejects, and the request 502s. Tool use is enforced
+ * regardless of model, so it is reliable on both Sonnet and Haiku.
  */
 
 /**
@@ -59,12 +59,27 @@ const CLARIFY_SYSTEM = [
   "the description is sufficient, return needsClarification=false with no questions.",
 ].join(" ");
 
+/** Tool the model MUST call to emit the generated architecture (forced tool use). */
+const ARCHITECTURE_TOOL = {
+  name: "emit_architecture",
+  description: "Emit the three-tier AWS architecture design as one structured object.",
+  input_schema: architectureToolSchema() as Anthropic.Tool.InputSchema,
+};
+
+/** Tool the model MUST call to emit its clarification verdict (forced tool use). */
+const CLARIFY_TOOL = {
+  name: "emit_clarification",
+  description: "Emit the clarification verdict: whether questions are needed, and at most two.",
+  input_schema: clarificationToolSchema() as Anthropic.Tool.InputSchema,
+};
+
 interface ClaudeSettings {
   model: string;
   maxTokens: number;
   /**
-   * Resolved generation effort. SDK 0.106 supports `output_config.effort`
-   * (`low | medium | high`), so this is now sent on the wire.
+   * Generation effort. Currently INERT: forced tool use has no effort knob, so
+   * this is read from config but not sent. Kept so a future provider or a move
+   * back to native structured output can use it without a config-schema change.
    */
   effort: "low" | "medium" | "high";
 }
@@ -94,7 +109,6 @@ export class ClaudeProvider implements LlmProvider {
     opts?: GenerateOptions,
   ): Promise<ProviderResult<GeneratedArchitecture>> {
     const maxTokens = opts?.maxTokens ?? this.settings.maxTokens;
-    const effort = opts?.effort ?? this.settings.effort;
     // KTD11: the cache breakpoint sits ONLY on the static prefix (system prompt
     // + full security baselines). The volatile suffix follows in the user turn
     // with no cache_control, so the per-request content never poisons the key.
@@ -111,11 +125,11 @@ export class ClaudeProvider implements LlmProvider {
       messages: [
         { role: "user", content: [{ type: "text", text: prompt.volatileSuffix }] },
       ],
-      // Native structured output: the model is constrained to the architecture
-      // JSON Schema; `effort` tunes generation depth (both new in 0.106). Effort
-      // is OMITTED for models that reject it (Haiku 4.5, Sonnet 4.5) — sending it
-      // there is a 400, which is what blocks a naive model swap to Haiku.
-      output_config: buildOutputConfig(this.settings.model, effort, architectureJsonSchema()),
+      // Forced tool use: the API guarantees the tool_use `input` is valid JSON
+      // conforming to the schema. Reliable on Sonnet AND Haiku — unlike
+      // output_config.format, which is not enforced for our model.
+      tools: [ARCHITECTURE_TOOL],
+      tool_choice: { type: "tool", name: ARCHITECTURE_TOOL.name },
     };
 
     return this.structuredCall(params, GeneratedArchitectureSchema);
@@ -130,7 +144,8 @@ export class ClaudeProvider implements LlmProvider {
       max_tokens: 1024,
       system: CLARIFY_SYSTEM,
       messages: [{ role: "user", content: buildClarifyInput(description, priorAnswers) }],
-      output_config: buildOutputConfig(this.settings.model, this.settings.effort, clarificationJsonSchema()),
+      tools: [CLARIFY_TOOL],
+      tool_choice: { type: "tool", name: CLARIFY_TOOL.name },
     };
 
     return this.structuredCall(params, ClarificationSchema);
@@ -191,9 +206,8 @@ export class ClaudeProvider implements LlmProvider {
       try {
         message = await this.callModel(params);
       } catch (err) {
-        // API/transport failures are mapped and thrown immediately, never
-        // retried. A structured-output *parse* failure surfaced by
-        // `messages.parse()` is not an API error, so fall through to the retry.
+        // API/transport failures (from create/stream) are mapped and thrown
+        // immediately, never retried. Any other throw falls through to retry.
         if (isApiFailure(err)) throw mapError(err);
         lastError = err;
         continue;
@@ -223,13 +237,15 @@ export class ClaudeProvider implements LlmProvider {
     params: Anthropic.MessageCreateParamsNonStreaming,
   ): Promise<Anthropic.Message> {
     if (params.max_tokens >= STREAMING_THRESHOLD) {
-      // Streamed messages aren't auto-parsed; extractStructuredOutput reads the
-      // JSON text block produced under output_config.format.
+      // Streamed messages return the same final Message (tool_use blocks
+      // included); extractStructuredOutput reads the forced tool call's `input`.
       return this.client.messages.stream(params).finalMessage();
     }
-    // messages.parse() runs output_config.format server-side and JSON-parses the
-    // constrained response into `parsed_output`.
-    return this.client.messages.parse(params);
+    // Forced tool use returns a tool_use block whose `input` is guaranteed valid
+    // JSON; create() returns the raw Message for extractStructuredOutput to read.
+    // Do NOT use messages.parse(): it auto-parses free text and throws when the
+    // (un-enforced) response is fenced/prose — which 502'd the pipeline.
+    return this.client.messages.create(params);
   }
 
   /**
@@ -307,18 +323,16 @@ function buildClarifyInput(description: string, priorAnswers?: string[]): string
 }
 
 /**
- * Pull the structured object out of a response. `messages.parse()` attaches the
- * JSON-parsed object as `parsed_output`; the streaming path returns a plain
- * message, so we JSON-parse the constrained text block ourselves. zod validation
- * runs afterward in {@link ClaudeProvider.structuredCall} regardless.
+ * Pull the structured object out of a forced-tool-use response: the model's
+ * answer is the `input` of the tool_use block (the API guarantees it is valid
+ * JSON conforming to the tool's input_schema). zod re-validates afterward in
+ * {@link ClaudeProvider.structuredCall} regardless.
  */
 function extractStructuredOutput(message: Anthropic.Message): unknown {
-  const parsed = (message as { parsed_output?: unknown }).parsed_output;
-  if (parsed != null) return parsed;
   for (const block of message.content) {
-    if (block.type === "text") return JSON.parse(block.text);
+    if (block.type === "tool_use") return (block as Anthropic.ToolUseBlock).input;
   }
-  throw new Error("response contained no structured-output text block");
+  throw new Error("model did not emit the required structured tool call");
 }
 
 /** Map the SDK usage onto the ledger-facing Usage shape (KTD7/KTD11). */
@@ -366,73 +380,4 @@ function mapError(err: unknown): ProviderError {
 function describe(err: unknown): string {
   if (err instanceof Error) return err.message;
   return String(err);
-}
-
-/**
- * `architectureJsonSchema()` / `clarificationJsonSchema()` emit a named schema
- * wrapped as `{ $ref, definitions }`. `output_config.format.schema` wants a
- * top-level `{ type: "object", ... }`, so resolve the single named definition
- * (no nested $refs exist — the schemas are emitted with `$refStrategy: "none"`).
- */
-/**
- * `output_config.effort` is supported on Opus 4.5+ and Sonnet 4.6, but REJECTED
- * (400) on Haiku 4.5 and Sonnet 4.5. We gate on the model so a config-only swap
- * to a cheaper/faster model (e.g. Haiku for the cost test) doesn't 400 on every
- * call. Conservative: omit effort for the known non-supporting families.
- */
-function supportsEffort(model: string): boolean {
-  const m = model.toLowerCase();
-  if (m.includes("haiku")) return false;
-  if (m.includes("sonnet-4-5")) return false;
-  return true;
-}
-
-/** Build output_config with the JSON-schema format, including `effort` only when
- *  the model supports it. */
-function buildOutputConfig(
-  model: string,
-  effort: "low" | "medium" | "high",
-  jsonSchema: Record<string, unknown>,
-): Anthropic.MessageCreateParamsNonStreaming["output_config"] {
-  const format = { type: "json_schema" as const, schema: toOutputSchema(jsonSchema) };
-  return supportsEffort(model) ? { effort, format } : { format };
-}
-
-function toOutputSchema(jsonSchema: Record<string, unknown>): Record<string, unknown> {
-  const ref = jsonSchema["$ref"];
-  const definitions = jsonSchema["definitions"];
-  let schema = jsonSchema;
-  if (typeof ref === "string" && definitions && typeof definitions === "object") {
-    const name = ref.split("/").pop();
-    if (name) {
-      const inner = (definitions as Record<string, unknown>)[name];
-      if (inner && typeof inner === "object") {
-        schema = inner as Record<string, unknown>;
-      }
-    }
-  }
-  stripUnsupportedArrayBounds(schema);
-  return schema;
-}
-
-/**
- * Anthropic's `output_config.format` JSON Schema only supports array `minItems`
- * (and `maxItems`) of 0 or 1; a `.length(3)` / `.max(3)` in zod emits bounds it
- * rejects with a 400. Strip those bounds from the SENT schema — the zod schema
- * keeps `.length(3)` etc. and still validates the response, so the guarantee
- * holds; only the server-side hint is dropped (the system prompt already says
- * "exactly three tiers"). Mutates the freshly-generated schema in place.
- */
-function stripUnsupportedArrayBounds(node: unknown): void {
-  if (Array.isArray(node)) {
-    for (const item of node) stripUnsupportedArrayBounds(item);
-    return;
-  }
-  if (!node || typeof node !== "object") return;
-  const obj = node as Record<string, unknown>;
-  for (const key of ["minItems", "maxItems"] as const) {
-    const v = obj[key];
-    if (typeof v === "number" && v !== 0 && v !== 1) delete obj[key];
-  }
-  for (const key of Object.keys(obj)) stripUnsupportedArrayBounds(obj[key]);
 }

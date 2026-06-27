@@ -14,15 +14,14 @@ import type { GeneratedArchitecture, ArchitectureResult, Clarification, TierName
 // --- Test doubles -----------------------------------------------------------
 
 function fakeClient() {
-  const parse = vi.fn();
   const create = vi.fn();
   const countTokens = vi.fn();
   const finalMessage = vi.fn();
   const stream = vi.fn(() => ({ finalMessage }));
   const client = {
-    messages: { parse, create, countTokens, stream },
+    messages: { create, countTokens, stream },
   } as unknown as Anthropic;
-  return { client, parse, create, countTokens, stream, finalMessage };
+  return { client, create, countTokens, stream, finalMessage };
 }
 
 function makeProvider(client: Anthropic) {
@@ -41,13 +40,13 @@ interface FakeUsage {
 }
 
 /**
- * Mirrors what `messages.parse()` returns for a native `output_config.format`
- * call: the constrained JSON in a text block plus the JSON-parsed `parsed_output`.
+ * Mirrors what `messages.create()` returns for a FORCED-TOOL-USE call: the
+ * structured answer is the `input` of a `tool_use` block (stop_reason "tool_use").
  */
-function parsedMessage(
-  output: unknown,
+function toolMessage(
+  input: unknown,
   usage: FakeUsage = {},
-  stopReason: Anthropic.Message["stop_reason"] = "end_turn",
+  stopReason: Anthropic.Message["stop_reason"] = "tool_use",
 ): Anthropic.Message {
   return {
     id: "msg_test",
@@ -56,8 +55,7 @@ function parsedMessage(
     model: "claude-sonnet-4-6",
     stop_reason: stopReason,
     stop_sequence: null,
-    content: [{ type: "text", text: JSON.stringify(output) }],
-    parsed_output: output,
+    content: [{ type: "tool_use", id: "toolu_test", name: "emit_architecture", input }],
     usage: {
       input_tokens: usage.input_tokens ?? 100,
       output_tokens: usage.output_tokens ?? 50,
@@ -75,7 +73,7 @@ const PROMPT: GroundedPrompt = {
   volatileSuffix: "matched patterns + memory + user description",
 };
 
-/** Mirrors a plain (non-structured) `messages.create()` response: text blocks, no parsed_output. */
+/** Mirrors a plain (non-structured) `messages.create()` response: text blocks. */
 function textMessage(text: string, usage: FakeUsage = {}): Anthropic.Message {
   return {
     id: "msg_test",
@@ -104,17 +102,10 @@ function makeTier(name: TierName): ArchitectureResult["tiers"][number] {
     name,
     summary: `${name} tier`,
     nodes: [
-      {
-        id: "api",
-        awsService: "API Gateway",
-        role: "front door",
-        security: ["TLS", "WAF", "throttling"],
-      },
+      { id: "api", awsService: "API Gateway", role: "front door", security: ["TLS", "WAF", "throttling"] },
     ],
     edges: [{ from: "client", to: "api", payload: "request", protocol: "HTTPS" }],
-    costDrivers: [
-      { service: "API Gateway", unit: "per 1k requests", estimateRange: "$0.20–$0.90", note: "" },
-    ],
+    costDrivers: [{ service: "API Gateway", unit: "per 1k requests", estimateRange: "$0.20–$0.90", note: "" }],
     delta: ["baseline: single-AZ, throttling absorbs bursts"],
     tradeoffs: ["Cheaper than resilient"],
   };
@@ -146,10 +137,8 @@ function validArchitecture(): GeneratedArchitecture {
 describe("ClaudeProvider.generate", () => {
   it("returns a schema-valid ArchitectureResult for a representative prompt", async () => {
     const arch = validArchitecture();
-    const { client, parse } = fakeClient();
-    parse.mockResolvedValueOnce(
-      parsedMessage(arch, { input_tokens: 1200, output_tokens: 800 }),
-    );
+    const { client, create } = fakeClient();
+    create.mockResolvedValueOnce(toolMessage(arch, { input_tokens: 1200, output_tokens: 800 }));
 
     const { result, usage } = await makeProvider(client).generate(PROMPT);
 
@@ -157,16 +146,16 @@ describe("ClaudeProvider.generate", () => {
     expect(result.tiers.map((t) => t.name)).toEqual(["budget", "balanced", "resilient"]);
     expect(usage.inputTokens).toBe(1200);
     expect(usage.outputTokens).toBe(800);
-    expect(parse).toHaveBeenCalledTimes(1);
+    expect(create).toHaveBeenCalledTimes(1);
   });
 
   it("places the cache breakpoint ONLY on the static prefix (KTD11)", async () => {
-    const { client, parse } = fakeClient();
-    parse.mockResolvedValueOnce(parsedMessage(validArchitecture()));
+    const { client, create } = fakeClient();
+    create.mockResolvedValueOnce(toolMessage(validArchitecture()));
 
     await makeProvider(client).generate(PROMPT);
 
-    const params = parse.mock.calls.at(-1)?.[0] as Anthropic.MessageCreateParamsNonStreaming;
+    const params = create.mock.calls.at(-1)?.[0] as Anthropic.MessageCreateParamsNonStreaming;
     expect(Array.isArray(params.system)).toBe(true);
     const system = params.system as Anthropic.TextBlockParam[];
     expect(system[0]?.text).toBe(PROMPT.staticPrefix);
@@ -177,17 +166,16 @@ describe("ClaudeProvider.generate", () => {
     expect(suffixBlock.text).toBe(PROMPT.volatileSuffix);
     expect(suffixBlock.cache_control ?? undefined).toBeUndefined();
 
-    // Structured output is delivered natively via output_config.format, with
-    // effort carried on the wire — no forced tools.
-    expect(params.output_config?.format?.type).toBe("json_schema");
-    expect(params.output_config?.format?.schema).toMatchObject({ type: "object" });
-    expect(params.output_config?.effort).toBe("medium");
-    expect(params.tools).toBeUndefined();
-    expect(params.tool_choice).toBeUndefined();
+    // Structured output is delivered via FORCED TOOL USE (reliable on Sonnet and
+    // Haiku); output_config.format is not used (it was not enforced for our model).
+    expect(params.output_config).toBeUndefined();
+    expect(params.tools).toHaveLength(1);
+    expect(params.tools?.[0]?.name).toBe("emit_architecture");
+    expect(params.tool_choice).toEqual({ type: "tool", name: "emit_architecture" });
 
-    // Regression: Anthropic's output_config.format rejects array minItems/maxItems
-    // other than 0/1 (a `.length(3)` in zod 400'd live). The sent schema must
-    // carry no such bounds — zod still enforces them when validating the response.
+    // Regression: Anthropic rejects array minItems/maxItems other than 0/1 (a
+    // `.length(3)` in zod 400'd live). The tool input_schema must carry no such
+    // bounds — zod still enforces them when validating the tool input.
     const badBounds: string[] = [];
     const scan = (node: unknown, path: string): void => {
       if (Array.isArray(node)) return node.forEach((n, i) => scan(n, `${path}[${i}]`));
@@ -199,30 +187,28 @@ describe("ClaudeProvider.generate", () => {
       }
       for (const k of Object.keys(o)) scan(o[k], `${path}/${k}`);
     };
-    scan(params.output_config?.format?.schema, "schema");
+    const tool = params.tools?.[0] as { input_schema: unknown } | undefined;
+    scan(tool?.input_schema, "schema");
     expect(badBounds).toEqual([]);
   });
 
-  it("omits output_config.effort for Haiku (which rejects it), keeping the json_schema format", async () => {
-    const { client, parse } = fakeClient();
-    parse.mockResolvedValueOnce(parsedMessage(validArchitecture()));
+  it("uses forced tool use on Haiku too (no output_config / effort on the wire)", async () => {
+    const { client, create } = fakeClient();
+    create.mockResolvedValueOnce(toolMessage(validArchitecture()));
 
-    const haiku = new ClaudeProvider(client, {
-      model: "claude-haiku-4-5",
-      maxTokens: 8000,
-      effort: "low",
-    });
+    const haiku = new ClaudeProvider(client, { model: "claude-haiku-4-5", maxTokens: 8000, effort: "low" });
     await haiku.generate(PROMPT);
 
-    const params = parse.mock.calls.at(-1)?.[0] as Anthropic.MessageCreateParamsNonStreaming;
-    expect(params.output_config?.effort).toBeUndefined();
-    expect(params.output_config?.format?.type).toBe("json_schema");
+    const params = create.mock.calls.at(-1)?.[0] as Anthropic.MessageCreateParamsNonStreaming;
+    expect(params.output_config).toBeUndefined();
+    expect(params.tools?.[0]?.name).toBe("emit_architecture");
+    expect(params.tool_choice).toEqual({ type: "tool", name: "emit_architecture" });
   });
 
   it("propagates cache-token usage so the caller can debit the ledger", async () => {
-    const { client, parse } = fakeClient();
-    parse.mockResolvedValueOnce(
-      parsedMessage(validArchitecture(), {
+    const { client, create } = fakeClient();
+    create.mockResolvedValueOnce(
+      toolMessage(validArchitecture(), {
         input_tokens: 300,
         output_tokens: 900,
         cache_read_input_tokens: 4096,
@@ -240,29 +226,27 @@ describe("ClaudeProvider.generate", () => {
     });
   });
 
-  it("retries exactly once on a malformed response, then succeeds", async () => {
-    const { client, parse } = fakeClient();
-    parse
-      .mockResolvedValueOnce(parsedMessage({ not: "valid" }))
-      .mockResolvedValueOnce(parsedMessage(validArchitecture()));
+  it("retries exactly once on a malformed tool input, then succeeds", async () => {
+    const { client, create } = fakeClient();
+    create
+      .mockResolvedValueOnce(toolMessage({ not: "valid" }))
+      .mockResolvedValueOnce(toolMessage(validArchitecture()));
 
     const { result } = await makeProvider(client).generate(PROMPT);
 
     expect(result.tiers).toHaveLength(3);
-    expect(parse).toHaveBeenCalledTimes(2);
+    expect(create).toHaveBeenCalledTimes(2);
   });
 
   it("throws a non-retryable ProviderError after the retry also fails validation", async () => {
-    const { client, parse } = fakeClient();
-    parse.mockResolvedValue(parsedMessage({ still: "wrong" }));
+    const { client, create } = fakeClient();
+    create.mockResolvedValue(toolMessage({ still: "wrong" }));
 
-    const err = await makeProvider(client)
-      .generate(PROMPT)
-      .catch((e: unknown) => e);
+    const err = await makeProvider(client).generate(PROMPT).catch((e: unknown) => e);
 
     expect(err).toBeInstanceOf(ProviderError);
     expect((err as ProviderError).retryable).toBe(false);
-    expect(parse).toHaveBeenCalledTimes(2);
+    expect(create).toHaveBeenCalledTimes(2);
   });
 });
 
@@ -280,10 +264,11 @@ describe("ClaudeProvider.generateConfig", () => {
     expect(usage.outputTokens).toBe(1300);
 
     const params = create.mock.calls.at(-1)?.[0] as Anthropic.MessageCreateParamsNonStreaming;
-    // cache_control stays on the static system prefix; plain text means no output_config.
+    // cache_control stays on the static system prefix; plain text means no tool use.
     const system = params.system as Anthropic.TextBlockParam[];
     expect(system[0]?.cache_control).toEqual({ type: "ephemeral" });
     expect(params.output_config).toBeUndefined();
+    expect(params.tools).toBeUndefined();
     expect(params.max_tokens).toBe(2500);
     const userText = (params.messages[0]?.content as Anthropic.ContentBlockParam[])[0] as Anthropic.TextBlockParam;
     expect(userText.text).toContain("balanced");
@@ -304,9 +289,7 @@ describe("ClaudeProvider.generateConfig", () => {
     const { client, create } = fakeClient();
     create.mockRejectedValueOnce(new RateLimitError(429, undefined, "rate limited", new Headers()));
 
-    const err = await makeProvider(client)
-      .generateConfig(makeTier("resilient"))
-      .catch((e: unknown) => e);
+    const err = await makeProvider(client).generateConfig(makeTier("resilient")).catch((e: unknown) => e);
 
     expect(err).toBeInstanceOf(ProviderError);
     expect((err as ProviderError).retryable).toBe(true);
@@ -315,9 +298,9 @@ describe("ClaudeProvider.generateConfig", () => {
 
 describe("ClaudeProvider.clarify", () => {
   it("returns needsClarification:false for a fully-specified prompt", async () => {
-    const { client, parse } = fakeClient();
+    const { client, create } = fakeClient();
     const payload: Clarification = { needsClarification: false, questions: [] };
-    parse.mockResolvedValueOnce(parsedMessage(payload));
+    create.mockResolvedValueOnce(toolMessage(payload));
 
     const { result } = await makeProvider(client).clarify("a fully specified system");
 
@@ -326,12 +309,12 @@ describe("ClaudeProvider.clarify", () => {
   });
 
   it("returns true with at most two questions for an ambiguous prompt", async () => {
-    const { client, parse } = fakeClient();
+    const { client, create } = fakeClient();
     const payload: Clarification = {
       needsClarification: true,
       questions: ["Expected traffic?", "Data sensitivity?"],
     };
-    parse.mockResolvedValueOnce(parsedMessage(payload));
+    create.mockResolvedValueOnce(toolMessage(payload));
 
     const { result } = await makeProvider(client).clarify("something vague");
 
@@ -340,14 +323,12 @@ describe("ClaudeProvider.clarify", () => {
   });
 
   it("threads prior answers into the model input", async () => {
-    const { client, parse } = fakeClient();
-    parse.mockResolvedValueOnce(
-      parsedMessage({ needsClarification: false, questions: [] }),
-    );
+    const { client, create } = fakeClient();
+    create.mockResolvedValueOnce(toolMessage({ needsClarification: false, questions: [] }));
 
     await makeProvider(client).clarify("desc", ["bursty traffic", "PII present"]);
 
-    const params = parse.mock.calls.at(-1)?.[0] as Anthropic.MessageCreateParamsNonStreaming;
+    const params = create.mock.calls.at(-1)?.[0] as Anthropic.MessageCreateParamsNonStreaming;
     const userText = params.messages[0]?.content as string;
     expect(userText).toContain("bursty traffic");
     expect(userText).toContain("PII present");
@@ -356,28 +337,24 @@ describe("ClaudeProvider.clarify", () => {
 
 describe("ClaudeProvider error mapping", () => {
   it("surfaces RateLimitError as a retryable ProviderError without retrying", async () => {
-    const { client, parse } = fakeClient();
+    const { client, create } = fakeClient();
     const rateLimit = new RateLimitError(429, undefined, "rate limited", new Headers());
-    parse.mockRejectedValue(rateLimit);
+    create.mockRejectedValue(rateLimit);
 
-    const err = await makeProvider(client)
-      .generate(PROMPT)
-      .catch((e: unknown) => e);
+    const err = await makeProvider(client).generate(PROMPT).catch((e: unknown) => e);
 
     expect(err).toBeInstanceOf(ProviderError);
     expect((err as ProviderError).retryable).toBe(true);
     expect((err as ProviderError).cause).toBe(rateLimit);
-    expect(parse).toHaveBeenCalledTimes(1);
+    expect(create).toHaveBeenCalledTimes(1);
   });
 
   it("surfaces APIConnectionError as a retryable ProviderError", async () => {
-    const { client, parse } = fakeClient();
+    const { client, create } = fakeClient();
     const conn = new APIConnectionError({ message: "socket hang up" });
-    parse.mockRejectedValue(conn);
+    create.mockRejectedValue(conn);
 
-    const err = await makeProvider(client)
-      .generate(PROMPT)
-      .catch((e: unknown) => e);
+    const err = await makeProvider(client).generate(PROMPT).catch((e: unknown) => e);
 
     expect(err).toBeInstanceOf(ProviderError);
     expect((err as ProviderError).retryable).toBe(true);
@@ -385,12 +362,10 @@ describe("ClaudeProvider error mapping", () => {
   });
 
   it("maps a 4xx APIError to a non-retryable ProviderError", async () => {
-    const { client, parse } = fakeClient();
-    parse.mockRejectedValue(new BadRequestError(400, undefined, "bad request", new Headers()));
+    const { client, create } = fakeClient();
+    create.mockRejectedValue(new BadRequestError(400, undefined, "bad request", new Headers()));
 
-    const err = await makeProvider(client)
-      .clarify("x")
-      .catch((e: unknown) => e);
+    const err = await makeProvider(client).clarify("x").catch((e: unknown) => e);
 
     expect(err).toBeInstanceOf(ProviderError);
     expect((err as ProviderError).retryable).toBe(false);
@@ -405,20 +380,14 @@ describe("ClaudeProvider.countTokens", () => {
     const n = await makeProvider(client).countTokens("some grounded prompt text");
 
     expect(n).toBe(4321);
-    expect(countTokens).toHaveBeenCalledWith(
-      expect.objectContaining({ model: "claude-sonnet-4-6" }),
-    );
+    expect(countTokens).toHaveBeenCalledWith(expect.objectContaining({ model: "claude-sonnet-4-6" }));
   });
 
   it("maps SDK errors from countTokens to ProviderError", async () => {
     const { client, countTokens } = fakeClient();
-    countTokens.mockRejectedValueOnce(
-      new RateLimitError(429, undefined, "rate limited", new Headers()),
-    );
+    countTokens.mockRejectedValueOnce(new RateLimitError(429, undefined, "rate limited", new Headers()));
 
-    const err = await makeProvider(client)
-      .countTokens("x")
-      .catch((e: unknown) => e);
+    const err = await makeProvider(client).countTokens("x").catch((e: unknown) => e);
 
     expect(err).toBeInstanceOf(ProviderError);
     expect((err as ProviderError).retryable).toBe(true);

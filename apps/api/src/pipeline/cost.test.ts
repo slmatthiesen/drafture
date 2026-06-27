@@ -12,6 +12,7 @@ import {
   estimateCosts,
   formatRange,
   onDemandDisclaimer,
+  parseTrafficVolume,
   ASSUMED_MONTHLY_VOLUME,
   TIER_COST_MULTIPLIER,
 } from "./cost.js";
@@ -203,6 +204,118 @@ describe("estimateCosts", () => {
     const units = budget.costDrivers.filter((d) => d.service === "Lambda").map((d) => d.unit);
     expect(units).toContain("per 1k requests");
     expect(units).toContain("$/GB-second");
+  });
+
+  it("does NOT add a NAT line when a non-VPC node merely contains a VPC substring (e.g. 'dashboaRDS')", () => {
+    // Regression: a bare substring match on "rds" mis-fired on "CloudWatch
+    // Dashboards" (and "records"), adding a phantom NAT line to pure-serverless
+    // tiers. Word-boundary matching must reject it.
+    const serverlessWithDashboards: ArchitectureResult = {
+      assumptions: [],
+      clarificationsUsed: [],
+      securityFloor: SECURITY_FLOOR,
+      ...RECOMMENDATION,
+      tiers: [
+        tier(
+          "balanced",
+          [node("Lambda"), node("DynamoDB"), node("CloudWatch Dashboards")],
+          ["+ dashboards"],
+        ),
+      ],
+    };
+
+    const out = estimateCosts(serverlessWithDashboards, stores.pricing, REGION);
+    const balanced = out.tiers[0]!;
+    expect(balanced.costDrivers.some((d) => d.service === "NAT Gateway")).toBe(false);
+    expect(balanced.costDrivers.some((d) => d.service === "Data Transfer")).toBe(false);
+  });
+
+  it("splits a combined service label ('A + B') so each service is priced, not dropped", () => {
+    // The model groups services in one node ("CloudFront + WAF", "ALB / RDS");
+    // without splitting, the whole label misses a price match and BOTH cost lines
+    // vanish from the tier. Each part must be priced independently.
+    const combined: ArchitectureResult = {
+      assumptions: [],
+      clarificationsUsed: [],
+      securityFloor: SECURITY_FLOOR,
+      ...RECOMMENDATION,
+      tiers: [tier("balanced", [node("ALB + RDS")], ["+ multi-AZ"])],
+    };
+
+    const out = estimateCosts(combined, stores.pricing, REGION);
+    const services = out.tiers[0]!.costDrivers.map((d) => d.service);
+    expect(services).toContain("ALB");
+    expect(services).toContain("RDS");
+  });
+
+  it("prices delivery/event services the model now emits (SES, EventBridge)", () => {
+    // The notification pipeline directs the model to SES for email and EventBridge
+    // for the resilient-tier bus; both must be priced, or a billable notification
+    // system's primary variable cost (email delivery) is silently omitted.
+    const withDelivery: ArchitectureResult = {
+      assumptions: [],
+      clarificationsUsed: [],
+      securityFloor: SECURITY_FLOOR,
+      ...RECOMMENDATION,
+      tiers: [tier("balanced", [node("SES"), node("EventBridge")], ["+ event bus + email delivery"])],
+    };
+
+    const out = estimateCosts(withDelivery, stores.pricing, REGION);
+    const services = out.tiers[0]!.costDrivers.map((d) => d.service);
+    expect(services).toContain("SES");
+    expect(services).toContain("EventBridge");
+  });
+
+  it("prices data/observability services the model emits (Aurora, OpenSearch, Kinesis, CloudWatch Logs, X-Ray)", () => {
+    // These were silently $0 (no seed entry) — and Aurora/OpenSearch even TRIGGERED
+    // a NAT line while their own compute showed $0. Each must now carry its own cost.
+    const withData: ArchitectureResult = {
+      assumptions: [],
+      clarificationsUsed: [],
+      securityFloor: SECURITY_FLOOR,
+      ...RECOMMENDATION,
+      tiers: [
+        tier(
+          "balanced",
+          [node("Aurora"), node("OpenSearch"), node("Kinesis"), node("CloudWatch Logs"), node("X-Ray")],
+          ["+ data + observability"],
+        ),
+      ],
+    };
+
+    const out = estimateCosts(withData, stores.pricing, REGION);
+    const services = out.tiers[0]!.costDrivers.map((d) => d.service);
+    for (const s of ["Aurora", "OpenSearch", "Kinesis", "CloudWatch Logs", "X-Ray"]) {
+      expect(services).toContain(s);
+    }
+  });
+
+  it("parseTrafficVolume maps the intake traffic answer to a volume multiplier", () => {
+    expect(parseTrafficVolume(["Expected traffic: Just launching"])).toBe(0.1);
+    expect(parseTrafficVolume(["Expected traffic: Hundreds–thousands a day"])).toBe(1);
+    expect(parseTrafficVolume(["Expected traffic: Millions a day"])).toBe(30);
+    expect(parseTrafficVolume(["Expected traffic: Not sure"])).toBe(1);
+    expect(parseTrafficVolume(undefined)).toBe(1);
+    // A non-traffic answer (or none) leaves the band unscaled.
+    expect(parseTrafficVolume(["Downtime tolerance: Mission-critical"])).toBe(1);
+  });
+
+  it("estimateCosts scales the band by volume (Millions ≈ 30× the baseline)", () => {
+    const base: ArchitectureResult = {
+      assumptions: [],
+      clarificationsUsed: [],
+      securityFloor: SECURITY_FLOOR,
+      ...RECOMMENDATION,
+      tiers: [tier("budget", [node("API Gateway")], ["baseline"])],
+    };
+    const price = stores.pricing.get("API Gateway", REGION).find((r) => r.unit === "per-1k-requests")!;
+    const band = ASSUMED_MONTHLY_VOLUME["per-1k-requests"]!;
+    const atScale = (s: number): string =>
+      estimateCosts(base, stores.pricing, REGION, s).tiers[0]!.costDrivers.find(
+        (d) => d.service === "API Gateway" && d.unit === "per 1k requests",
+      )!.estimateRange;
+    expect(atScale(1)).toBe(formatRange(price.usd * band.low, price.usd * band.high));
+    expect(atScale(30)).toBe(formatRange(price.usd * band.low * 30, price.usd * band.high * 30));
   });
 
   it("falls back to the seed and flags approximate when the cache lacks a service", () => {

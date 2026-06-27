@@ -15,6 +15,7 @@ import type { FastifyInstance, preHandlerHookHandler } from "fastify";
 import type { Config } from "../config.js";
 import type { LlmProvider } from "../llm/provider.js";
 import { ClaudeProvider } from "../llm/claude.js";
+import { GlmProvider } from "../llm/glm.js";
 
 import { getDb, createStores, type Db, type Stores } from "../store/sqlite.js";
 import { seedKnowledgeBase } from "../store/kbLoader.js";
@@ -73,6 +74,12 @@ export interface AppContextOverrides {
  * Build the composition root. Opens + seeds storage (idempotent), constructs the
  * provider and the guard chain. Pure wiring — no request-time work happens here.
  */
+/** Select the LLM provider from config (KTD2): Anthropic by default, GLM when
+ *  LLM_PROVIDER=glm. Both implement LlmProvider, so callers stay provider-agnostic. */
+function buildProvider(config: Config): LlmProvider {
+  return config.LLM_PROVIDER === "glm" ? GlmProvider.fromConfig(config) : ClaudeProvider.fromConfig(config);
+}
+
 export function buildAppContext(
   config: Config,
   overrides: AppContextOverrides = {},
@@ -86,7 +93,7 @@ export function buildAppContext(
   // Idempotent — safe whether the DB is fresh or already seeded (kbLoader).
   seedKnowledgeBase(stores);
 
-  const provider = overrides.provider ?? ClaudeProvider.fromConfig(config);
+  const provider = overrides.provider ?? buildProvider(config);
 
   const guards: AppGuards = {
     accessGate: makeAccessGate({ user: config.ACCESS_GATE_USER, pass: config.ACCESS_GATE_PASS }),

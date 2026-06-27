@@ -77,6 +77,8 @@ export const ASSUMED_MONTHLY_VOLUME: Record<string, VolumeBand> = {
   "gb-transfer": { low: 50, high: 500 },
   "gb-cross-az": { low: 50, high: 500 },
   "gb-processed": { low: 50, high: 500 },
+  // Log ingestion (CloudWatch Logs): 50 → 500 GB/month.
+  "gb-ingested": { low: 50, high: 500 },
   // Flat monthly charges (WAF web ACL): fixed, band of 1.
   "web-acl-month": { low: 1, high: 1 },
 };
@@ -104,6 +106,7 @@ const UNIT_LABEL: Record<string, string> = {
   "gb-transfer": "$/GB transferred",
   "gb-cross-az": "$/GB cross-AZ",
   "gb-processed": "$/GB processed",
+  "gb-ingested": "$/GB ingested",
   "web-acl-month": "$/web-ACL-month",
 };
 
@@ -132,6 +135,28 @@ export function onDemandDisclaimer(region: string): string {
     `over assumed monthly volumes. They exclude the AWS Free Tier, Savings Plans, ` +
     `Reserved Instances, and negotiated discounts.`
   );
+}
+
+/**
+ * Map the intake "Expected traffic" answer to a multiplier on the assumed monthly
+ * volume bands. The default band (~100k–1M req/mo) already represents the middle
+ * option ("Hundreds–thousands a day"); "Just launching" shrinks it and "Millions a
+ * day" grows it ~30×, so the estimate reflects the STATED traffic instead of a flat
+ * generic band. Returns 1 (no scaling) when there is no traffic answer.
+ *
+ * WHY scale the band rather than recompute: real volume is unknown — the intake is a
+ * coarse chip — so we keep the deterministic per-unit model and stretch its band.
+ * Always-on units (EC2/ALB/RDS hours) scale too, which slightly overstates them at
+ * "millions" (you add some capacity), an acceptable approximation for a range.
+ */
+export function parseTrafficVolume(answers: string[] | undefined): number {
+  const a = (answers ?? []).find((x) => /^expected traffic:/i.test(x));
+  if (!a) return 1;
+  const v = a.slice(a.indexOf(":") + 1).toLowerCase();
+  if (v.includes("not sure")) return 1;
+  if (v.includes("just launching")) return 0.1;
+  if (v.includes("million")) return 30;
+  return 1; // "Hundreds–thousands a day" (and anything unrecognized) is the baseline band.
 }
 
 /** Offline seed fallback, keyed by `service|region`, used only when the cache
@@ -179,6 +204,20 @@ function normalizeService(name: string): string {
   return aliases[stripped] ?? stripped;
 }
 
+/**
+ * The model often groups services in one node label ("CloudFront + WAF",
+ * "API Gateway / Lambda", "SNS and SQS"); split on the separators so EACH service
+ * is priced instead of the whole combined label missing a price match (and the
+ * tier silently dropping those cost lines). AWS service names contain no such
+ * separators, so this never over-splits.
+ */
+function splitServices(awsService: string): string[] {
+  return awsService
+    .split(/\s*[+/]\s*|\s+and\s+/i)
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+}
+
 interface PriceLookup {
   records: PriceRecord[];
   /** True when the cache had no row and we fell back to the offline seed. */
@@ -202,14 +241,15 @@ function driversForService(
   pricing: PricingStore,
   isPrivateSubnetDefault: boolean,
   tierMultiplier: number,
+  volumeScale: number,
 ): CostDriver[] {
   const { records, approximate } = lookupPrices(service, region, pricing);
   return records.map((r) => {
     const band = ASSUMED_MONTHLY_VOLUME[r.unit] ?? DEFAULT_BAND;
-    // Scale the whole estimate by the tier's robustness premium.
+    // Scale by the intake traffic band (volume) AND the tier's robustness premium.
     const estimateRange = formatRange(
-      r.usd * band.low * tierMultiplier,
-      r.usd * band.high * tierMultiplier,
+      r.usd * band.low * tierMultiplier * volumeScale,
+      r.usd * band.high * tierMultiplier * volumeScale,
     );
     let note = r.note;
     if (isPrivateSubnetDefault) {
@@ -269,11 +309,16 @@ const VPC_PRIVATE_SERVICE_KEYWORDS = [
 function egressesFromPrivateSubnet(tier: Tier): boolean {
   return tier.nodes.some((n) => {
     const serviceSurface = `${n.awsService} ${n.role}`.toLowerCase();
-    return VPC_PRIVATE_SERVICE_KEYWORDS.some((kw) => serviceSurface.includes(kw));
+    // Word-boundary match, not a bare substring: `includes("rds")` mis-fires on
+    // "dashboaRDS" / "recoRDS" / "standaRDS", adding a PHANTOM NAT line to
+    // pure-serverless tiers that merely have a dashboards/records node. `\bkw\b`
+    // requires the VPC service to appear as its own token ("rds", "fargate"…),
+    // which is what we actually mean.
+    return VPC_PRIVATE_SERVICE_KEYWORDS.some((kw) => new RegExp(`\\b${kw}\\b`).test(serviceSurface));
   });
 }
 
-function estimateTier(tier: Tier, pricing: PricingStore, region: string): Tier {
+function estimateTier(tier: Tier, pricing: PricingStore, region: string, volumeScale: number): Tier {
   const drivers: CostDriver[] = [];
   const seen = new Set<string>();
   const add = (d: CostDriver): void => {
@@ -285,9 +330,9 @@ function estimateTier(tier: Tier, pricing: PricingStore, region: string): Tier {
 
   const tierMultiplier = TIER_COST_MULTIPLIER[tier.name];
 
-  const services = uniqueOrdered(tier.nodes.map((n) => normalizeService(n.awsService)));
+  const services = uniqueOrdered(tier.nodes.flatMap((n) => splitServices(n.awsService).map(normalizeService)));
   for (const service of services) {
-    for (const d of driversForService(service, region, pricing, false, tierMultiplier)) add(d);
+    for (const d of driversForService(service, region, pricing, false, tierMultiplier, volumeScale)) add(d);
   }
 
   // Surface the recurring NAT/egress cost a VPC-bound tier imposes, even though no
@@ -295,7 +340,7 @@ function estimateTier(tier: Tier, pricing: PricingStore, region: string): Tier {
   // (KTD6).
   if (egressesFromPrivateSubnet(tier)) {
     for (const service of DATA_TRANSFER_DEFAULT_SERVICES) {
-      for (const d of driversForService(service, region, pricing, true, tierMultiplier)) add(d);
+      for (const d of driversForService(service, region, pricing, true, tierMultiplier, volumeScale)) add(d);
     }
   }
 
@@ -323,8 +368,9 @@ export function estimateCosts(
   result: ArchitectureResult,
   pricing: PricingStore,
   region: string,
+  volumeScale: number = 1,
 ): ArchitectureResult {
-  const tiers = result.tiers.map((tier) => estimateTier(tier, pricing, region));
+  const tiers = result.tiers.map((tier) => estimateTier(tier, pricing, region, volumeScale));
   const disclaimer = onDemandDisclaimer(region);
   const assumptions = result.assumptions.includes(disclaimer)
     ? result.assumptions

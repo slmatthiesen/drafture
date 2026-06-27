@@ -20,7 +20,14 @@ const ConfigSchema = z.object({
   HOST: z.string().default("0.0.0.0"),
 
   // LLM
-  ANTHROPIC_API_KEY: z.string().min(1, "ANTHROPIC_API_KEY is required"),
+  ANTHROPIC_API_KEY: z.string().optional(),
+
+  // Provider selection (KTD2): "claude" (Anthropic, default) or "glm" (Zhipu /
+  // BigModel, OpenAI-compatible). The selected provider's key is required
+  // (enforced below), so a GLM-only deploy needs no Anthropic key.
+  LLM_PROVIDER: z.enum(["claude", "glm"]).default("claude"),
+  GLM_API_KEY: z.string().optional(),
+  GLM_BASE_URL: z.string().default("https://open.bigmodel.cn/api/paas/v4"),
   LLM_MODEL: z.string().default("claude-sonnet-4-6"),
   // `low` keeps generation fast/cheap for a public tool; the system prompt is
   // detailed enough that higher effort adds latency without much quality gain.
@@ -72,6 +79,24 @@ const ConfigSchema = z.object({
 
   // Static SPA build directory served by the API
   WEB_DIST: z.string().default("../web/dist"),
+}).superRefine((v, ctx) => {
+  // Fail fast at config load if the SELECTED provider's key is missing. Keeps
+  // forker-safe behavior (a bare clone still can't boot without a real key) while
+  // allowing a GLM-only deploy to omit ANTHROPIC_API_KEY.
+  if (v.LLM_PROVIDER === "claude" && !v.ANTHROPIC_API_KEY) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["ANTHROPIC_API_KEY"],
+      message: "ANTHROPIC_API_KEY is required when LLM_PROVIDER=claude",
+    });
+  }
+  if (v.LLM_PROVIDER === "glm" && !v.GLM_API_KEY) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["GLM_API_KEY"],
+      message: "GLM_API_KEY is required when LLM_PROVIDER=glm",
+    });
+  }
 });
 
 export type Config = z.infer<typeof ConfigSchema>;

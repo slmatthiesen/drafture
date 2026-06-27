@@ -190,5 +190,61 @@
     "usd": 0.045,
     "note": "Per NAT gateway-hour (always-on, ~$32.40/month per AZ before data processing).",
     "source": "https://aws.amazon.com/vpc/pricing/"
+  },
+  {
+    "service": "SES",
+    "region": "us-east-1",
+    "unit": "per-1k-requests",
+    "usd": 0.1,
+    "note": "Email send: $0.10 per 1,000 emails (content). Attachment/data transfer billed separately.",
+    "source": "https://aws.amazon.com/ses/pricing/"
+  },
+  {
+    "service": "EventBridge",
+    "region": "us-east-1",
+    "unit": "per-1k-requests",
+    "usd": 0.001,
+    "note": "Custom event-bus events: $1.00 per 1M events published. Pipes/schema registry priced separately.",
+    "source": "https://aws.amazon.com/eventbridge/pricing/"
+  },
+  {
+    "service": "Aurora",
+    "region": "us-east-1",
+    "unit": "hour",
+    "usd": 0.1,
+    "note": "Aurora PostgreSQL provisioned, small instance (~$0.10/hr); Serverless v2 ~$0.12/ACU-hr. Multi-AZ ~2x. Storage billed separately.",
+    "source": "https://aws.amazon.com/rds/aurora/pricing/"
+  },
+  {
+    "service": "OpenSearch",
+    "region": "us-east-1",
+    "unit": "hour",
+    "usd": 0.04,
+    "note": "OpenSearch Service, small search node (t3.small.search ~$0.036/hr). Cost = node count × hours; EBS storage billed separately.",
+    "source": "https://aws.amazon.com/opensearch-service/pricing/"
+  },
+  {
+    "service": "Kinesis",
+    "region": "us-east-1",
+    "unit": "hour",
+    "usd": 0.015,
+    "note": "Kinesis Data Streams, per shard-hour (standard); plus $0.014 per 1,000 PUT records. On-demand mode prices per GB/stream.",
+    "source": "https://aws.amazon.com/kinesis/data-streams/pricing/"
+  },
+  {
+    "service": "CloudWatch Logs",
+    "region": "us-east-1",
+    "unit": "gb-ingested",
+    "usd": 0.5,
+    "note": "CloudWatch Logs ingestion $0.50/GB (first 10GB/mo free in some accounts). Archival storage is cheaper; Insights queries extra.",
+    "source": "https://aws.amazon.com/cloudwatch/pricing/"
+  },
+  {
+    "service": "X-Ray",
+    "region": "us-east-1",
+    "unit": "per-1k-requests",
+    "usd": 0.005,
+    "note": "X-Ray traces: $5.00 per 1M traces recorded (first 100k/mo free).",
+    "source": "https://aws.amazon.com/xray/pricing/"
   }
 ]
