@@ -164,7 +164,8 @@ export function App(): JSX.Element {
 
   // The gallery/recents sit far down the landing page; jump back to the top so the
   // opened design (recommendation banner first) is what the user lands on.
-  const scrollToTop = (): void => window.scrollTo({ top: 0, behavior: "smooth" });
+  const scrollToTop = (): void =>
+    window.scrollTo({ top: 0, behavior: "smooth" });
 
   // Re-open a saved design: pure client-side, no fetch, $0.
   const openSaved = (entry: HistoryEntry): void => {
@@ -272,7 +273,8 @@ export function App(): JSX.Element {
           </h1>
         ) : (
           <p className="app__tagline">
-            Describe a system — get a safe, costed AWS design.
+            Describe a system — get a safe, costed AWS design from an agent
+            trained on AWS architecture.
           </p>
         )}
       </header>
@@ -340,9 +342,7 @@ export function App(): JSX.Element {
         </section>
       )}
 
-      {!submitted && (
-        <CuratedGallery entries={curated} onOpen={openCurated} />
-      )}
+      {!submitted && <CuratedGallery entries={curated} onOpen={openCurated} />}
 
       {!submitted && (
         <RecentDesigns
