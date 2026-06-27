@@ -52,7 +52,34 @@ export function rollupCost(drivers: CostDriver[]): CostRollup {
   return { low, high, counted, partial: counted < drivers.length };
 }
 
-function formatMoney(n: number): string {
+/**
+ * A driver whose cost is FIXED — always-on capacity (per-hour: NAT/ALB/ElastiCache/
+ * EC2/Fargate) or storage / flat monthly charges (per-month). These recur even at
+ * ZERO traffic, so they form the baseline. Per-request / per-GB units are variable
+ * (traffic-driven) and excluded. Recognized by a per-hour or per-month unit label.
+ */
+function isFixedUnit(unit: string): boolean {
+  return /hr|hour|month/i.test(unit);
+}
+
+/**
+ * The monthly cost of just RUNNING these services with zero traffic — the
+ * always-on + storage floor, i.e. the fixed-unit drivers at their low end. $0 for
+ * a pure-serverless tier (Lambda + DynamoDB + S3-on-demand scale to zero at rest),
+ * which is exactly why a serverless range can span $0 → hundreds: the spread is
+ * traffic, not fixed cost.
+ */
+export function baselineCost(drivers: CostDriver[]): number {
+  let baseline = 0;
+  for (const d of drivers) {
+    if (!isFixedUnit(d.unit)) continue;
+    const parsed = parseMonthlyRange(d.estimateRange);
+    if (parsed) baseline += parsed.low;
+  }
+  return baseline;
+}
+
+export function formatMoney(n: number): string {
   if (n >= 10) return String(Math.round(n));
   // Keep cents for small numbers, trimming trailing zeros (1.50 → "1.5", 2.00 → "2").
   return n.toFixed(2).replace(/\.?0+$/, "");

@@ -196,6 +196,18 @@ export function App(): JSX.Element {
     scrollToTop();
   };
 
+  // Return to the landing/gallery from a result view without a page reload —
+  // otherwise a visitor viewing a curated design has to refresh to browse the rest.
+  const backToStart = (): void => {
+    setPhase("idle");
+    // Land on the gallery (rAF waits for the idle render to paint it first).
+    window.requestAnimationFrame(() => {
+      document
+        .getElementById("gallery")
+        ?.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+  };
+
   const startGeneration = async (
     description: string,
     answers?: string[],
@@ -388,6 +400,13 @@ export function App(): JSX.Element {
 
       {phase === "result" && result && (
         <>
+          <button
+            type="button"
+            className="result__back"
+            onClick={backToStart}
+          >
+            ← Back to all examples
+          </button>
           <section
             className="banner banner--recommend"
             role="note"

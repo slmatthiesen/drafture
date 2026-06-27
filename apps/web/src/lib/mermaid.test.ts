@@ -107,4 +107,42 @@ describe("graphToMermaid (U11 / R4)", () => {
   it("respects the requested direction", () => {
     expect(graphToMermaid([], [], "TB")).toBe("flowchart TB");
   });
+
+  it("groups observability/notification nodes into a labeled subgraph", () => {
+    const out = graphToMermaid(
+      [node("api", "API Gateway"), node("logs", "CloudWatch Logs"), node("sns", "SNS", "alarm notifier")],
+      [edge("api", "logs", "logs", "CloudWatch")],
+    );
+    // CloudWatch Logs (service) and SNS-as-alarm-notifier (role) land in the panel;
+    // API Gateway stays on the core path outside it.
+    expect(out).toContain('subgraph obs ["Observability & notifications"]');
+    expect(out).toContain("end");
+    expect(out).toMatch(/subgraph obs[\s\S]*CloudWatch Logs[\s\S]*end/);
+    expect(out).toMatch(/subgraph obs[\s\S]*SNS[\s\S]*end/);
+    // SNS only groups when it's the alerting role — a fan-out hub stays on the core path.
+    const hub = graphToMermaid([node("sns", "SNS", "fan-out hub")], []);
+    expect(hub).not.toContain("subgraph obs");
+  });
+
+  it("tags the external caller node as the green entry point", () => {
+    // Implicit 'client' endpoint (from an edge) and a declared 'External caller'
+    // node both count as the entry — the model names it either way.
+    const fromImplicit = graphToMermaid(
+      [node("api", "API Gateway")],
+      [edge("client", "api", "req", "HTTPS")],
+    );
+    expect(fromImplicit).toContain("classDef entry");
+    expect(fromImplicit).toMatch(/class n\d+ entry/);
+
+    const fromDeclared = graphToMermaid(
+      [node("caller", "External caller"), node("api", "API Gateway")],
+      [edge("caller", "api", "ping", "HTTPS")],
+    );
+    expect(fromDeclared).toContain("classDef entry");
+
+    // A graph with no external-caller node gets no entry styling.
+    expect(graphToMermaid([node("a", "A")], [edge("a", "b", "x", "y")])).not.toContain(
+      "classDef entry",
+    );
+  });
 });

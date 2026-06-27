@@ -77,7 +77,7 @@ export function CuratedGallery({
   };
 
   return (
-    <section className="gallery" aria-label="Curated example designs">
+    <section id="gallery" className="gallery" aria-label="Curated example designs">
       <h2 className="gallery__title">See how it works with these</h2>
       <p className="gallery__sub">Real designs we've generated — open one instantly, free.</p>
       <ul className="gallery__list">

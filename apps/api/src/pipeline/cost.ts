@@ -53,10 +53,16 @@ export const TIER_COST_MULTIPLIER: Record<TierName, number> = {
   resilient: 3,
 };
 
-/** Assumed MONTHLY consumption per native unit, used to turn a per-unit list
- *  price into a range. Numbers are the count of native units consumed per month
- *  (low → high). Exported so tests/callers compute expected ranges from the same
- *  source of truth. */
+/** Assumed MONTHLY consumption per native unit for REQUEST / CAPACITY / STORAGE
+ *  units — the count of native units consumed per month (low → high). Exported so
+ *  tests/callers compute expected ranges from the same source of truth.
+ *
+ *  NOT listed here: payload-proportional TRAFFIC units (data transfer, log
+ *  ingestion, NAT-processed, cross-AZ). Those are derived from request volume × a
+ *  small per-request payload in {@link TRAFFIC_BYTES_PER_REQUEST} / {@link
+ *  monthlyBand}, NOT a fixed GB band. A fixed band × the "millions = ×30" request
+ *  multiplier double-counted scale and made a redirect-only service (a URL
+ *  shortener) look like it spent $15k/mo on logs. */
 export interface VolumeBand {
   low: number;
   high: number;
@@ -67,9 +73,11 @@ export const ASSUMED_MONTHLY_VOLUME: Record<string, VolumeBand> = {
   "per-1k-requests": { low: 100, high: 1000 },
   "per-1k-rru": { low: 100, high: 1000 },
   "per-1k-wru": { low: 100, high: 1000 },
+  // WebSocket connection-minutes: ~1M–10M/month (concurrent connections × uptime).
+  "per-1m-conn-min": { low: 1, high: 10 },
   // Lambda compute: ~100k→1M invocations × 0.5 GB × 0.2 s ≈ 10k → 100k GB-seconds.
   "gb-second": { low: 10_000, high: 100_000 },
-  // Storage: 10 → 100 GB-month.
+  // Storage at rest: 10 → 100 GB-month (NOT request-proportional).
   "gb-month": { low: 10, high: 100 },
   // Always-on capacity: 1 → 2 instances/nodes × 730 hr (single-AZ → multi-AZ).
   hour: { low: 730, high: 1460 },
@@ -79,19 +87,54 @@ export const ASSUMED_MONTHLY_VOLUME: Record<string, VolumeBand> = {
   "gb-hour": { low: 1460, high: 2920 },
   // Identity: 1k → 50k monthly active users.
   "per-mau": { low: 1000, high: 50_000 },
-  // Data transfer: 50 → 500 GB/month.
-  "gb-internet-egress": { low: 50, high: 500 },
-  "gb-transfer": { low: 50, high: 500 },
-  "gb-cross-az": { low: 50, high: 500 },
-  "gb-processed": { low: 50, high: 500 },
-  // Log ingestion (CloudWatch Logs): 50 → 500 GB/month.
-  "gb-ingested": { low: 50, high: 500 },
   // Flat monthly charges (WAF web ACL): fixed, band of 1.
   "web-acl-month": { low: 1, high: 1 },
 };
 
 /** Conservative fallback band for an unrecognized native unit. */
 const DEFAULT_BAND: VolumeBand = { low: 1, high: 10 };
+
+/**
+ * Baseline monthly REQUEST volume (the same 100k–1M/mo the request-priced bands
+ * encode), scaled by the intake traffic answer. The driver for payload-
+ * proportional traffic units so transfer/logs grow with request count ONCE,
+ * instead of via a fixed band × the request multiplier (the old double-count).
+ */
+export const REQUESTS_PER_MONTH_BASE: VolumeBand = { low: 100_000, high: 1_000_000 };
+
+/**
+ * Payload-proportional traffic units as ASSUMED BYTES PER REQUEST (GB = monthly
+ * requests × bytes-per-request). A redirect / JSON response is a few KB out; a
+ * structured log line is a couple hundred bytes. These are honest, workload-
+ * agnostic middle estimates (a media site transfers more per request, a URL
+ * shortener ~400 B less) — what matters is they scale with request volume, the
+ * real driver, instead of a blunt fixed GB band that blew up high-volume /
+ * tiny-payload services.
+ */
+export const TRAFFIC_BYTES_PER_REQUEST: Record<string, number> = {
+  "gb-internet-egress": 5_000, // outbound response payload (~5 KB)
+  "gb-transfer": 5_000,
+  "gb-cross-az": 5_000, // inter-AZ hop ≈ the response payload
+  "gb-processed": 5_000, // NAT-processed outbound ≈ the response payload
+  "gb-ingested": 200, // one structured CloudWatch log line (~200 B)
+};
+
+/**
+ * Monthly consumption band for a native unit. Request/capacity/storage units use
+ * their fixed band × the traffic multiplier (unchanged). Payload-proportional
+ * traffic units derive GB from request volume × bytes-per-request — the traffic
+ * multiplier is already baked into the request count, so it is NOT re-applied
+ * (that re-scaling was the cost bug). The tier multiplier is applied by the caller.
+ */
+function monthlyBand(unit: string, volumeScale: number): VolumeBand {
+  const bytes = TRAFFIC_BYTES_PER_REQUEST[unit];
+  if (bytes !== undefined) {
+    const gb = (req: number): number => (req * volumeScale * bytes) / 1e9;
+    return { low: gb(REQUESTS_PER_MONTH_BASE.low), high: gb(REQUESTS_PER_MONTH_BASE.high) };
+  }
+  const base = ASSUMED_MONTHLY_VOLUME[unit] ?? DEFAULT_BAND;
+  return { low: base.low * volumeScale, high: base.high * volumeScale };
+}
 
 /** Services whose recurring cost is forced by the private-subnet default and
  *  must be surfaced explicitly when a tier egresses from a private subnet. */
@@ -102,6 +145,7 @@ const UNIT_LABEL: Record<string, string> = {
   "per-1k-requests": "per 1k requests",
   "per-1k-rru": "per 1k read units",
   "per-1k-wru": "per 1k write units",
+  "per-1m-conn-min": "$/M connection-min",
   "gb-second": "$/GB-second",
   "gb-month": "$/GB-month",
   hour: "$/hr",
@@ -206,6 +250,10 @@ function normalizeService(name: string): string {
     "Simple Storage Service": "S3",
     "Relational Database Service": "RDS",
     "Elastic Compute Cloud": "EC2",
+    "API Gateway WebSocket APIs": "API Gateway WebSocket",
+    "API Gateway WebSocket API": "API Gateway WebSocket",
+    "API Gateway WebSocket": "API Gateway WebSocket",
+    "WebSocket API": "API Gateway WebSocket",
     Lambda: "Lambda",
   };
   return aliases[stripped] ?? stripped;
@@ -252,11 +300,13 @@ function driversForService(
 ): CostDriver[] {
   const { records, approximate } = lookupPrices(service, region, pricing);
   return records.map((r) => {
-    const band = ASSUMED_MONTHLY_VOLUME[r.unit] ?? DEFAULT_BAND;
-    // Scale by the intake traffic band (volume) AND the tier's robustness premium.
+    // Traffic units carry the volume multiplier inside monthlyBand (request-driven);
+    // request/capacity units take it via the fixed band × volumeScale. Either way the
+    // tier's robustness premium (tierMultiplier) is applied on top here.
+    const band = monthlyBand(r.unit, volumeScale);
     const estimateRange = formatRange(
-      r.usd * band.low * tierMultiplier * volumeScale,
-      r.usd * band.high * tierMultiplier * volumeScale,
+      r.usd * band.low * tierMultiplier,
+      r.usd * band.high * tierMultiplier,
     );
     let note = r.note;
     if (isPrivateSubnetDefault) {

@@ -251,6 +251,24 @@ body {
   margin: 2rem 0;
 }
 
+/* "← Back to all examples" — return from a result view to the landing gallery. */
+.result__back {
+  display: block;
+  font: inherit;
+  font-size: 0.9rem;
+  margin: 1.5rem 0 0;
+  padding: 0;
+  background: none;
+  border: none;
+  color: var(--brand-dark);
+  cursor: pointer;
+  text-align: left;
+}
+.result__back:hover {
+  color: var(--ink);
+  text-decoration: underline;
+}
+
 .banner {
   border-radius: var(--radius);
   padding: 1rem 1.25rem;
@@ -513,6 +531,10 @@ body {
   font-size: 0.95rem;
 }
 
+.cost-summary__head {
+  margin: 0;
+}
+
 .cost-summary__band {
   font-weight: 700;
 }
@@ -520,6 +542,19 @@ body {
 .cost-summary__label {
   color: var(--muted);
   font-size: 0.85rem;
+}
+
+/* The zero-traffic floor + why the range varies — muted so the headline band leads. */
+.cost-summary__baseline {
+  margin: 0.2rem 0 0;
+  color: var(--muted);
+  font-size: 0.82rem;
+  line-height: 1.4;
+}
+
+.cost-summary__baseline strong {
+  color: var(--ink);
+  font-weight: 600;
 }
 
 /* ---- intake (E6) ---- */
@@ -1210,6 +1245,25 @@ body {
   fill: #ffffff !important;
   stroke: var(--muted) !important;
   stroke-width: 1.5px !important;
+}
+
+/* The external client = the first interaction with the system → green entry cue.
+   Higher specificity (.node.entry) than the white rule above, so it wins there. */
+.diagram__svg .node.entry rect,
+.diagram__svg .node.entry polygon,
+.diagram-modal__svg .node.entry rect,
+.diagram-modal__svg .node.entry polygon {
+  fill: #e8f3d6 !important;
+  stroke: #46601f !important;
+}
+
+/* Observability / notification subgraph: its own light-blue panel so the ops tail
+   reads as a separate group from the warm core data path. */
+.diagram__svg .cluster > rect,
+.diagram-modal__svg .cluster > rect {
+  fill: #e3f2fd !important;
+  stroke: #90caf9 !important;
+  stroke-width: 1px !important;
 }
 
 .diagram__expand {

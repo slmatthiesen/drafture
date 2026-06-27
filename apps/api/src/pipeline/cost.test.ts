@@ -290,6 +290,23 @@ describe("estimateCosts", () => {
     }
   });
 
+  it("prices API Gateway WebSocket API (connection-minutes + messages), not silently dropped", () => {
+    // The model emits 'API Gateway WebSocket APIs' for realtime/chat workloads; it
+    // must normalize to the priced 'API Gateway WebSocket' (connection-minutes +
+    // messages) instead of missing a REST-only 'API Gateway' match and billing $0.
+    const withWs: ArchitectureResult = {
+      assumptions: [],
+      clarificationsUsed: [],
+      securityFloor: SECURITY_FLOOR,
+      ...RECOMMENDATION,
+      tiers: [tier("balanced", [node("API Gateway WebSocket APIs"), node("Lambda")], ["+ websocket"])],
+    };
+    const out = estimateCosts(withWs, stores.pricing, REGION);
+    const drivers = out.tiers[0]!.costDrivers;
+    expect(drivers.some((d) => d.service === "API Gateway WebSocket" && d.unit === "$/M connection-min")).toBe(true);
+    expect(drivers.some((d) => d.service === "API Gateway WebSocket" && d.unit === "per 1k requests")).toBe(true);
+  });
+
   it("parseTrafficVolume maps the intake traffic answer to a volume multiplier", () => {
     expect(parseTrafficVolume(["Expected traffic: Just launching"])).toBe(0.1);
     expect(parseTrafficVolume(["Expected traffic: Hundreds–thousands a day"])).toBe(1);

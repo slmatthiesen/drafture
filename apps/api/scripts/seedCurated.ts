@@ -73,6 +73,21 @@ const DEMOS: Demo[] = [
       "Data sensitivity: Regulated (HIPAA/PCI/etc.)",
     ],
   },
+  {
+    title: "Notification system",
+    description:
+      "A notification system: it receives an inbound event via a webhook (a third party " +
+      "POSTs to a public endpoint, or a client publishes directly), verifies the sender, " +
+      "then fans the event out to subscribed destinations — transactional email, a mobile " +
+      "push service, and a downstream webhook. Delivery must be reliable and observable " +
+      "(retries with backoff, a dead-letter path, per-message delivery status), and inbound " +
+      "volume is bursty.",
+    answers: [
+      "Expected traffic: Hundreds–thousands a day",
+      "Downtime tolerance: Mission-critical",
+      "Data sensitivity: No",
+    ],
+  },
 ];
 
 function slug(title: string): string {

@@ -54,4 +54,30 @@ describe("CostSummary", () => {
     const { container } = render(<CostSummary drivers={[driver("$0.023/GB-mo")]} />);
     expect(container).toBeEmptyDOMElement();
   });
+
+  it("shows the zero-traffic baseline from fixed (always-on/storage) drivers", () => {
+    const withUnit = (estimateRange: string, unit: string): CostDriver => ({
+      service: "svc",
+      unit,
+      estimateRange,
+      note: "",
+    });
+    // A NAT gateway ($/hr) is always-on → counts toward baseline; per-request is variable.
+    render(
+      <CostSummary
+        drivers={[withUnit("$32–$65/mo", "$/hr"), withUnit("$10–$100/mo", "per 1k requests")]}
+      />,
+    );
+    expect(screen.getByText(/\$32\/mo baseline/i)).toBeInTheDocument();
+  });
+
+  it("notes scales-to-zero when there are no fixed (always-on) drivers", () => {
+    render(
+      <CostSummary
+        drivers={[{ service: "s", unit: "per 1k requests", estimateRange: "$5–$50/mo", note: "" }]}
+      />,
+    );
+    expect(screen.getByText(/zero traffic/i)).toBeInTheDocument();
+    expect(screen.queryByText(/baseline/i)).toBeNull();
+  });
 });

@@ -246,5 +246,21 @@
     "usd": 0.005,
     "note": "X-Ray traces: $5.00 per 1M traces recorded (first 100k/mo free).",
     "source": "https://aws.amazon.com/xray/pricing/"
+  },
+  {
+    "service": "API Gateway WebSocket",
+    "region": "us-east-1",
+    "unit": "per-1m-conn-min",
+    "usd": 0.25,
+    "note": "WebSocket API on-demand: $0.25 per 1M connection-minutes (1 connection open 1 minute = 1 connection-minute). The dominant cost for persistent-connection workloads (chat, live updates).",
+    "source": "https://aws.amazon.com/api-gateway/pricing/"
+  },
+  {
+    "service": "API Gateway WebSocket",
+    "region": "us-east-1",
+    "unit": "per-1k-requests",
+    "usd": 0.001,
+    "note": "WebSocket API on-demand: $1.00 per 1M messages sent or received.",
+    "source": "https://aws.amazon.com/api-gateway/pricing/"
   }
 ]
