@@ -5,7 +5,9 @@ export default defineConfig({
   plugins: [react()],
   server: {
     proxy: {
-      "/api": "http://localhost:8080",
+      // 127.0.0.1, NOT localhost: on Windows `localhost` resolves to IPv6 ::1, but
+      // the API binds IPv4 — the proxy then gets ECONNREFUSED ::1:8080 and 500s.
+      "/api": "http://127.0.0.1:8080",
     },
   },
   test: {

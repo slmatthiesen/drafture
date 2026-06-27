@@ -78,10 +78,32 @@ function deferred<T>(): { promise: Promise<T>; resolve: (v: T) => void } {
 }
 
 let fetchMock: ReturnType<typeof vi.fn>;
+// Generate/clarify responses are pulled from this FIFO queue. The curated-gallery
+// fetch the App fires on mount is served separately (empty list) so it never steals
+// a queued generate response — letting tests stay positional on the generate calls.
+let generateQueue: Array<Response | Promise<Response>>;
+
+/** Queue the next generate/clarify response(s), in order. */
+function queueResponses(...responses: Array<Response | Promise<Response>>): void {
+  generateQueue.push(...responses);
+}
+
+/** Only the non-curated (generate/clarify) fetch calls — what the assertions care about. */
+function generateCalls(): unknown[][] {
+  return fetchMock.mock.calls.filter((c) => !String(c[0]).includes("/api/curated"));
+}
 
 beforeEach(() => {
   renderMock.mockClear();
-  fetchMock = vi.fn();
+  generateQueue = [];
+  fetchMock = vi.fn((url: string) => {
+    // The landing page loads the curated gallery on mount; serve it an empty list so
+    // it doesn't consume a queued generate response.
+    if (String(url).includes("/api/curated")) return Promise.resolve(jsonResponse({ runs: [] }));
+    const next = generateQueue.shift();
+    if (next === undefined) throw new Error(`unexpected fetch: ${url}`);
+    return Promise.resolve(next);
+  });
   vi.stubGlobal("fetch", fetchMock);
   // Isolate the localStorage-backed design history between tests.
   localStorage.clear();
@@ -110,12 +132,12 @@ describe("App (U10 + E6 intake)", () => {
     expect(screen.queryByLabelText("System description")).not.toBeInTheDocument();
     // Intake (E6) is shown once before generation — no fetch yet.
     expect(screen.getByText(/answer 3 quick questions/i)).toBeInTheDocument();
-    expect(fetchMock).not.toHaveBeenCalled();
+    expect(generateCalls()).toHaveLength(0);
   });
 
   it("skipping the intake generates with no answers and a forced round", async () => {
     const pending = deferred<Response>();
-    fetchMock.mockReturnValueOnce(pending.promise);
+    queueResponses(pending.promise);
 
     render(<App />);
     typeAndSubmit("A photo-sharing API");
@@ -123,7 +145,7 @@ describe("App (U10 + E6 intake)", () => {
 
     // Loading state visible while the (skipped-answers) request is in flight.
     expect(screen.getByRole("status")).toHaveTextContent(/drafting/i);
-    const body = JSON.parse((fetchMock.mock.calls[0]![1] as RequestInit).body as string);
+    const body = JSON.parse((generateCalls()[0]![1] as RequestInit).body as string);
     expect(body.answers).toBeUndefined();
     expect(body.round).toBe(2);
 
@@ -132,7 +154,7 @@ describe("App (U10 + E6 intake)", () => {
   });
 
   it("answering intake chips passes labeled answers to generate", async () => {
-    fetchMock.mockResolvedValueOnce(jsonResponse(fullResult));
+    queueResponses(jsonResponse(fullResult));
 
     render(<App />);
     typeAndSubmit("A photo-sharing API");
@@ -142,7 +164,7 @@ describe("App (U10 + E6 intake)", () => {
     fireEvent.click(screen.getByRole("button", { name: /^design it$/i }));
 
     await screen.findByText("Budget single-AZ design");
-    const body = JSON.parse((fetchMock.mock.calls[0]![1] as RequestInit).body as string);
+    const body = JSON.parse((generateCalls()[0]![1] as RequestInit).body as string);
     expect(body.answers).toEqual([
       "Expected traffic: Millions a day",
       "Downtime tolerance: Mission-critical",
@@ -151,7 +173,7 @@ describe("App (U10 + E6 intake)", () => {
   });
 
   it("leads with a recommendation banner and preselects the recommended tier", async () => {
-    fetchMock.mockResolvedValueOnce(jsonResponse(balancedRecommended));
+    queueResponses(jsonResponse(balancedRecommended));
 
     render(<App />);
     typeAndSubmit("A REST API");
@@ -170,7 +192,7 @@ describe("App (U10 + E6 intake)", () => {
   });
 
   it("renders the key-decisions (ADR) card", async () => {
-    fetchMock.mockResolvedValueOnce(jsonResponse(fullResult));
+    queueResponses(jsonResponse(fullResult));
 
     render(<App />);
     typeAndSubmit("A REST API");
@@ -183,9 +205,10 @@ describe("App (U10 + E6 intake)", () => {
   });
 
   it("renders clarification questions, then advances to results after answering", async () => {
-    fetchMock
-      .mockResolvedValueOnce(jsonResponse({ needsClarification: true, questions: ["Expected traffic?"], round: 1 }))
-      .mockResolvedValueOnce(jsonResponse(fullResult));
+    queueResponses(
+      jsonResponse({ needsClarification: true, questions: ["Expected traffic?"], round: 1 }),
+      jsonResponse(fullResult),
+    );
 
     render(<App />);
     typeAndSubmit("An async job processor");
@@ -203,14 +226,14 @@ describe("App (U10 + E6 intake)", () => {
     expect(screen.getByText("budget delta detail")).toBeInTheDocument();
 
     // The resubmit carried the answers + advanced round.
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-    const secondBody = JSON.parse((fetchMock.mock.calls[1]![1] as RequestInit).body as string);
+    expect(generateCalls()).toHaveLength(2);
+    const secondBody = JSON.parse((generateCalls()[1]![1] as RequestInit).body as string);
     expect(secondBody.answers).toEqual(["about 100 rps"]);
     expect(secondBody.round).toBe(1);
   });
 
   it("renders the security floor ONCE globally, not inside each tier", async () => {
-    fetchMock.mockResolvedValueOnce(jsonResponse(fullResult));
+    queueResponses(jsonResponse(fullResult));
 
     render(<App />);
     typeAndSubmit("A REST API");
@@ -230,7 +253,7 @@ describe("App (U10 + E6 intake)", () => {
   });
 
   it("no setup-steps section is rendered (setup moved to the reference config)", async () => {
-    fetchMock.mockResolvedValueOnce(jsonResponse(fullResult));
+    queueResponses(jsonResponse(fullResult));
 
     render(<App />);
     typeAndSubmit("A REST API");
@@ -241,7 +264,7 @@ describe("App (U10 + E6 intake)", () => {
   });
 
   it("re-renders diagram + cost + delta when switching tiers", async () => {
-    fetchMock.mockResolvedValueOnce(jsonResponse(fullResult));
+    queueResponses(jsonResponse(fullResult));
 
     render(<App />);
     typeAndSubmit("A REST API");
@@ -274,11 +297,11 @@ describe("App (U10 + E6 intake)", () => {
     fireEvent.click(screen.getByRole("button", { name: /^A saved photo API/i }));
 
     expect(await screen.findByText("Budget single-AZ design")).toBeInTheDocument();
-    expect(fetchMock).not.toHaveBeenCalled();
+    expect(generateCalls()).toHaveLength(0);
   });
 
   it("saves a generated design to history for later free retrieval", async () => {
-    fetchMock.mockResolvedValueOnce(jsonResponse(fullResult));
+    queueResponses(jsonResponse(fullResult));
 
     render(<App />);
     typeAndSubmit("A photo-sharing API");
@@ -291,7 +314,7 @@ describe("App (U10 + E6 intake)", () => {
   });
 
   it("surfaces a friendly message for a rate-limit error", async () => {
-    fetchMock.mockResolvedValueOnce(jsonResponse({ error: "rate_limited" }, 429));
+    queueResponses(jsonResponse({ error: "rate_limited" }, 429));
 
     render(<App />);
     typeAndSubmit("Anything");

@@ -848,6 +848,45 @@ body {
 .gallery__meta {
   font-size: 0.8rem;
   color: var(--muted);
+  /* One line only — tech blurb must not wrap onto a second row. */
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  max-width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.gallery__open[aria-busy="true"] {
+  cursor: progress;
+}
+
+.gallery__spinner {
+  display: inline-block;
+  width: 0.8em;
+  height: 0.8em;
+  border: 2px solid var(--card-border);
+  border-top-color: var(--brand-dark);
+  border-radius: 50%;
+  animation: gallery-spin 0.6s linear infinite;
+}
+
+@keyframes gallery-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .gallery__spinner {
+    animation-duration: 1.6s;
+  }
+}
+
+.gallery__vote:disabled {
+  opacity: 0.5;
+  cursor: progress;
 }
 
 .gallery__votes {

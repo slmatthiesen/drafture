@@ -88,6 +88,8 @@ export interface CuratedSummary {
   id: string;
   title: string;
   prompt: string;
+  /** One-line tech blurb (top services of the recommended tier) for the gallery card. */
+  tech: string;
   upvotes: number;
   downvotes: number;
   createdAt: number;

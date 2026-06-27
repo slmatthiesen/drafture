@@ -128,6 +128,8 @@ describe("GlmProvider.generate", () => {
       expect.objectContaining({ type: "function", function: expect.objectContaining({ name: "emit_architecture" }) }),
     ]);
     expect(body.tool_choice).toEqual({ type: "function", function: { name: "emit_architecture" } });
+    // GLM-4.5 reasoning is disabled for our structured calls (latency, no quality gain).
+    expect(body.thinking).toEqual({ type: "disabled" });
     const messages = body.messages as Array<{ role: string; content: string }>;
     expect(messages[0]).toEqual({ role: "system", content: PROMPT.staticPrefix });
     expect(messages[1]).toEqual({ role: "user", content: PROMPT.volatileSuffix });

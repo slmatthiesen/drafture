@@ -9,7 +9,13 @@
  */
 
 import { useEffect, useState } from "react";
-import { generate, fetchCurated, fetchCuratedRun, submitFeedback, type ApiOutcome } from "./lib/api.js";
+import {
+  generate,
+  fetchCurated,
+  fetchCuratedRun,
+  submitFeedback,
+  type ApiOutcome,
+} from "./lib/api.js";
 import { BudgetReachedNotice } from "./components/BudgetReachedNotice.js";
 import { ClarifyForm } from "./components/ClarifyForm.js";
 import { CuratedGallery } from "./components/CuratedGallery.js";
@@ -21,7 +27,11 @@ import { ReferenceConfig } from "./components/ReferenceConfig.js";
 import { SecurityPanel } from "./components/SecurityPanel.js";
 import { SiteFooter } from "./components/SiteFooter.js";
 import { TierTabs } from "./components/TierTabs.js";
-import type { CuratedSummary, GenerateResponse, TierName } from "./lib/types.js";
+import type {
+  CuratedSummary,
+  GenerateResponse,
+  TierName,
+} from "./lib/types.js";
 import {
   loadHistory,
   addHistory,
@@ -53,18 +63,27 @@ const ERROR_MESSAGES: Record<string, string> = {
     "You've hit today's generation limit for your network. Please try again tomorrow.",
   daily_budget_reached:
     "The shared daily usage budget has been reached. Cached designs still work; full generation resumes tomorrow.",
-  input_too_large: "That description is too long — please shorten it and try again.",
-  network_error: "Couldn't reach the server. Check your connection and try again.",
+  input_too_large:
+    "That description is too long — please shorten it and try again.",
+  network_error:
+    "Couldn't reach the server. Check your connection and try again.",
 };
 
-function friendlyError(outcome: Extract<ApiOutcome, { kind: "error" }>): string {
+function friendlyError(
+  outcome: Extract<ApiOutcome, { kind: "error" }>,
+): string {
   if (outcome.code.startsWith("turnstile")) {
     return "The bot check didn't pass. Refresh the page and try again.";
   }
   if (outcome.status === 400) {
-    return outcome.message ?? "That request wasn't valid — please adjust your description.";
+    return (
+      outcome.message ??
+      "That request wasn't valid — please adjust your description."
+    );
   }
-  return ERROR_MESSAGES[outcome.code] ?? "Something went wrong. Please try again.";
+  return (
+    ERROR_MESSAGES[outcome.code] ?? "Something went wrong. Please try again."
+  );
 }
 
 export function App(): JSX.Element {
@@ -78,7 +97,10 @@ export function App(): JSX.Element {
   // to reach the operator) instead of the generic error banner + Try again.
   const [errorCode, setErrorCode] = useState<string>("");
   // Remembered so the error "Try again" reissues the same generation.
-  const [lastAttempt, setLastAttempt] = useState<{ answers?: string[]; round: number }>({
+  const [lastAttempt, setLastAttempt] = useState<{
+    answers?: string[];
+    round: number;
+  }>({
     round: 1,
   });
   // Past designs saved in this browser — re-openable instantly for $0.
@@ -105,7 +127,10 @@ export function App(): JSX.Element {
 
   const submitted = phase !== "idle";
 
-  const applyOutcome = (outcome: ApiOutcome, promptForHistory?: string): void => {
+  const applyOutcome = (
+    outcome: ApiOutcome,
+    promptForHistory?: string,
+  ): void => {
     switch (outcome.kind) {
       case "clarify":
         setClarifyState({ questions: outcome.questions, round: outcome.round });
@@ -125,7 +150,8 @@ export function App(): JSX.Element {
         setFeedbackRating(null);
         setFeedbackFresh(true);
         setPhase("result");
-        if (promptForHistory) setHistory(addHistory(promptForHistory, response));
+        if (promptForHistory)
+          setHistory(addHistory(promptForHistory, response));
         return;
       }
       case "error":
@@ -135,6 +161,10 @@ export function App(): JSX.Element {
         return;
     }
   };
+
+  // The gallery/recents sit far down the landing page; jump back to the top so the
+  // opened design (recommendation banner first) is what the user lands on.
+  const scrollToTop = (): void => window.scrollTo({ top: 0, behavior: "smooth" });
 
   // Re-open a saved design: pure client-side, no fetch, $0.
   const openSaved = (entry: HistoryEntry): void => {
@@ -146,6 +176,7 @@ export function App(): JSX.Element {
     setFeedbackRating(null);
     setFeedbackFresh(false);
     setPhase("result");
+    scrollToTop();
   };
 
   // Open a curated example: one cheap GET for the stored design, then render it
@@ -161,6 +192,7 @@ export function App(): JSX.Element {
     setFeedbackRating(null);
     setFeedbackFresh(false);
     setPhase("result");
+    scrollToTop();
   };
 
   const startGeneration = async (
@@ -188,7 +220,11 @@ export function App(): JSX.Element {
 
   const handleIntake = (answers: string[]): void => {
     // Skip sends no answers; either way force a final round (no clarify trip).
-    void startGeneration(goal, answers.length > 0 ? answers : undefined, INTAKE_ROUND);
+    void startGeneration(
+      goal,
+      answers.length > 0 ? answers : undefined,
+      INTAKE_ROUND,
+    );
   };
 
   const handleAnswers = async (answers: string[]): Promise<void> => {
@@ -235,12 +271,18 @@ export function App(): JSX.Element {
             </button>
           </h1>
         ) : (
-          <p className="app__tagline">Describe a system — get a safe, costed AWS design.</p>
+          <p className="app__tagline">
+            Describe a system — get a safe, costed AWS design.
+          </p>
         )}
       </header>
 
       {!submitted && (
-        <form className="prompt" onSubmit={handleSubmit} aria-label="Describe your system">
+        <form
+          className="prompt"
+          onSubmit={handleSubmit}
+          aria-label="Describe your system"
+        >
           <textarea
             className="prompt__input"
             value={draft}
@@ -249,7 +291,11 @@ export function App(): JSX.Element {
             rows={4}
             aria-label="System description"
           />
-          <button type="submit" className="prompt__submit" disabled={!draft.trim()}>
+          <button
+            type="submit"
+            className="prompt__submit"
+            disabled={!draft.trim()}
+          >
             Design it
           </button>
         </form>
@@ -257,29 +303,37 @@ export function App(): JSX.Element {
 
       {!submitted && (
         <section className="preview" aria-label="What you'll get">
-          <h2 className="preview__title">You'll get a full report</h2>
+          <h2 className="preview__title">You get...</h2>
           <ul className="preview__list">
             <li className="preview__item">
-              <span className="preview__icon" aria-hidden="true">◇</span>
+              <span className="preview__icon" aria-hidden="true">
+                ◇
+              </span>
               <div>
-                <strong>An architecture diagram</strong> — a clear visual of how the
-                services connect, rendered from a Mermaid graph you can export.
+                <strong>An architecture diagram</strong> — a clear visual of how
+                the services connect, rendered from a Mermaid graph you can
+                export.
               </div>
             </li>
             <li className="preview__item">
-              <span className="preview__icon" aria-hidden="true">≣</span>
+              <span className="preview__icon" aria-hidden="true">
+                ≣
+              </span>
               <div>
-                <strong>Three costed tiers with the reasoning</strong> — budget, balanced,
-                and resilient designs, each with a cost estimate, a security baseline, and
-                the key decisions behind the recommended choice.
+                <strong>Three costed tiers with the reasoning</strong> — budget,
+                balanced, and resilient designs, each with a cost estimate, a
+                security baseline, and the key decisions behind the recommended
+                choice.
               </div>
             </li>
             <li className="preview__item">
-              <span className="preview__icon" aria-hidden="true">{"</>"}</span>
+              <span className="preview__icon" aria-hidden="true">
+                {"</>"}
+              </span>
               <div>
-                <strong>Reference Terraform</strong> — infrastructure-as-code you can pull
-                into your project and review with your coding agent before going live, or
-                compare against your current AWS setup.
+                <strong>Reference Terraform</strong> — infrastructure-as-code
+                you can pull into your project and review with your coding agent
+                before going live, or compare against your current AWS setup.
               </div>
             </li>
           </ul>
@@ -287,7 +341,7 @@ export function App(): JSX.Element {
       )}
 
       {!submitted && (
-        <CuratedGallery entries={curated} onOpen={(id) => void openCurated(id)} />
+        <CuratedGallery entries={curated} onOpen={openCurated} />
       )}
 
       {!submitted && (
@@ -312,7 +366,11 @@ export function App(): JSX.Element {
             <button
               type="button"
               onClick={() =>
-                void startGeneration(goal, lastAttempt.answers, lastAttempt.round)
+                void startGeneration(
+                  goal,
+                  lastAttempt.answers,
+                  lastAttempt.round,
+                )
               }
             >
               Try again
@@ -321,20 +379,32 @@ export function App(): JSX.Element {
         ))}
 
       {phase === "clarify" && clarifyState && (
-        <ClarifyForm questions={clarifyState.questions} onSubmit={(a) => void handleAnswers(a)} />
+        <ClarifyForm
+          questions={clarifyState.questions}
+          onSubmit={(a) => void handleAnswers(a)}
+        />
       )}
 
       {phase === "result" && result && (
         <>
-          <section className="banner banner--recommend" role="note" aria-label="Recommendation">
+          <section
+            className="banner banner--recommend"
+            role="note"
+            aria-label="Recommendation"
+          >
             <p className="recommend__lead">
-              Recommended: <strong>{TIER_DISPLAY[result.recommendedTier]}</strong>
+              Recommended:{" "}
+              <strong>{TIER_DISPLAY[result.recommendedTier]}</strong>
             </p>
             {result.recommendationRationale && (
               <p className="recommend__why">{result.recommendationRationale}</p>
             )}
             {feedbackFresh && (
-              <div className="recommend__feedback" role="group" aria-label="Rate this design">
+              <div
+                className="recommend__feedback"
+                role="group"
+                aria-label="Rate this design"
+              >
                 <button
                   type="button"
                   className={`recommend__thumb recommend__thumb--up${feedbackRating === 1 ? " recommend__thumb--on" : ""}`}
@@ -387,7 +457,10 @@ export function App(): JSX.Element {
           {/* Terraform last: read the design, security floor, and assumptions
               first, then grab the tier-specific reference file. */}
           <ReferenceConfig
-            tier={result.tiers.find((t) => t.name === selectedTier) ?? result.tiers[0]!}
+            tier={
+              result.tiers.find((t) => t.name === selectedTier) ??
+              result.tiers[0]!
+            }
           />
         </>
       )}

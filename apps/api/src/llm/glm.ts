@@ -108,7 +108,18 @@ interface ChatParams {
   messages: ChatMessage[];
   tools?: [FunctionDef] | [FunctionDef, FunctionDef];
   tool_choice?: { type: "function"; function: { name: string } };
+  /** GLM-4.5 reasoning toggle. We DISABLE it for every call (see THINKING_OFF). */
+  thinking?: { type: "enabled" | "disabled" };
 }
+
+/**
+ * GLM-4.5 models reason by default, emitting a hidden chain-of-thought before the
+ * answer. For our work the schema does the structuring, so that thinking adds large
+ * decode latency (a single generation ran past undici's 300s header timeout) with no
+ * quality gain — it only needs to fill a constrained tool schema, not deliberate. We
+ * disable it on every call. Harmless on non-reasoning GLM models, which ignore it.
+ */
+const THINKING_OFF = { type: "disabled" } as const;
 
 /**
  * GLM (OpenAI-compatible) implementation of the provider interface. Accepts an
@@ -149,6 +160,7 @@ export class GlmProvider implements LlmProvider {
         ],
         tools: [ARCHITECTURE_FN],
         tool_choice: { type: "function", function: { name: ARCHITECTURE_FN.function.name } },
+        thinking: THINKING_OFF,
       },
       GeneratedArchitectureSchema,
     );
@@ -165,6 +177,7 @@ export class GlmProvider implements LlmProvider {
         ],
         tools: [CLARIFY_FN],
         tool_choice: { type: "function", function: { name: CLARIFY_FN.function.name } },
+        thinking: THINKING_OFF,
       },
       ClarificationSchema,
     );
@@ -179,6 +192,7 @@ export class GlmProvider implements LlmProvider {
         { role: "system", content: CONFIG_SYSTEM },
         { role: "user", content: buildConfigInput(tier) },
       ],
+      thinking: THINKING_OFF,
     });
     return { result: stripHclFence(res.text), usage: res.usage };
   }

@@ -49,6 +49,28 @@ describe("SqliteCuratedStore", () => {
     expect((list[0] as { body?: string }).body).toBeUndefined();
   });
 
+  it("list derives a one-line tech blurb from the recommended tier's services", () => {
+    const body = JSON.stringify({
+      recommendedTier: "balanced",
+      tiers: [
+        { name: "budget", nodes: [{ awsService: "Lambda" }] },
+        {
+          name: "balanced",
+          nodes: [
+            { awsService: "API Gateway" },
+            { awsService: "Lambda" },
+            { awsService: "DynamoDB" },
+            { awsService: "Lambda" }, // dupe — must be collapsed
+            { awsService: "S3" },
+            { awsService: "CloudFront" }, // beyond the 4-service cap — dropped
+          ],
+        },
+      ],
+    });
+    store.upsert({ id: "x", title: "X", prompt: "p", body });
+    expect(store.list()[0]!.tech).toBe("API Gateway · Lambda · DynamoDB · S3");
+  });
+
   it("vote increments the matching counter", () => {
     store.upsert(run("a", "Alpha"));
     expect(store.vote("a", "ip1", 1)).toEqual({ upvotes: 1, downvotes: 0 });

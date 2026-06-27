@@ -31,14 +31,16 @@ export class SqliteCuratedStore implements CuratedStore {
   ) {}
 
   list(): CuratedRunSummary[] {
+    // Body is read (not returned) only to derive the one-line tech blurb; 4 rows, so
+    // parsing per call is negligible and keeps the gallery card self-describing.
     const rows = this.db
       .prepare(
-        `SELECT id, title, prompt, upvotes, downvotes, created_at
+        `SELECT id, title, prompt, body, upvotes, downvotes, created_at
          FROM curated_runs
          ORDER BY (upvotes - downvotes) DESC, created_at DESC`,
       )
-      .all() as Omit<RunRow, "body">[];
-    return rows.map(toSummary);
+      .all() as RunRow[];
+    return rows.map((r) => ({ ...toSummary(r), tech: deriveTech(r.body) }));
   }
 
   get(id: string): CuratedRun | undefined {
@@ -46,7 +48,7 @@ export class SqliteCuratedStore implements CuratedStore {
       | RunRow
       | undefined;
     if (!row) return undefined;
-    return { ...toSummary(row), body: row.body };
+    return { ...toSummary(row), tech: deriveTech(row.body), body: row.body };
   }
 
   upsert(run: { id: string; title: string; prompt: string; body: string }): void {
@@ -97,7 +99,7 @@ export class SqliteCuratedStore implements CuratedStore {
   }
 }
 
-function toSummary(row: Omit<RunRow, "body">): CuratedRunSummary {
+function toSummary(row: Omit<RunRow, "body">): Omit<CuratedRunSummary, "tech"> {
   return {
     id: row.id,
     title: row.title,
@@ -106,4 +108,28 @@ function toSummary(row: Omit<RunRow, "body">): CuratedRunSummary {
     downvotes: row.downvotes,
     createdAt: row.created_at,
   };
+}
+
+/**
+ * One-line tech blurb for the gallery card: the distinct AWS services of the
+ * recommended tier (its most representative shape), top few, " · "-joined. Defensive
+ * — a malformed/legacy body yields an empty string rather than throwing.
+ */
+const TECH_SERVICE_LIMIT = 4;
+
+function deriveTech(body: string): string {
+  try {
+    const design = JSON.parse(body) as {
+      recommendedTier?: string;
+      tiers?: { name: string; nodes?: { awsService?: string }[] }[];
+    };
+    const tiers = design.tiers ?? [];
+    const tier = tiers.find((t) => t.name === design.recommendedTier) ?? tiers[0];
+    const services = (tier?.nodes ?? [])
+      .map((n) => n.awsService?.trim())
+      .filter((s): s is string => !!s);
+    return [...new Set(services)].slice(0, TECH_SERVICE_LIMIT).join(" · ");
+  } catch {
+    return "";
+  }
 }

@@ -36,25 +36,44 @@ export function CuratedGallery({
   onOpen,
 }: {
   entries: CuratedSummary[];
-  onOpen: (id: string) => void;
+  /** May be async (it fetches the stored design); the card shows a spinner until it settles. */
+  onOpen: (id: string) => void | Promise<void>;
 }): JSX.Element | null {
   // Live counts (seeded from the server list, updated on each successful vote).
   const [counts, setCounts] = useState<Record<string, { up: number; down: number }>>(() =>
     Object.fromEntries(entries.map((e) => [e.id, { up: e.upvotes, down: e.downvotes }])),
   );
   const [myVotes, setMyVotes] = useState<Record<string, VoteValue>>(() => loadLocalVotes());
+  // Which card is mid-open (network fetch) and which row's vote is in flight — both drive
+  // a pending indicator so a click isn't met with a dead second of nothing.
+  const [openingId, setOpeningId] = useState<string | null>(null);
+  const [votingId, setVotingId] = useState<string | null>(null);
 
   if (entries.length === 0) return null;
 
+  const open = async (id: string): Promise<void> => {
+    setOpeningId(id);
+    try {
+      await onOpen(id);
+    } finally {
+      setOpeningId(null);
+    }
+  };
+
   const castVote = async (id: string, value: VoteValue): Promise<void> => {
-    const result = await voteCurated(id, value);
-    if (!result) return;
-    setCounts((prev) => ({ ...prev, [id]: { up: result.upvotes, down: result.downvotes } }));
-    setMyVotes((prev) => {
-      const next = { ...prev, [id]: value };
-      persistLocalVotes(next);
-      return next;
-    });
+    setVotingId(id);
+    try {
+      const result = await voteCurated(id, value);
+      if (!result) return;
+      setCounts((prev) => ({ ...prev, [id]: { up: result.upvotes, down: result.downvotes } }));
+      setMyVotes((prev) => {
+        const next = { ...prev, [id]: value };
+        persistLocalVotes(next);
+        return next;
+      });
+    } finally {
+      setVotingId(null);
+    }
   };
 
   return (
@@ -65,16 +84,28 @@ export function CuratedGallery({
         {entries.map((e) => {
           const c = counts[e.id] ?? { up: e.upvotes, down: e.downvotes };
           const mine = myVotes[e.id];
+          const opening = openingId === e.id;
+          const voting = votingId === e.id;
           return (
             <li key={e.id} className="gallery__item">
               <button
                 type="button"
                 className="gallery__open"
-                onClick={() => onOpen(e.id)}
+                onClick={() => void open(e.id)}
                 title={e.prompt}
+                disabled={opening}
+                aria-busy={opening}
               >
                 <span className="gallery__name">{e.title}</span>
-                <span className="gallery__meta">Open · free</span>
+                <span className="gallery__meta">
+                  {opening ? (
+                    <>
+                      <span className="gallery__spinner" aria-hidden="true" /> Loading…
+                    </>
+                  ) : (
+                    e.tech || "Open · free"
+                  )}
+                </span>
               </button>
               <span className="gallery__votes" role="group" aria-label={`Rate ${e.title}`}>
                 <button
@@ -82,6 +113,7 @@ export function CuratedGallery({
                   className={`gallery__vote ${mine === 1 ? "gallery__vote--on" : ""}`}
                   aria-label={`Upvote ${e.title}`}
                   aria-pressed={mine === 1}
+                  disabled={voting}
                   onClick={() => void castVote(e.id, 1)}
                 >
                   ▲ {c.up}
@@ -91,6 +123,7 @@ export function CuratedGallery({
                   className={`gallery__vote ${mine === -1 ? "gallery__vote--on" : ""}`}
                   aria-label={`Downvote ${e.title}`}
                   aria-pressed={mine === -1}
+                  disabled={voting}
                   onClick={() => void castVote(e.id, -1)}
                 >
                   ▼ {c.down}
