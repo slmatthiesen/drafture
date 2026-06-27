@@ -8,8 +8,7 @@
  * that one visitor used their allotment and others are unaffected.
  */
 
-// TODO(steven): set this to your real LinkedIn profile URL before going live.
-const LINKEDIN_URL = "https://www.linkedin.com/in/REPLACE_ME";
+const LINKEDIN_URL = "https://www.linkedin.com/in/smatthiesen";
 
 export function BudgetReachedNotice(): JSX.Element {
   return (
