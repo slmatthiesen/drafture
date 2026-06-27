@@ -24,7 +24,14 @@
 import pricingFacts from "@stackdraft/kb/pricing-facts.seed.json" with { type: "json" };
 import type { PricingFact } from "@stackdraft/kb";
 
-import type { ArchitectureResult, CostDriver, Tier, TierName } from "../schema/architecture.js";
+import type {
+  ArchitectureBeforeCost,
+  ArchitectureResult,
+  CostDriver,
+  GeneratedTier,
+  Tier,
+  TierName,
+} from "../schema/architecture.js";
 import type { PriceRecord, PricingStore } from "../store/types.js";
 
 /**
@@ -275,7 +282,7 @@ function driversForService(
  * line appeared inconsistently across tiers. A pure-serverless tier (Lambda +
  * DynamoDB + S3, no VPC) matches none of these and correctly shows no NAT.
  */
-const VPC_PRIVATE_SERVICE_KEYWORDS = [
+export const VPC_PRIVATE_SERVICE_KEYWORDS = [
   "rds",
   "aurora",
   "elasticache",
@@ -306,7 +313,7 @@ const VPC_PRIVATE_SERVICE_KEYWORDS = [
  * Anchoring on the service list makes NAT correct (only when there's VPC compute/
  * data) and consistent across every tier that has it.
  */
-function egressesFromPrivateSubnet(tier: Tier): boolean {
+function egressesFromPrivateSubnet(tier: GeneratedTier): boolean {
   return tier.nodes.some((n) => {
     const serviceSurface = `${n.awsService} ${n.role}`.toLowerCase();
     // Word-boundary match, not a bare substring: `includes("rds")` mis-fires on
@@ -318,7 +325,7 @@ function egressesFromPrivateSubnet(tier: Tier): boolean {
   });
 }
 
-function estimateTier(tier: Tier, pricing: PricingStore, region: string, volumeScale: number): Tier {
+function estimateTier(tier: GeneratedTier, pricing: PricingStore, region: string, volumeScale: number): Tier {
   const drivers: CostDriver[] = [];
   const seen = new Set<string>();
   const add = (d: CostDriver): void => {
@@ -365,7 +372,7 @@ function uniqueOrdered(items: string[]): string[] {
  * result; the input is not mutated.
  */
 export function estimateCosts(
-  result: ArchitectureResult,
+  result: ArchitectureBeforeCost,
   pricing: PricingStore,
   region: string,
   volumeScale: number = 1,

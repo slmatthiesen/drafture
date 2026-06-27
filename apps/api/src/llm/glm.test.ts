@@ -4,7 +4,7 @@ import { GlmProvider } from "./glm.js";
 import { ProviderError } from "./provider.js";
 import type { GroundedPrompt } from "./provider.js";
 import { GeneratedArchitectureSchema } from "../schema/architecture.js";
-import type { GeneratedArchitecture, ArchitectureResult, Clarification, TierName } from "../schema/architecture.js";
+import type { GeneratedArchitecture, Clarification, TierName } from "../schema/architecture.js";
 
 // --- Test doubles -----------------------------------------------------------
 
@@ -65,13 +65,12 @@ const PROMPT: GroundedPrompt = {
 
 // --- Fixtures ---------------------------------------------------------------
 
-function makeTier(name: TierName): ArchitectureResult["tiers"][number] {
+function makeTier(name: TierName): GeneratedArchitecture["tiers"][number] {
   return {
     name,
     summary: `${name} tier`,
     nodes: [{ id: "api", awsService: "API Gateway", role: "front door", security: ["TLS", "WAF"] }],
     edges: [{ from: "client", to: "api", payload: "request", protocol: "HTTPS" }],
-    costDrivers: [{ service: "API Gateway", unit: "per 1k requests", estimateRange: "$0.20–$0.90", note: "" }],
     delta: ["baseline: single-AZ"],
     tradeoffs: ["Cheaper than resilient"],
   };

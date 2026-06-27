@@ -116,7 +116,9 @@ describe("POST /api/config", () => {
     expect(res.statusCode).toBe(200);
     const body = res.json();
     expect(body.format).toBe("terraform");
-    expect(body.code).toBe(CANNED_HCL);
+    // The generated HCL is prepended with a reference-only warning header (before line 1).
+    expect(body.code).toContain(CANNED_HCL);
+    expect(body.code).toMatch(/^#+\n# ⚠ {2}REFERENCE ONLY/);
     expect(fake.calls.generateConfig).toBe(1);
 
     const rec = lastTelemetry(lines);

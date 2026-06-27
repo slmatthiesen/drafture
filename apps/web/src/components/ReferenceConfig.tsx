@@ -1,8 +1,8 @@
 /**
  * Per-tier reference Terraform, generated ON DEMAND. The HCL is fetched lazily
  * the first time the panel is opened and cached in state, so re-opening is
- * instant. Output is wrapped in a RED "reference only" banner — it is a starting
- * point to review and harden, never something to apply as-is.
+ * instant. Output is wrapped in a RED "reference only" banner — applying it to an
+ * existing stack can lose data and it always needs review, never applied as-is.
  *
  * Syntax highlighting is a zero-dependency regex tokenizer (`lib/hcl-highlight`)
  * so this rarely-shown panel doesn't drag a highlighter into the bundle.
@@ -77,7 +77,8 @@ export function ReferenceConfig({ tier }: { tier: Tier }): JSX.Element {
       <h2 className="refconfig__title">Get the Terraform</h2>
       <p className="refconfig__lead">
         A reference infrastructure-as-code starter for the <strong>{tierLabel}</strong> tier —
-        it changes with the tier you select above. Review and harden before applying.
+        it changes with the tier you select above.{" "}
+        <strong className="refconfig__reference-only">This is for reference only.</strong>
       </p>
       <p className="refconfig__meta">
         Written live by the model the first time you open it (a few seconds), then
@@ -116,13 +117,16 @@ export function ReferenceConfig({ tier }: { tier: Tier }): JSX.Element {
             <div className="refconfig__result">
               <div className="banner banner--warn refconfig__warn" role="note">
                 <div className="refconfig__warn-text">
-                  <strong>⚠ Reference only — do not apply blindly.</strong>
+                  <strong className="refconfig__reference-only">
+                    ⚠ This is for reference only.
+                  </strong>
                   <span>
-                    Running this provisions <strong>real, billable AWS resources</strong> in
-                    your account. Estimates are not guarantees. Review it, run{" "}
-                    <code>terraform plan</code>, set a billing budget, and{" "}
-                    <code>terraform destroy</code> what you don't need. You are responsible for
-                    all costs.
+                    Applying it to an <strong>existing stack can destroy or lose data</strong>{" "}
+                    and would need to be modified to fit your current infrastructure. Even for a
+                    greenfield project it must be reviewed first. It provisions{" "}
+                    <strong>real, billable AWS resources</strong> — run <code>terraform plan</code>,
+                    set a billing budget, and <code>terraform destroy</code> what you don't need.
+                    You are responsible for all costs.
                   </span>
                 </div>
                 <CopyButton text={state.code} label="Copy" />

@@ -15,10 +15,19 @@ let initialized = false;
 // Monotonic id source — Mermaid requires a unique DOM id per render call.
 let renderSeq = 0;
 
+// Zoom bounds for the expanded view. 1 = fit-to-canvas (the default), so the diagram
+// opens fully visible rather than oversized, and the user zooms IN from there.
+const ZOOM_MIN = 0.5;
+const ZOOM_MAX = 4;
+const ZOOM_STEP = 0.25;
+
+const clampZoom = (z: number): number => Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, z));
+
 export function DiagramView({ chart }: { chart: string }): JSX.Element {
   const [svg, setSvg] = useState<string>("");
   const [failed, setFailed] = useState<boolean>(false);
   const [expanded, setExpanded] = useState<boolean>(false);
+  const [zoom, setZoom] = useState<number>(1);
 
   useEffect(() => {
     // React 18 StrictMode runs effects twice in dev; `cancelled` discards the
@@ -75,7 +84,10 @@ export function DiagramView({ chart }: { chart: string }): JSX.Element {
           <button
             type="button"
             className="diagram__expand"
-            onClick={() => setExpanded(true)}
+            onClick={() => {
+              setZoom(1); // open fit-to-screen, then let the user zoom in
+              setExpanded(true);
+            }}
             aria-label="Expand diagram"
           >
             ⤢ Expand
@@ -102,10 +114,47 @@ export function DiagramView({ chart }: { chart: string }): JSX.Element {
             ✕
           </button>
           <div
+            className="diagram-modal__zoombar"
+            onClick={(e) => e.stopPropagation()}
+            role="group"
+            aria-label="Diagram zoom"
+          >
+            <button
+              type="button"
+              onClick={() => setZoom((z) => clampZoom(z - ZOOM_STEP))}
+              aria-label="Zoom out"
+              disabled={zoom <= ZOOM_MIN}
+            >
+              −
+            </button>
+            <button type="button" onClick={() => setZoom(1)} aria-label="Reset zoom">
+              {Math.round(zoom * 100)}%
+            </button>
+            <button
+              type="button"
+              onClick={() => setZoom((z) => clampZoom(z + ZOOM_STEP))}
+              aria-label="Zoom in"
+              disabled={zoom >= ZOOM_MAX}
+            >
+              +
+            </button>
+          </div>
+          <div
             className="diagram-modal__canvas"
             onClick={(e) => e.stopPropagation()}
-            dangerouslySetInnerHTML={{ __html: svg }}
-          />
+            // Ctrl/⌘ + wheel zooms (matches map/PDF viewers); plain wheel still scrolls.
+            onWheel={(e) => {
+              if (!e.ctrlKey && !e.metaKey) return;
+              e.preventDefault();
+              setZoom((z) => clampZoom(z - Math.sign(e.deltaY) * ZOOM_STEP));
+            }}
+          >
+            <div
+              className="diagram-modal__svg"
+              style={{ width: `${zoom * 100}%` }}
+              dangerouslySetInnerHTML={{ __html: svg }}
+            />
+          </div>
         </div>
       )}
     </>

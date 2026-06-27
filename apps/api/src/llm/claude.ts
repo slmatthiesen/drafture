@@ -3,7 +3,7 @@ import type { z } from "zod";
 
 import type { Config } from "../config.js";
 import { GeneratedArchitectureSchema, ClarificationSchema } from "../schema/architecture.js";
-import type { GeneratedArchitecture, Clarification, Tier } from "../schema/architecture.js";
+import type { GeneratedArchitecture, Clarification, GeneratedTier } from "../schema/architecture.js";
 import { architectureToolSchema, clarificationToolSchema } from "./schema-utils.js";
 import { ProviderError } from "./provider.js";
 import type {
@@ -152,7 +152,7 @@ export class ClaudeProvider implements LlmProvider {
   }
 
   async generateConfig(
-    tier: Tier,
+    tier: GeneratedTier,
     opts?: { maxTokens?: number },
   ): Promise<ProviderResult<string>> {
     const maxTokens = opts?.maxTokens ?? CONFIG_MAX_TOKENS;
@@ -282,7 +282,7 @@ export class ClaudeProvider implements LlmProvider {
  * summary, each node's service/role/security controls, and the labeled edges
  * (so any queue's DLQ and the data flow are reflected). Kept compact and stable.
  */
-function buildConfigInput(tier: Tier): string {
+function buildConfigInput(tier: GeneratedTier): string {
   const payload = {
     name: tier.name,
     summary: tier.summary,

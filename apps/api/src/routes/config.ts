@@ -38,6 +38,21 @@ const FORMAT = "terraform";
  */
 const CONFIG_MAX_OUTPUT_TOKENS = 2500;
 
+/**
+ * Warning banner prepended to the generated HCL itself (before line 1), so the danger
+ * travels WITH the file even after it's copied out of the UI's red banner. Plain `#`
+ * comments = valid HCL, survive copy/paste into an editor or `terraform` run.
+ */
+const REFERENCE_WARNING_HEADER = `##############################################################################
+# ⚠  REFERENCE ONLY — DO NOT APPLY THIS FILE BLINDLY
+# AI-generated starting point, NOT production-ready and NOT reviewed.
+# Applying it to an existing stack can DESTROY OR LOSE DATA, and it will need
+# changes to fit your infrastructure. Even for a greenfield project: read it,
+# run \`terraform plan\`, set a billing budget — you own every resource it creates.
+##############################################################################
+
+`;
+
 interface ConfigBody {
   tier: Tier;
   description?: string;
@@ -170,7 +185,7 @@ async function handleConfig(
     const actualUsd = llmCostUsd(usage, ctx.pricing);
     ctx.stores.spendLedger.reconcile(reservationId, actualUsd);
 
-    const responseBody = { format: FORMAT, code: generated.result };
+    const responseBody = { format: FORMAT, code: REFERENCE_WARNING_HEADER + generated.result };
     ctx.stores.responseCache.set(cacheKey, JSON.stringify(responseBody));
 
     emit("ok", { costUsd: actualUsd });

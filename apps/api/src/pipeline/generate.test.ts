@@ -1,20 +1,21 @@
 import { describe, it, expect, beforeEach } from "vitest";
 
 import type { LlmProvider, ProviderResult, GroundedPrompt, GenerateOptions, Usage } from "../llm/provider.js";
-import type { GeneratedArchitecture, ArchitectureResult, Clarification, TierName } from "../schema/architecture.js";
+import type { GeneratedArchitecture, Clarification, TierName } from "../schema/architecture.js";
 import { ArchitectureResultSchema, TIER_NAMES } from "../schema/architecture.js";
 
 import { openTempDb, createStores, type Stores } from "../store/sqlite.js";
 import { seedKnowledgeBase } from "../store/kbLoader.js";
 
 import { generateArchitecture } from "./generate.js";
+import { estimateCosts } from "./cost.js";
 import { securityFloorLines } from "./securityFloor.js";
 
 const USAGE: Usage = { inputTokens: 1200, outputTokens: 800, cacheReadTokens: 4096, cacheWriteTokens: 0 };
 
 // --- Canned schema-valid result ---------------------------------------------
 
-function makeTier(name: TierName): ArchitectureResult["tiers"][number] {
+function makeTier(name: TierName): GeneratedArchitecture["tiers"][number] {
   return {
     name,
     summary: `${name} tier`,
@@ -35,9 +36,6 @@ function makeTier(name: TierName): ArchitectureResult["tiers"][number] {
     edges: [
       { from: "client", to: "api", payload: "JSON request body", protocol: "HTTPS" },
       { from: "api", to: "db", payload: "item read/write", protocol: "HTTPS" },
-    ],
-    costDrivers: [
-      { service: "API Gateway", unit: "per 1k requests", estimateRange: "$0.20–$0.90", note: "" },
     ],
     delta:
       name === "budget"
@@ -115,7 +113,10 @@ describe("generateArchitecture", () => {
       description: FULLY_SPECIFIED,
     });
 
-    expect(() => ArchitectureResultSchema.parse(result)).not.toThrow();
+    // generateArchitecture returns the GENERATED shape (no costDrivers); estimateCosts
+    // fills them like the route/seed do, so parse the FULL result after the cost step.
+    const estimated = estimateCosts(result, stores.pricing, "us-east-1", 1);
+    expect(() => ArchitectureResultSchema.parse(estimated)).not.toThrow();
     expect(result.tiers.map((t) => t.name)).toEqual(["budget", "balanced", "resilient"]);
     expect(usage).toEqual(USAGE);
     expect(calls.prompts).toHaveLength(1);

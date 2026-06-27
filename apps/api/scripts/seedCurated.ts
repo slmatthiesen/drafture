@@ -12,6 +12,9 @@
  *
  * Run:  pnpm --filter @stackdraft/api exec node --env-file=../../.env --import tsx scripts/seedCurated.ts
  * Idempotent: re-running replaces each run's content by id but KEEPS accumulated votes.
+ * Filter: set SEED_IDS=url-shortener,realtime-chat to re-seed only those demos (by slug);
+ *         default re-seeds ALL demos. Use this to refresh specific designs without
+ *         clobbering others (and without paying to regenerate the ones you want to keep).
  */
 import { getConfig } from "../src/config.js";
 import { buildAppContext } from "../src/app/context.js";
@@ -83,8 +86,17 @@ async function main(): Promise<void> {
   const config = getConfig();
   const ctx = buildAppContext(config);
 
-  console.log(`Seeding ${DEMOS.length} curated runs with ${config.LLM_MODEL} (${config.DEFAULT_REGION})…`);
-  for (const demo of DEMOS) {
+  const seedIds = process.env.SEED_IDS?.split(",").map((s) => s.trim()).filter(Boolean) ?? null;
+  const demos = seedIds ? DEMOS.filter((d) => seedIds.includes(slug(d.title))) : DEMOS;
+  if (seedIds && demos.length === 0) {
+    console.error(
+      `SEED_IDS="${process.env.SEED_IDS}" matched no demos. Valid ids: ${DEMOS.map((d) => slug(d.title)).join(", ")}.`,
+    );
+    process.exit(1);
+  }
+
+  console.log(`Seeding ${demos.length} run${demos.length === 1 ? "" : "s"} with ${config.LLM_MODEL} (${config.DEFAULT_REGION})…`);
+  for (const demo of demos) {
     const id = slug(demo.title);
     process.stdout.write(`  • ${demo.title} (${id})… `);
     try {

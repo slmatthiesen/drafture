@@ -9,7 +9,7 @@ import { ClaudeProvider } from "./claude.js";
 import { ProviderError } from "./provider.js";
 import type { GroundedPrompt } from "./provider.js";
 import { GeneratedArchitectureSchema } from "../schema/architecture.js";
-import type { GeneratedArchitecture, ArchitectureResult, Clarification, TierName } from "../schema/architecture.js";
+import type { GeneratedArchitecture, Clarification, TierName } from "../schema/architecture.js";
 
 // --- Test doubles -----------------------------------------------------------
 
@@ -97,7 +97,7 @@ function textMessage(text: string, usage: FakeUsage = {}): Anthropic.Message {
 
 // --- Fixtures ---------------------------------------------------------------
 
-function makeTier(name: TierName): ArchitectureResult["tiers"][number] {
+function makeTier(name: TierName): GeneratedArchitecture["tiers"][number] {
   return {
     name,
     summary: `${name} tier`,
@@ -105,7 +105,6 @@ function makeTier(name: TierName): ArchitectureResult["tiers"][number] {
       { id: "api", awsService: "API Gateway", role: "front door", security: ["TLS", "WAF", "throttling"] },
     ],
     edges: [{ from: "client", to: "api", payload: "request", protocol: "HTTPS" }],
-    costDrivers: [{ service: "API Gateway", unit: "per 1k requests", estimateRange: "$0.20–$0.90", note: "" }],
     delta: ["baseline: single-AZ, throttling absorbs bursts"],
     tradeoffs: ["Cheaper than resilient"],
   };

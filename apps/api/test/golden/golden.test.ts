@@ -87,7 +87,7 @@ describe("runEval over the golden set (fake provider, no network)", () => {
   it("reports pass-rate 1.0 when the provider emits the known-good result (happy, R16)", async () => {
     const { provider } = fakeProvider(goodArchitecture());
 
-    const report = await runEval({ provider, memory: stores.memory });
+    const report = await runEval({ provider, memory: stores.memory, pricing: stores.pricing });
 
     expect(report.total).toBeGreaterThan(0);
     expect(report.passed).toBe(report.total);
@@ -102,7 +102,7 @@ describe("runEval over the golden set (fake provider, no network)", () => {
   it("detects the regression and drops below the gate floor when the provider emits the known-bad result (error, R16)", async () => {
     const { provider } = fakeProvider(badArchitecture());
 
-    const report = await runEval({ provider, memory: stores.memory });
+    const report = await runEval({ provider, memory: stores.memory, pricing: stores.pricing });
 
     // The dropped queue resilience trips every prompt → pass-rate collapses below
     // the floor. NOTE: the security floor is now injected DETERMINISTICALLY by the
@@ -128,6 +128,7 @@ describe("runEval over the golden set (fake provider, no network)", () => {
     const report = await runEval({
       provider,
       memory: stores.memory,
+      pricing: stores.pricing,
       prompts: [
         { id: "p1", description: "a serverless api", category: "serverless" },
         { id: "p2", description: "a container api", category: "container" },

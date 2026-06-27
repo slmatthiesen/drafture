@@ -1197,6 +1197,21 @@ body {
   height: auto;
 }
 
+/* White-fill Mermaid nodes get a visible border so each reads as a discrete box
+   on the cream card — without this the neutral theme's nodes sit flat against
+   --card and the text looks unbounded. !important overrides Mermaid's inline node
+   styles; covers both the inline diagram and the expanded overlay. */
+.diagram__svg .node rect,
+.diagram__svg .node polygon,
+.diagram__svg .node circle,
+.diagram-modal__svg .node rect,
+.diagram-modal__svg .node polygon,
+.diagram-modal__svg .node circle {
+  fill: #ffffff !important;
+  stroke: var(--muted) !important;
+  stroke-width: 1.5px !important;
+}
+
 .diagram__expand {
   position: absolute;
   top: 0.6rem;
@@ -1243,17 +1258,59 @@ body {
   background: var(--card);
   border-radius: var(--radius);
   padding: 1.25rem;
-  max-width: 96vw;
-  max-height: 90vh;
+  width: 92vw;
+  max-width: 1400px;
+  max-height: 88vh;
   overflow: auto;
   box-shadow: 0 12px 48px rgba(0, 0, 0, 0.35);
 }
 
-/* Render large in the overlay; scroll if it exceeds the viewport. */
-.diagram-modal__canvas svg {
+/* The zoom wrapper controls displayed size (its width = zoom × the canvas width),
+   so at 100% the diagram fits the canvas and zooming IN overflows → scroll/pan. */
+.diagram-modal__svg {
+  margin: 0 auto;
+}
+
+.diagram-modal__svg svg {
   max-width: none !important;
-  width: min(2200px, 180vw);
+  width: 100%;
   height: auto;
+}
+
+/* Floating zoom toolbar, top-center of the overlay. */
+.diagram-modal__zoombar {
+  position: fixed;
+  top: 1rem;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 51;
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  background: var(--card);
+  border-radius: var(--radius);
+  padding: 0.25rem;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+}
+
+.diagram-modal__zoombar button {
+  font: inherit;
+  cursor: pointer;
+  border: none;
+  background: transparent;
+  color: var(--ink);
+  padding: 0.3rem 0.7rem;
+  border-radius: calc(var(--radius) - 4px);
+  min-width: 2.4rem;
+}
+
+.diagram-modal__zoombar button:hover:not(:disabled) {
+  background: rgba(70, 96, 31, 0.1);
+}
+
+.diagram-modal__zoombar button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 
 .diagram-modal__close {
@@ -1400,6 +1457,11 @@ body {
 
 .refconfig__warn-text strong {
   font-size: 1rem;
+}
+
+/* The "reference only" emphasis is red wherever it appears (lead + warning). */
+.refconfig__reference-only {
+  color: #b3261e; /* red on cream → ~5.5:1 AA */
 }
 
 .refconfig__warn code {

@@ -1,4 +1,4 @@
-import type { GeneratedArchitecture, Clarification, Tier } from "../schema/architecture.js";
+import type { GeneratedArchitecture, GeneratedTier, Clarification } from "../schema/architecture.js";
 
 /**
  * Token accounting surfaced by every provider call so the SpendLedger can debit
@@ -61,7 +61,7 @@ export interface LlmProvider {
    * call. Bounded by `opts.maxTokens` (provider picks a small default). Plain
    * text — NOT structured/json_schema output.
    */
-  generateConfig(tier: Tier, opts?: { maxTokens?: number }): Promise<ProviderResult<string>>;
+  generateConfig(tier: GeneratedTier, opts?: { maxTokens?: number }): Promise<ProviderResult<string>>;
 
   /** Pre-flight input-token count for the hard input cap (U8). */
   countTokens(text: string): Promise<number>;

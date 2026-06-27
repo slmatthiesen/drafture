@@ -273,8 +273,9 @@ export function App(): JSX.Element {
           </h1>
         ) : (
           <p className="app__tagline">
-            Describe a system — get a safe, costed AWS design from an agent
-            trained on AWS architecture.
+            Describe a system — get a safe, costed AWS design
+            <br />
+            from an agent trained on AWS architecture.
           </p>
         )}
       </header>

@@ -16,7 +16,7 @@ import type { z } from "zod";
 
 import type { Config } from "../config.js";
 import { GeneratedArchitectureSchema, ClarificationSchema } from "../schema/architecture.js";
-import type { GeneratedArchitecture, Clarification, Tier } from "../schema/architecture.js";
+import type { GeneratedArchitecture, Clarification, GeneratedTier } from "../schema/architecture.js";
 import { architectureToolSchema, clarificationToolSchema } from "./schema-utils.js";
 import { ProviderError } from "./provider.js";
 import type {
@@ -183,7 +183,7 @@ export class GlmProvider implements LlmProvider {
     );
   }
 
-  async generateConfig(tier: Tier, opts?: { maxTokens?: number }): Promise<ProviderResult<string>> {
+  async generateConfig(tier: GeneratedTier, opts?: { maxTokens?: number }): Promise<ProviderResult<string>> {
     const maxTokens = opts?.maxTokens ?? CONFIG_MAX_TOKENS;
     const res = await this.callChat({
       model: this.settings.model,
@@ -304,7 +304,7 @@ function buildClarifyInput(description: string, priorAnswers?: string[]): string
   return `${description}\n\nPrior answers:\n${answers}`;
 }
 
-function buildConfigInput(tier: Tier): string {
+function buildConfigInput(tier: GeneratedTier): string {
   const payload = {
     name: tier.name,
     summary: tier.summary,

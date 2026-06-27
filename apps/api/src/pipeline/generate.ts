@@ -7,10 +7,11 @@
  * so the caller can log it and U6 can research the misses.
  */
 import type { GenerateOptions, LlmProvider, Usage } from "../llm/provider.js";
-import type { ArchitectureResult } from "../schema/architecture.js";
+import type { ArchitectureBeforeCost } from "../schema/architecture.js";
 import type { MemoryStore } from "../store/types.js";
 
 import { assembleGrounding } from "./ground.js";
+import { sanitizeGenerated } from "./sanitize.js";
 import { securityFloorLines } from "./securityFloor.js";
 
 export interface GenerateInput {
@@ -29,7 +30,7 @@ export interface GroundingTelemetry {
 }
 
 export interface GenerateOutput {
-  result: ArchitectureResult;
+  result: ArchitectureBeforeCost;
   usage: Usage;
   grounding: GroundingTelemetry;
 }
@@ -43,8 +44,12 @@ export async function generateArchitecture(input: GenerateInput): Promise<Genera
 
   const { result: generated, usage } = await input.provider.generate(prompt, input.opts);
 
+  // Deterministically fix the model's most common tag error (a "private subnet"
+  // tag on a managed/serverless service) before injecting the security floor.
+  const cleaned = sanitizeGenerated(generated);
   // Inject the deterministic security floor from the KB — the model never emits it.
-  const result: ArchitectureResult = { ...generated, securityFloor: securityFloorLines() };
+  // costDrivers are filled later by estimateCosts, so this is ArchitectureBeforeCost.
+  const result: ArchitectureBeforeCost = { ...cleaned, securityFloor: securityFloorLines() };
 
   return {
     result,

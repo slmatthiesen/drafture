@@ -16,8 +16,9 @@ import { fileURLToPath } from "node:url";
 
 import type { LlmProvider } from "../llm/provider.js";
 import type { ArchitectureResult } from "../schema/architecture.js";
-import type { MemoryStore } from "../store/types.js";
+import type { MemoryStore, PricingStore } from "../store/types.js";
 import { generateArchitecture } from "../pipeline/generate.js";
+import { estimateCosts } from "../pipeline/cost.js";
 
 import { GOLDEN_PROMPTS, type GoldenPrompt } from "../../test/golden/prompts.js";
 import {
@@ -43,6 +44,12 @@ export interface EvalReport {
 export interface RunEvalInput {
   provider: LlmProvider;
   memory: MemoryStore;
+  /** PricingStore so the runner can run the deterministic cost step — the model no
+   *  longer emits costDrivers (schema split), so estimateCosts fills them and adds
+   *  the list-price disclaimer the property gate checks. Mirrors the real pipeline. */
+  pricing: PricingStore;
+  /** Region for the cost estimate; defaults to us-east-1. */
+  region?: string;
   /** Defaults to the full golden set. */
   prompts?: readonly GoldenPrompt[];
   /** Override the property aggregator (defaults to the full property suite). */
@@ -61,7 +68,11 @@ export async function runEval(input: RunEvalInput): Promise<EvalReport> {
       memory: input.memory,
       description: prompt.description,
     });
-    const aggregate = check(result);
+    // Run the deterministic cost step so the result mirrors what the route/seed
+    // produce: the model emits no costDrivers, so estimateCosts fills them and
+    // appends the on-demand list-price disclaimer the property gate checks.
+    const estimated = estimateCosts(result, input.pricing, input.region ?? "us-east-1", 1);
+    const aggregate = check(estimated);
     perPrompt.push({ id: prompt.id, ok: aggregate.ok, properties: aggregate.results });
   }
 
@@ -120,7 +131,12 @@ async function main(): Promise<void> {
   seedKnowledgeBase(stores);
 
   const provider = ClaudeProvider.fromConfig(config);
-  const report = await runEval({ provider, memory: stores.memory });
+  const report = await runEval({
+    provider,
+    memory: stores.memory,
+    pricing: stores.pricing,
+    region: config.DEFAULT_REGION,
+  });
 
   console.log(formatReport(report));
 
