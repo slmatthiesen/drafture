@@ -637,6 +637,22 @@ body {
   color: #ffd479;
 }
 
+/* ---- out-of-funds notice ---- */
+
+.budget-out {
+  display: block;
+}
+
+.budget-out__text {
+  margin: 0;
+}
+
+.budget-out a {
+  color: #5a1414;
+  font-weight: 600;
+  text-decoration: underline;
+}
+
 /* ---- landing "what you'll get" preview ---- */
 
 .preview {

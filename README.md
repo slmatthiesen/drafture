@@ -63,37 +63,6 @@ flowchart TB
   JOB --> PRICE
 ```
 
-### Request sequence (clarify → generate → render)
-
-```mermaid
-sequenceDiagram
-  participant U as User
-  participant API as Fastify API
-  participant G as Guards (rate/cache/spend)
-  participant P as Pipeline
-  participant L as ClaudeProvider
-  participant S as Stores
-
-  U->>API: POST /generate { description }
-  API->>G: rate-limit + Turnstile + daily-spend check
-  G->>S: ResponseCache lookup (hash of prompt)
-  alt cache hit
-    S-->>U: cached architecture
-  else miss
-    G->>P: proceed
-    P->>L: clarify? (structured: {needsClarification, questions[]})
-    alt needs clarification (≤2 rounds)
-      L-->>U: questions
-      U->>API: POST /generate { description, answers }
-    end
-    P->>S: assemble KB + memory grounding (cache_control: ephemeral)
-    P->>L: generate architecture (structured graph, all tiers)
-    P->>S: cost estimate from PricingStore (native units)
-    P->>S: ResponseCache store + SpendLedger debit
-    P-->>U: { tiers[], graph, costs, security, burst }
-  end
-```
-
 ---
 
 ## Features
@@ -102,7 +71,7 @@ sequenceDiagram
 - **Structured outputs** — the model returns a validated typed graph (`output_config.format`), not free-form text; diagrams and cost tables are rendered deterministically.
 - **Multi-unit cost model** — estimates in each service's **native unit**: per-1,000 operations where that unit exists (Lambda, API Gateway, DynamoDB, SQS, SNS, S3 requests), capacity-time / storage units elsewhere (EC2, RDS, Fargate, ElastiCache, ALB; $/GB-month), and **data transfer as a first-class line** — internet egress, cross-AZ, and **NAT gateway** ($/GB processed + $/hr), the most common budget surprise, surfaced explicitly because the private-subnet security default forces it.
 - **Tiered output** — budget / balanced / resilient in a single generation pass, with explicit trade-offs; all tiers keep the full security floor.
-- **Abuse + cost controls** — per-IP rate limiting and a per-IP daily generation cap, identical-prompt response cache, input/output token caps, and a global daily LLM-spend ceiling ($5/day default) with optional Turnstile and an optional shared-credential demo gate.
+- **Abuse + cost controls** — rate limiting, per-visitor daily generation caps, an identical-prompt response cache, input/output token caps, and a global daily spend ceiling keep a public deployment safe and affordable, with optional Turnstile bot-check.
 - **Eval harness + observability** — a golden prompt set asserting output *properties* (every tier covers all security baselines, all edges payload-labeled, on-demand disclaimer present, no banned services) as a tracked pass-rate, plus per-request JSON telemetry (tokens, cache-hit, research calls, latency, $ debited).
 
 ---
@@ -147,25 +116,6 @@ pnpm typecheck   # pnpm -r typecheck
 Stackdraft builds to a **single Docker container** (the API serves the SPA build; SQLite lives on a mounted volume). The hosted demo at [stackdraft.dev](https://stackdraft.dev) runs on DigitalOcean behind Cloudflare for edge rate-limiting and optional Turnstile. Run the monthly pricing refresh as a separate scheduled task so a large offer-file pull can't starve the request-serving process.
 
 See [docs/deploy.md](./docs/deploy.md) for the full DigitalOcean + Cloudflare walkthrough.
-
----
-
-## Cost & abuse controls
-
-Stackdraft is a publicly hosted LLM app, so the operator pays for compute — cheap-to-run and spam-resistant are tier-1 requirements. The defaults in `.env.example` are **forker-safe**: a clone runs cheaply and abuse-protected before you tune anything.
-
-| Lever | Env var | Default | What it bounds |
-|-------|---------|---------|----------------|
-| Global daily spend ceiling | `DAILY_SPEND_CEILING_USD` | `5` | Hard backstop — new generations refused (cache-only) once hit. Reserve-on-entry + transactional, so concurrent requests can't overshoot. |
-| Per-IP daily generation cap | `PER_IP_DAILY_GENERATIONS` | `20` | One actor can't drain the shared budget. |
-| Per-IP rate limit | `RATE_LIMIT_MAX` / `RATE_LIMIT_WINDOW_MS` | `30` / `60000` | Burst protection (keyed by `CF-Connecting-IP` when present). |
-| Identical-prompt response cache | `RESPONSE_CACHE_TTL_MS` | `86400000` (24h) | Repeat prompts served from cache — no LLM call, no spend, no cap charge. |
-| Output token cap | `LLM_MAX_TOKENS` | `8000` | Bounds per-call output cost. |
-| Input token cap | `LLM_MAX_INPUT_TOKENS` | `12000` | `count_tokens` pre-check rejects oversized prompts. |
-| Optional bot check | `TURNSTILE_SECRET` / `TURNSTILE_SITE_KEY` | unset (off) | Cloudflare Turnstile friction. |
-| Optional demo access gate | `ACCESS_GATE_USER` / `ACCESS_GATE_PASS` | unset (off) | HTTP basic auth on the hosted demo; off so local/forked instances run open. |
-
-The access gate and CAPTCHA are *friction*; the per-IP cap, token caps, and global ceiling are what actually bound the worst-case bill.
 
 ---
 

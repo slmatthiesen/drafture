@@ -80,11 +80,13 @@ describe("ReferenceConfig", () => {
     expect(await screen.findByRole("button", { name: /copied/i })).toBeInTheDocument();
   });
 
-  it("shows a friendly inline message on a budget-reached error", async () => {
+  it("shows the friendly out-of-funds notice on a budget-reached error", async () => {
     fetchMock.mockResolvedValue(jsonResponse({ error: "daily_budget_reached" }, 503));
     render(<ReferenceConfig tier={tier} />);
 
     fireEvent.click(screen.getByRole("button", { name: /show .*terraform/i }));
-    expect(await screen.findByRole("alert")).toHaveTextContent(/budget/i);
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(/out of money/i);
+    expect(screen.getByRole("link", { name: /linkedin/i })).toBeInTheDocument();
   });
 });

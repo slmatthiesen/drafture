@@ -12,13 +12,14 @@ import { useState } from "react";
 import type { Tier } from "../lib/types.js";
 import { fetchConfig, type ConfigOutcome } from "../lib/api.js";
 import { highlightHcl } from "../lib/hcl-highlight.js";
+import { BudgetReachedNotice } from "./BudgetReachedNotice.js";
 import { CopyButton } from "./CopyButton.js";
 
 type State =
   | { status: "idle" }
   | { status: "loading" }
   | { status: "ready"; code: string; format: string }
-  | { status: "error"; message: string };
+  | { status: "error"; message: string; errorCode: string };
 
 const CONFIG_ERRORS: Record<string, string> = {
   rate_limited: "Going a little fast — wait a moment and try the reference setup again.",
@@ -56,7 +57,11 @@ export function ReferenceConfig({ tier }: { tier: Tier }): JSX.Element {
     if (outcome.kind === "config") {
       setState({ status: "ready", code: outcome.code, format: outcome.format });
     } else {
-      setState({ status: "error", message: friendlyConfigError(outcome) });
+      setState({
+        status: "error",
+        message: friendlyConfigError(outcome),
+        errorCode: outcome.code,
+      });
     }
   };
 
@@ -95,14 +100,17 @@ export function ReferenceConfig({ tier }: { tier: Tier }): JSX.Element {
             </p>
           )}
 
-          {state.status === "error" && (
-            <div className="banner banner--error" role="alert">
-              <p>{state.message}</p>
-              <button type="button" onClick={() => void load()}>
-                Try again
-              </button>
-            </div>
-          )}
+          {state.status === "error" &&
+            (state.errorCode === "daily_budget_reached" ? (
+              <BudgetReachedNotice />
+            ) : (
+              <div className="banner banner--error" role="alert">
+                <p>{state.message}</p>
+                <button type="button" onClick={() => void load()}>
+                  Try again
+                </button>
+              </div>
+            ))}
 
           {state.status === "ready" && (
             <div className="refconfig__result">

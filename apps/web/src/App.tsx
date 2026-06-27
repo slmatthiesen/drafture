@@ -10,6 +10,7 @@
 
 import { useState } from "react";
 import { generate, type ApiOutcome } from "./lib/api.js";
+import { BudgetReachedNotice } from "./components/BudgetReachedNotice.js";
 import { ClarifyForm } from "./components/ClarifyForm.js";
 import { IntakeForm } from "./components/IntakeForm.js";
 import { KeyDecisions } from "./components/KeyDecisions.js";
@@ -72,6 +73,9 @@ export function App(): JSX.Element {
   const [clarifyState, setClarifyState] = useState<ClarifyState | null>(null);
   const [result, setResult] = useState<GenerateResponse | null>(null);
   const [errorMessage, setErrorMessage] = useState<string>("");
+  // Tracked so the "out of funds" case gets its own friendly notice (with a way
+  // to reach the operator) instead of the generic error banner + Try again.
+  const [errorCode, setErrorCode] = useState<string>("");
   // Remembered so the error "Try again" reissues the same generation.
   const [lastAttempt, setLastAttempt] = useState<{ answers?: string[]; round: number }>({
     round: 1,
@@ -109,6 +113,7 @@ export function App(): JSX.Element {
         return;
       }
       case "error":
+        setErrorCode(outcome.code);
         setErrorMessage(friendlyError(outcome));
         setPhase("error");
         return;
@@ -246,19 +251,22 @@ export function App(): JSX.Element {
 
       {phase === "loading" && <LoadingDraft />}
 
-      {phase === "error" && (
-        <div className="banner banner--error" role="alert">
-          <p>{errorMessage}</p>
-          <button
-            type="button"
-            onClick={() =>
-              void startGeneration(goal, lastAttempt.answers, lastAttempt.round)
-            }
-          >
-            Try again
-          </button>
-        </div>
-      )}
+      {phase === "error" &&
+        (errorCode === "daily_budget_reached" ? (
+          <BudgetReachedNotice />
+        ) : (
+          <div className="banner banner--error" role="alert">
+            <p>{errorMessage}</p>
+            <button
+              type="button"
+              onClick={() =>
+                void startGeneration(goal, lastAttempt.answers, lastAttempt.round)
+              }
+            >
+              Try again
+            </button>
+          </div>
+        ))}
 
       {phase === "clarify" && clarifyState && (
         <ClarifyForm questions={clarifyState.questions} onSubmit={(a) => void handleAnswers(a)} />

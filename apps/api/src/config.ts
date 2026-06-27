@@ -44,10 +44,14 @@ const ConfigSchema = z.object({
   DEFAULT_REGION: z.string().default("us-east-1"),
   PRICING_REFRESH_CRON: z.string().default("0 3 1 * *"),
 
-  // Cost + abuse controls (R11)
+  // Cost + abuse controls (R11). Tight by default: this is a self-funded public
+  // demo, so each visitor gets a small daily allotment of (expensive) full
+  // generations. The daily cap is the real "a couple per visitor per day" lever;
+  // the rate limit only stops bursts and must stay high enough to open the
+  // Terraform panel across all three tiers in one sitting (1 generate + 3 config).
   DAILY_SPEND_CEILING_USD: z.coerce.number().positive().default(5),
-  PER_IP_DAILY_GENERATIONS: z.coerce.number().int().positive().default(20),
-  RATE_LIMIT_MAX: z.coerce.number().int().positive().default(30),
+  PER_IP_DAILY_GENERATIONS: z.coerce.number().int().positive().default(2),
+  RATE_LIMIT_MAX: z.coerce.number().int().positive().default(10),
   RATE_LIMIT_WINDOW_MS: z.coerce.number().int().positive().default(60_000),
   RESPONSE_CACHE_TTL_MS: z.coerce.number().int().positive().default(86_400_000),
 
