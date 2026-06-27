@@ -2,8 +2,8 @@
  * Stackdraft base styles — parchment palette.
  *
  * WCAG AA CONTRAST (verified, sRGB relative luminance):
- *   --paper #F1E7D0  L≈0.80  full-page aged paper
- *   --card  #FCF8EE  L≈0.90  ivory content panels (lifted off the paper)
+ *   --paper #F1E6CC  L≈0.78  full-page aged parchment
+ *   --card  #FDF8E9  L≈0.91  cream content panels (lifted off the parchment)
  *   --ink   #2A2521  L≈0.018 primary text  → ~13:1 on card (AAA), ~11:1 on paper
  *   --muted #6A5D49  L≈0.11  secondary text → ~5.9:1 on card (AA)
  *   --brand-dark #46601F olive accent (text/border) → ~6.8:1 on card (AA)
@@ -12,15 +12,16 @@
  */
 
 :root {
-  --paper: #faf4e4;
-  --paper-deep: #f2e8d1;
-  --paper-edge: #e7d9bb;
+  --paper: #f1e6cc;
+  --paper-deep: #e9dcbd;
+  --paper-edge: #e0d0ac;
   --brand: #5e7a2e;
   --brand-dark: #46601f;
   --ink: #2a2521;
   --muted: #6a5d49;
-  --card: #fffdf8;
-  --card-border: #e7dcc2;
+  /* Warm cream panels, clearly lifted off the deeper parchment page. */
+  --card: #fdf8e9;
+  --card-border: #d3c29c;
   --card-shadow: 0 1px 2px rgba(74, 60, 31, 0.06), 0 8px 24px rgba(74, 60, 31, 0.06);
   --serif: "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif;
   --radius: 12px;
@@ -212,6 +213,29 @@ body {
   font-weight: 600;
 }
 
+/* Primary CTA: a full-width, brand-olive button with a soft lift — more deliberate
+   than the small dark default. */
+.prompt__submit {
+  align-self: stretch;
+  padding: 0.85rem 1.4rem;
+  background: linear-gradient(180deg, var(--brand) 0%, var(--brand-dark) 100%);
+  font-size: 1.05rem;
+  letter-spacing: 0.02em;
+  box-shadow: 0 1px 2px rgba(74, 60, 31, 0.18), 0 8px 20px rgba(70, 96, 31, 0.22);
+  transition: filter 0.12s ease, transform 0.12s ease, box-shadow 0.12s ease;
+}
+
+.prompt__submit:hover:not(:disabled) {
+  filter: brightness(1.06);
+  transform: translateY(-1px);
+  box-shadow: 0 2px 4px rgba(74, 60, 31, 0.2), 0 12px 26px rgba(70, 96, 31, 0.26);
+}
+
+.prompt__submit:active:not(:disabled) {
+  transform: translateY(0);
+  box-shadow: 0 1px 2px rgba(74, 60, 31, 0.18);
+}
+
 .prompt__submit:disabled,
 .clarify button:disabled {
   opacity: 0.55;
@@ -268,6 +292,43 @@ body {
   color: var(--muted);
 }
 
+.recommend__feedback {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+}
+
+.recommend__thumb {
+  font: inherit;
+  font-size: 1.05rem;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0.3rem 0.7rem;
+  border: 1px solid var(--card-border);
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--muted);
+  transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+}
+
+.recommend__thumb:hover {
+  background: rgba(70, 96, 31, 0.08);
+  border-color: var(--brand-dark);
+  color: var(--ink);
+}
+
+.recommend__thumb--on {
+  background: rgba(70, 96, 31, 0.14);
+  border-color: var(--brand-dark);
+  color: var(--brand-dark);
+  font-weight: 700;
+}
+
+.recommend__thumb:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
 .banner button {
   border: 1px solid currentColor;
   background: transparent;
@@ -280,7 +341,7 @@ body {
 
 .card {
   background: var(--card);
-  border: 1px solid var(--card-border);
+  border: 1.5px solid var(--card-border);
   border-radius: var(--radius);
   padding: 1.5rem 1.75rem;
   margin: 1.5rem 0;
@@ -655,17 +716,23 @@ body {
 
 /* ---- landing "what you'll get" preview ---- */
 
+/* One cohesive box that encompasses the title + all three "what you'll get" rows. */
 .preview {
   max-width: 640px;
   margin: 2.5rem auto 0;
+  background: var(--card);
+  border: 1.5px solid var(--card-border);
+  border-radius: var(--radius);
+  padding: 1.5rem 1.6rem;
+  box-shadow: var(--card-shadow);
 }
 
 .preview__title {
   font-family: var(--serif);
-  font-size: 1.15rem;
+  font-size: 1.2rem;
   font-weight: 600;
   color: var(--ink);
-  margin: 0 0 0.9rem;
+  margin: 0 0 1.1rem;
   text-align: center;
 }
 
@@ -674,19 +741,28 @@ body {
   margin: 0;
   padding: 0;
   display: grid;
-  gap: 0.75rem;
+  gap: 0;
 }
 
+/* Flat rows inside the box (no nested card chrome), separated by hairline dividers. */
 .preview__item {
   display: flex;
   gap: 0.85rem;
   align-items: flex-start;
-  background: var(--card);
-  border: 1px solid var(--card-border);
-  border-radius: var(--radius);
-  padding: 0.9rem 1.1rem;
-  box-shadow: var(--card-shadow);
+  padding: 0.95rem 0;
   font-size: 0.95rem;
+}
+
+.preview__item + .preview__item {
+  border-top: 1px solid var(--card-border);
+}
+
+.preview__item:first-child {
+  padding-top: 0;
+}
+
+.preview__item:last-child {
+  padding-bottom: 0;
 }
 
 .preview__icon {
@@ -700,6 +776,112 @@ body {
   color: var(--brand-dark);
   font-weight: 700;
   font-size: 0.95rem;
+}
+
+/* ---- curated gallery (server-stored examples) ---- */
+
+.gallery {
+  max-width: 640px;
+  margin: 2.5rem auto 0;
+}
+
+.gallery__title {
+  font-family: var(--serif);
+  font-size: 1.2rem;
+  font-weight: 600;
+  color: var(--ink);
+  margin: 0;
+  text-align: center;
+}
+
+.gallery__sub {
+  color: var(--muted);
+  font-size: 0.9rem;
+  margin: 0.3rem 0 1rem;
+  text-align: center;
+}
+
+.gallery__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.6rem;
+}
+
+.gallery__item {
+  display: flex;
+  align-items: stretch;
+  gap: 0.5rem;
+  background: var(--card);
+  border: 1.5px solid var(--card-border);
+  border-radius: var(--radius);
+  box-shadow: var(--card-shadow);
+  overflow: hidden;
+}
+
+.gallery__open {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.15rem;
+  padding: 0.85rem 1.1rem;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+  transition: background 0.12s ease;
+}
+
+.gallery__open:hover,
+.gallery__open:focus-visible {
+  background: rgba(70, 96, 31, 0.07);
+}
+
+.gallery__name {
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.gallery__meta {
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.gallery__votes {
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid var(--card-border);
+}
+
+.gallery__vote {
+  flex: 1;
+  min-width: 3.2rem;
+  padding: 0.35rem 0.7rem;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.85rem;
+  color: var(--muted);
+  transition: background 0.12s ease, color 0.12s ease;
+}
+
+.gallery__vote + .gallery__vote {
+  border-top: 1px solid var(--card-border);
+}
+
+.gallery__vote:hover {
+  background: rgba(70, 96, 31, 0.08);
+  color: var(--ink);
+}
+
+.gallery__vote--on {
+  background: rgba(70, 96, 31, 0.14);
+  color: var(--brand-dark);
+  font-weight: 700;
 }
 
 /* ---- recent designs (localStorage history) ---- */
@@ -1141,6 +1323,13 @@ body {
   animation: phase-fade 0.5s ease;
 }
 
+.drafting__note {
+  color: var(--muted);
+  font-size: 0.88rem;
+  margin: 1.1rem 0 0;
+  opacity: 0.85;
+}
+
 @keyframes phase-fade {
   from {
     opacity: 0.3;
@@ -1192,6 +1381,8 @@ body {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
+  justify-content: center;
+  text-align: center;
   gap: 0.6rem 1.25rem;
   color: var(--muted);
   font-size: 0.9rem;
@@ -1206,6 +1397,7 @@ body {
 .site-footer__links {
   display: flex;
   flex-wrap: wrap;
+  justify-content: center;
   gap: 1rem;
 }
 

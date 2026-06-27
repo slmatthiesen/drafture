@@ -31,6 +31,8 @@ import type { TelemetrySink } from "../obs/telemetry.js";
 import { registerGenerateRoute } from "../routes/generate.js";
 import { registerClarifyRoute } from "../routes/clarify.js";
 import { registerConfigRoute } from "../routes/config.js";
+import { registerCuratedRoutes } from "../routes/curated.js";
+import { registerFeedbackRoute } from "../routes/feedback.js";
 
 /** The U8 guard chain, pre-instantiated so every request reuses the same windows/ledger. */
 export interface AppGuards {
@@ -118,4 +120,6 @@ export async function registerApiRoutes(app: FastifyInstance, ctx: AppContext): 
   await registerGenerateRoute(app, ctx);
   await registerClarifyRoute(app, ctx);
   await registerConfigRoute(app, ctx);
+  await registerCuratedRoutes(app, ctx);
+  await registerFeedbackRoute(app, ctx);
 }

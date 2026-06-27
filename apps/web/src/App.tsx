@@ -8,10 +8,11 @@
  * friendly messages.
  */
 
-import { useState } from "react";
-import { generate, type ApiOutcome } from "./lib/api.js";
+import { useEffect, useState } from "react";
+import { generate, fetchCurated, fetchCuratedRun, submitFeedback, type ApiOutcome } from "./lib/api.js";
 import { BudgetReachedNotice } from "./components/BudgetReachedNotice.js";
 import { ClarifyForm } from "./components/ClarifyForm.js";
+import { CuratedGallery } from "./components/CuratedGallery.js";
 import { IntakeForm } from "./components/IntakeForm.js";
 import { KeyDecisions } from "./components/KeyDecisions.js";
 import { LoadingDraft } from "./components/LoadingDraft.js";
@@ -20,7 +21,7 @@ import { ReferenceConfig } from "./components/ReferenceConfig.js";
 import { SecurityPanel } from "./components/SecurityPanel.js";
 import { SiteFooter } from "./components/SiteFooter.js";
 import { TierTabs } from "./components/TierTabs.js";
-import type { GenerateResponse, TierName } from "./lib/types.js";
+import type { CuratedSummary, GenerateResponse, TierName } from "./lib/types.js";
 import {
   loadHistory,
   addHistory,
@@ -88,6 +89,19 @@ export function App(): JSX.Element {
   // Active tier — lifted here (not inside TierTabs) so the page-bottom Terraform,
   // which is tier-specific, tracks the selected tab. Reset on each new result.
   const [selectedTier, setSelectedTier] = useState<TierName>("balanced");
+  // Admin-curated example designs (server-stored) shown on the landing page.
+  const [curated, setCurated] = useState<CuratedSummary[]>([]);
+  // Thumbs-up/down on the current result. `feedbackFresh` is true only for results from a
+  // real generation — feedback keys off the generation's prompt inputs (goal + lastAttempt),
+  // which re-opened history/curated designs don't have, so it's hidden there in v1.
+  const [feedbackRating, setFeedbackRating] = useState<1 | -1 | null>(null);
+  const [feedbackBusy, setFeedbackBusy] = useState(false);
+  const [feedbackFresh, setFeedbackFresh] = useState(false);
+
+  // Load the curated gallery once on mount; failures degrade to no gallery.
+  useEffect(() => {
+    void fetchCurated().then(setCurated);
+  }, []);
 
   const submitted = phase !== "idle";
 
@@ -108,6 +122,8 @@ export function App(): JSX.Element {
         };
         setResult(response);
         setSelectedTier(response.recommendedTier);
+        setFeedbackRating(null);
+        setFeedbackFresh(true);
         setPhase("result");
         if (promptForHistory) setHistory(addHistory(promptForHistory, response));
         return;
@@ -127,6 +143,23 @@ export function App(): JSX.Element {
     setSelectedTier(entry.result.recommendedTier);
     setClarifyState(null);
     setErrorMessage("");
+    setFeedbackRating(null);
+    setFeedbackFresh(false);
+    setPhase("result");
+  };
+
+  // Open a curated example: one cheap GET for the stored design, then render it
+  // through the normal result view — no model call, no spend.
+  const openCurated = async (id: string): Promise<void> => {
+    const run = await fetchCuratedRun(id);
+    if (!run) return;
+    setGoal(run.prompt);
+    setResult(run.design);
+    setSelectedTier(run.design.recommendedTier);
+    setClarifyState(null);
+    setErrorMessage("");
+    setFeedbackRating(null);
+    setFeedbackFresh(false);
     setPhase("result");
   };
 
@@ -162,6 +195,21 @@ export function App(): JSX.Element {
     const round = clarifyState?.round ?? 1;
     setPhase("loading");
     applyOutcome(await generate({ description: goal, answers, round }), goal);
+  };
+
+  // Send a thumbs-up/down on the just-generated design. The server re-derives the prompt
+  // hash, so we send the original inputs (goal + lastAttempt), not the result itself.
+  const submitResultFeedback = async (rating: 1 | -1): Promise<void> => {
+    if (!result || feedbackBusy) return;
+    setFeedbackBusy(true);
+    const res = await submitFeedback({
+      description: goal,
+      answers: lastAttempt.answers,
+      round: lastAttempt.round,
+      rating,
+    });
+    setFeedbackBusy(false);
+    if (res) setFeedbackRating(res.rating);
   };
 
   return (
@@ -239,6 +287,10 @@ export function App(): JSX.Element {
       )}
 
       {!submitted && (
+        <CuratedGallery entries={curated} onOpen={(id) => void openCurated(id)} />
+      )}
+
+      {!submitted && (
         <RecentDesigns
           entries={history}
           onOpen={openSaved}
@@ -280,6 +332,30 @@ export function App(): JSX.Element {
             </p>
             {result.recommendationRationale && (
               <p className="recommend__why">{result.recommendationRationale}</p>
+            )}
+            {feedbackFresh && (
+              <div className="recommend__feedback" role="group" aria-label="Rate this design">
+                <button
+                  type="button"
+                  className={`recommend__thumb recommend__thumb--up${feedbackRating === 1 ? " recommend__thumb--on" : ""}`}
+                  aria-label="Good design"
+                  aria-pressed={feedbackRating === 1}
+                  disabled={feedbackBusy}
+                  onClick={() => void submitResultFeedback(1)}
+                >
+                  👍
+                </button>
+                <button
+                  type="button"
+                  className={`recommend__thumb recommend__thumb--down${feedbackRating === -1 ? " recommend__thumb--on" : ""}`}
+                  aria-label="Needs improvement"
+                  aria-pressed={feedbackRating === -1}
+                  disabled={feedbackBusy}
+                  onClick={() => void submitResultFeedback(-1)}
+                >
+                  👎
+                </button>
+              </div>
             )}
           </section>
 

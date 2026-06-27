@@ -82,3 +82,18 @@ export interface ClarifyResponse {
   questions: string[];
   round: number;
 }
+
+/** A curated gallery entry as listed by `GET /api/curated` (no design body). */
+export interface CuratedSummary {
+  id: string;
+  title: string;
+  prompt: string;
+  upvotes: number;
+  downvotes: number;
+  createdAt: number;
+}
+
+/** A full curated run from `GET /api/curated/:id` — `design` renders like a fresh result. */
+export interface CuratedRunFull extends Omit<CuratedSummary, "createdAt"> {
+  design: GenerateResponse;
+}

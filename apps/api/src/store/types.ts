@@ -85,3 +85,81 @@ export interface SpendLedger {
   incrementIpCount(ip: string): number;
   ipCountToday(ip: string): number;
 }
+
+/**
+ * An admin-curated example design surfaced in the public gallery. The `body` is the
+ * verbatim `/api/generate` response JSON, so the frontend renders a curated run
+ * through the same path as a freshly generated one — instantly and for $0.
+ */
+export interface CuratedRunSummary {
+  id: string;
+  title: string;
+  prompt: string;
+  upvotes: number;
+  downvotes: number;
+  createdAt: number;
+}
+
+export interface CuratedRun extends CuratedRunSummary {
+  /** JSON-encoded GenerateResponse (tiers + costs + securityFloor + recommendation). */
+  body: string;
+}
+
+export interface CuratedVoteResult {
+  upvotes: number;
+  downvotes: number;
+}
+
+export interface CuratedStore {
+  /** Gallery list (no body), best-scored first. */
+  list(): CuratedRunSummary[];
+  /** Full run incl. body for rendering; undefined if unknown id. */
+  get(id: string): CuratedRun | undefined;
+  /** Admin insert/replace (seed script). Preserves existing votes on replace. */
+  upsert(run: { id: string; title: string; prompt: string; body: string }): void;
+  /**
+   * Cast or change one voter's up/down vote, recomputing counters. Returns the new
+   * counts, or undefined if the run does not exist.
+   */
+  vote(id: string, voter: string, value: 1 | -1): CuratedVoteResult | undefined;
+}
+
+/**
+ * One visitor's thumbs-up/down verdict on a generated design. `promptHash` ties it to
+ * the exact prompt→output pair (it is the /api/generate response-cache key), and the
+ * rated `body` is snapshotted so the operator review script is self-contained and
+ * survives the 24h response-cache TTL.
+ */
+export interface FeedbackEntry {
+  id: string;
+  /** SHA-256 of {description, answers, round, model, region} — the generate cache key. */
+  promptHash: string;
+  description: string;
+  /** Intake answers present at generation time (may be empty). */
+  answers: string[];
+  round: number;
+  /** The recommendedTier the user rated; "unknown" if the body had expired. */
+  recommendedTier: string;
+  /** Verbatim GenerateResponse JSON at feedback time (null if the cache entry expired). */
+  body: string | null;
+  /** 1 = up, -1 = down. */
+  rating: 1 | -1;
+  /** Client IP — the only identity for an anonymous public tool. */
+  ip: string;
+  /** Nullable; schema-ready for a future free-text reason (not surfaced in v1). */
+  comment: string | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface FeedbackStore {
+  /**
+   * Insert or update one IP's verdict on one design. The table's UNIQUE(ip, prompt_hash)
+   * means a second vote from the same IP on the same design CHANGES the prior rating
+   * (never stacks), so re-clicking thumbs toggles/updates rather than ballot-stuffing.
+   * Returns the canonical (post-conflict) entry.
+   */
+  upsert(entry: Omit<FeedbackEntry, "id" | "createdAt" | "updatedAt">): FeedbackEntry;
+  /** Most-recently-updated entries filtered by rating (operator review script). */
+  listByRating(rating: 1 | -1, limit: number): FeedbackEntry[];
+}

@@ -14,6 +14,8 @@ import { SqliteMemoryStore } from "./memory.js";
 import { SqliteResponseCache } from "./responseCache.js";
 import { SqlitePricingStore } from "./pricing.js";
 import { SqliteSpendLedger } from "./spendLedger.js";
+import { SqliteCuratedStore } from "./curated.js";
+import { SqliteFeedbackStore } from "./feedback.js";
 
 /** Instance type of an open better-sqlite3 database. */
 export type Db = Database.Database;
@@ -82,6 +84,41 @@ const MIGRATIONS = `
     count INTEGER NOT NULL,
     PRIMARY KEY (ip, day)
   );
+
+  CREATE TABLE IF NOT EXISTS curated_runs (
+    id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    prompt TEXT NOT NULL,
+    body TEXT NOT NULL,
+    upvotes INTEGER NOT NULL DEFAULT 0,
+    downvotes INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS curated_votes (
+    run_id TEXT NOT NULL REFERENCES curated_runs(id) ON DELETE CASCADE,
+    voter TEXT NOT NULL,
+    value INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (run_id, voter)
+  );
+
+  CREATE TABLE IF NOT EXISTS feedback (
+    id TEXT PRIMARY KEY,
+    prompt_hash TEXT NOT NULL,
+    description TEXT NOT NULL,
+    answers_json TEXT,
+    round INTEGER NOT NULL,
+    recommended_tier TEXT NOT NULL,
+    body_json TEXT,
+    rating INTEGER NOT NULL,
+    ip TEXT NOT NULL,
+    comment TEXT,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    UNIQUE(ip, prompt_hash)
+  );
+  CREATE INDEX IF NOT EXISTS idx_feedback_rating ON feedback(rating);
 `;
 
 /** Open (creating parent dirs as needed), enable WAL, and migrate. */
@@ -114,14 +151,18 @@ export interface Stores {
   responseCache: SqliteResponseCache;
   pricing: SqlitePricingStore;
   spendLedger: SqliteSpendLedger;
+  curated: SqliteCuratedStore;
+  feedback: SqliteFeedbackStore;
 }
 
-/** Construct all four stores bound to one db instance (shared clock). */
+/** Construct all stores bound to one db instance (shared clock). */
 export function createStores(db: Db, clock: Clock = systemClock): Stores {
   return {
     memory: new SqliteMemoryStore(db, clock),
     responseCache: new SqliteResponseCache(db, clock),
     pricing: new SqlitePricingStore(db),
     spendLedger: new SqliteSpendLedger(db, clock),
+    curated: new SqliteCuratedStore(db, clock),
+    feedback: new SqliteFeedbackStore(db, clock),
   };
 }

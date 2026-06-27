@@ -36,6 +36,9 @@ export function LoadingDraft(): JSX.Element {
       </div>
       <p className="drafting__title">Drafting your architecture…</p>
       <p className="drafting__phase">{PHASES[phase]}…</p>
+      <p className="drafting__note">
+        This usually takes about 30 seconds — feel free to step away and come back.
+      </p>
     </div>
   );
 }

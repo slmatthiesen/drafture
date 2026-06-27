@@ -13,6 +13,8 @@ import type {
   GenerateResponse,
   ClarifyResponse,
   ConfigResponse,
+  CuratedSummary,
+  CuratedRunFull,
   KeyDecision,
   Tier,
   TierName,
@@ -140,6 +142,84 @@ export async function fetchConfig(
 
   const cfg = (data ?? {}) as Partial<ConfigResponse>;
   return { kind: "config", format: cfg.format ?? "terraform", code: cfg.code ?? "" };
+}
+
+const CURATED_ENDPOINT = "/api/curated";
+
+/** List the curated gallery. Returns [] on any error — the gallery is optional UI. */
+export async function fetchCurated(fetchImpl: typeof fetch = fetch): Promise<CuratedSummary[]> {
+  try {
+    const res = await fetchImpl(CURATED_ENDPOINT);
+    if (!res.ok) return [];
+    const data = (await res.json()) as { runs?: CuratedSummary[] };
+    return data.runs ?? [];
+  } catch {
+    return [];
+  }
+}
+
+/** Fetch one curated run's full design. Returns null on error/unknown id. */
+export async function fetchCuratedRun(
+  id: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<CuratedRunFull | null> {
+  try {
+    const res = await fetchImpl(`${CURATED_ENDPOINT}/${encodeURIComponent(id)}`);
+    if (!res.ok) return null;
+    return (await res.json()) as CuratedRunFull;
+  } catch {
+    return null;
+  }
+}
+
+/** Cast an up (+1) or down (-1) vote. Returns the new counts, or null on error. */
+export async function voteCurated(
+  id: string,
+  value: 1 | -1,
+  fetchImpl: typeof fetch = fetch,
+): Promise<{ upvotes: number; downvotes: number } | null> {
+  try {
+    const res = await fetchImpl(`${CURATED_ENDPOINT}/${encodeURIComponent(id)}/vote`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ value }),
+    });
+    if (!res.ok) return null;
+    return (await res.json()) as { upvotes: number; downvotes: number };
+  } catch {
+    return null;
+  }
+}
+
+const FEEDBACK_ENDPOINT = "/api/feedback";
+
+export interface FeedbackRequest {
+  description: string;
+  answers?: string[];
+  round?: number;
+  rating: 1 | -1;
+}
+
+/**
+ * Submit a thumbs-up (+1) / thumbs-down (-1) on the current result. The server re-derives
+ * the prompt hash from {description, answers, round} so the verdict ties to the exact
+ * design that was shown. Returns the recorded rating, or null on transport/HTTP error.
+ */
+export async function submitFeedback(
+  body: FeedbackRequest,
+  fetchImpl: typeof fetch = fetch,
+): Promise<{ rating: 1 | -1 } | null> {
+  try {
+    const res = await fetchImpl(FEEDBACK_ENDPOINT, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) return null;
+    return (await res.json()) as { rating: 1 | -1 };
+  } catch {
+    return null;
+  }
 }
 
 function isClarify(data: unknown): data is ClarifyResponse {
