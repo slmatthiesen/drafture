@@ -5,7 +5,7 @@ import { openTempDb, createStores, type Stores } from "../../src/store/sqlite.js
 import { seedKnowledgeBase } from "../../src/store/kbLoader.js";
 import { runEval } from "../../src/eval/runner.js";
 
-import { goodArchitecture, badArchitecture, fakeProvider } from "./fixtures.js";
+import { goodArchitecture, badArchitecture, incoherentComputeArchitecture, fakeProvider } from "./fixtures.js";
 import {
   runAllProperties,
   securityFloorCoversAllBaselines,
@@ -16,6 +16,7 @@ import {
   recommendsATier,
   hasKeyDecisions,
   queuesAreResilient,
+  computeMatchesDecision,
 } from "./properties.js";
 
 const PASS_RATE_FLOOR = 0.9;
@@ -39,16 +40,17 @@ describe("property checkers on the known-good result", () => {
       recommendsATier,
       hasKeyDecisions,
       queuesAreResilient,
+      computeMatchesDecision,
     ]) {
       const r = property(good);
       expect(r.ok, `${r.name}: ${r.reason}`).toBe(true);
     }
   });
 
-  it("the aggregator reports ok with all eight properties green", () => {
+  it("the aggregator reports ok with all nine properties green", () => {
     const agg = runAllProperties(good);
     expect(agg.ok).toBe(true);
-    expect(agg.results).toHaveLength(8);
+    expect(agg.results).toHaveLength(9);
     expect(agg.results.every((r) => r.ok)).toBe(true);
   });
 });
@@ -73,6 +75,26 @@ describe("property checkers detect the known-bad regression", () => {
 
   it("the aggregate is not ok for the bad result", () => {
     expect(runAllProperties(bad).ok).toBe(false);
+  });
+});
+
+describe("computeMatchesDecision detects the serverless-decision / always-on-nodes contradiction", () => {
+  const incoherent = incoherentComputeArchitecture();
+
+  it("passes on the coherent good fixture (serverless decision + Lambda nodes)", () => {
+    expect(computeMatchesDecision(goodArchitecture()).ok).toBe(true);
+  });
+
+  it("flips to FAIL when the keyDecision chose Lambda but the tiers run EC2 + ALB", () => {
+    const r = computeMatchesDecision(incoherent);
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(/serverless/i);
+    expect(r.reason).toMatch(/EC2/);
+  });
+
+  it("isolates the defect: only computeMatchesDecision fails on the incoherent fixture", () => {
+    const failing = runAllProperties(incoherent).results.filter((r) => !r.ok).map((r) => r.name);
+    expect(failing).toEqual(["computeMatchesDecision"]);
   });
 });
 

@@ -28,7 +28,8 @@ export type PropertyName =
   | "noBannedServices"
   | "recommendsATier"
   | "hasKeyDecisions"
-  | "queuesAreResilient";
+  | "queuesAreResilient"
+  | "computeMatchesDecision";
 
 export interface PropertyResult {
   name: PropertyName;
@@ -273,6 +274,92 @@ export const queuesAreResilient: Property = (result) => {
   };
 };
 
+// --- Compute coherence (the graph must agree with its own decision) ---------
+//
+// The single most damaging incoherence we've seen: a keyDecision commits to a
+// compute model ("chosen: Lambda behind API Gateway") while the tier's actual
+// NODES run the opposite (EC2 + ALB). The downstream cost engine prices the
+// NODES, so a serverless RECOMMENDATION silently bills an always-on EC2/ALB/NAT
+// stack — the design contradicts itself and the cost is wrong as a consequence.
+//
+// We detect a compute decision by its `decision`/`chosen` text, classify what it
+// committed to (serverless vs always-on compute), then require the tiers' compute
+// nodes to not contradict it. This is intentionally one-directional and
+// conservative: it fires only on a CLEAR contradiction (a serverless decision but
+// VM/container compute present, or vice-versa), never on ambiguity, so it stays a
+// real regression signal rather than a flaky stylistic nag.
+
+/** A keyDecision is "about compute" if it names the compute/runtime choice. */
+const COMPUTE_DECISION_KEYWORDS = ["compute", "runtime", "api tier", "application tier", "hosting"] as const;
+
+/** Node services that ARE serverless compute. */
+const SERVERLESS_COMPUTE = ["lambda"] as const;
+/** Node services that are ALWAYS-ON compute (a VM or a container/load-balancer pair). */
+const ALWAYSON_COMPUTE = ["ec2", "fargate", "ecs", "eks", "elastic beanstalk", "app runner"] as const;
+
+/** What a compute decision committed to, read from its `chosen` text. */
+type ComputeChoice = "serverless" | "alwayson" | "unknown";
+
+function classifyChosenCompute(chosen: string): ComputeChoice {
+  const c = chosen.toLowerCase();
+  const saysServerless = c.includes("serverless") || c.includes("lambda");
+  const saysAlwayson = ALWAYSON_COMPUTE.some((kw) => c.includes(kw)) || c.includes("container") || c.includes("auto scaling");
+  // A decision that names both (e.g. "Lambda, with Fargate for X") is mixed → don't judge.
+  if (saysServerless && !saysAlwayson) return "serverless";
+  if (saysAlwayson && !saysServerless) return "alwayson";
+  return "unknown";
+}
+
+function tierComputeKinds(tier: Tier): { serverless: string[]; alwayson: string[] } {
+  const serverless: string[] = [];
+  const alwayson: string[] = [];
+  for (const n of tier.nodes) {
+    const surface = `${n.awsService} ${n.role}`.toLowerCase();
+    if (SERVERLESS_COMPUTE.some((kw) => new RegExp(`\\b${kw}\\b`).test(surface))) serverless.push(n.awsService);
+    if (ALWAYSON_COMPUTE.some((kw) => new RegExp(`\\b${kw}\\b`).test(surface))) alwayson.push(n.awsService);
+  }
+  return { serverless, alwayson };
+}
+
+/**
+ * Coherence: a stated compute decision must not be contradicted by the tiers'
+ * compute nodes. A "serverless" decision with an always-on compute node present
+ * (or an "alwayson" decision with no always-on compute anywhere) is a hard fail —
+ * that's the self-contradiction that makes the cost wrong. Designs with no compute
+ * decision, or a mixed/unknown one, pass (nothing to contradict).
+ */
+export const computeMatchesDecision: Property = (result) => {
+  const computeDecisions = result.keyDecisions.filter((d) =>
+    COMPUTE_DECISION_KEYWORDS.some((kw) => `${d.decision} ${d.chosen}`.toLowerCase().includes(kw)),
+  );
+  const offenders: string[] = [];
+  for (const d of computeDecisions) {
+    const choice = classifyChosenCompute(d.chosen);
+    if (choice === "unknown") continue;
+    for (const tier of result.tiers) {
+      const kinds = tierComputeKinds(tier);
+      if (choice === "serverless" && kinds.alwayson.length > 0) {
+        offenders.push(
+          `${tier.name}: decision chose serverless ("${d.chosen}") but tier runs always-on compute [${kinds.alwayson.join(", ")}]`,
+        );
+      }
+      if (choice === "alwayson" && kinds.alwayson.length === 0) {
+        offenders.push(
+          `${tier.name}: decision chose always-on compute ("${d.chosen}") but tier has no always-on compute node`,
+        );
+      }
+    }
+  }
+  return {
+    name: "computeMatchesDecision",
+    ok: offenders.length === 0,
+    reason:
+      offenders.length === 0
+        ? "compute nodes are consistent with the stated compute decision"
+        : offenders.join("; "),
+  };
+};
+
 /** R3 — exactly budget/balanced/resilient, no more, no fewer. */
 export const exactlyThreeTiers: Property = (result) => {
   const names = result.tiers.map((t) => t.name);
@@ -295,6 +382,7 @@ export const ALL_PROPERTIES: readonly Property[] = [
   recommendsATier,
   hasKeyDecisions,
   queuesAreResilient,
+  computeMatchesDecision,
 ];
 
 export interface AggregateResult {

@@ -182,8 +182,37 @@ export function badArchitecture(): ArchitectureResult {
   };
 }
 
+/**
+ * A known-BAD result reproducing the real "happy-hour site" incoherence: the
+ * compute keyDecision commits to serverless ("Lambda behind API Gateway") while
+ * every tier's graph actually runs an always-on EC2 + ALB stack. The cost engine
+ * prices the NODES, so this is exactly the bug where a serverless recommendation
+ * silently bills EC2/ALB/NAT. `computeMatchesDecision` must flip to fail; the
+ * other properties still pass (the contradiction is the only defect), proving the
+ * new gate isolates THIS class of error.
+ */
+export function incoherentComputeArchitecture(): ArchitectureResult {
+  const base = goodArchitecture();
+  // Swap the serverless API Lambda ("fn") for an always-on EC2 + ALB stack, leaving
+  // everything else (incl. the "Lambda behind API Gateway" keyDecision) intact, so
+  // the ONLY broken invariant is compute↔decision coherence.
+  const breakCompute = (tier: Tier): Tier => ({
+    ...tier,
+    nodes: [
+      ...tier.nodes.map((n) =>
+        n.id === "fn"
+          ? { id: "fn", awsService: "EC2", role: "API server", security: ["private subnet", "least-priv role"] }
+          : n,
+      ),
+      { id: "alb", awsService: "ALB", role: "load balancer", security: ["TLS", "WAF"] },
+    ],
+  });
+  return { ...base, tiers: base.tiers.map(breakCompute) };
+}
+
 // Validate the good fixture once at load — a drift here is a fixture bug.
 ArchitectureResultSchema.parse(goodArchitecture());
+ArchitectureResultSchema.parse(incoherentComputeArchitecture());
 
 export interface FakeProvider {
   provider: LlmProvider;
