@@ -27,7 +27,7 @@ import { runClarify, roundCapReached } from "../pipeline/clarify.js";
 import { assembleGrounding } from "../pipeline/ground.js";
 import { generateArchitecture } from "../pipeline/generate.js";
 import { estimateCosts, parseTrafficVolume } from "../pipeline/cost.js";
-import { scrubAll, scrubPrompt } from "../pipeline/scrub.js";
+import { scrubAll, scrubObject, scrubPrompt } from "../pipeline/scrub.js";
 import { tagDesign } from "../pipeline/tags.js";
 import { researchMissingTopics } from "../research/bestPractice.js";
 
@@ -244,12 +244,20 @@ async function handleGenerate(
     const actualUsd = llmCostUsd(usage, ctx.pricing);
     ctx.stores.spendLedger.reconcile(reservationId, actualUsd);
 
+    // Defense-in-depth: scrub the OUTPUT too. The input was scrubbed before the model
+    // saw it, but redact any credential shape that slipped through into free-text fields
+    // (assumptions, summaries, rationale) before it is returned, cached, or stored.
+    const scrubbedOutput = scrubObject(estimated);
+    if (scrubbedOutput.wasRedacted) {
+      req.log.warn({ route: ROUTE }, "secret shape redacted from generation output");
+    }
+
     // Return the full validated result (tiers + costs + the global securityFloor +
     // the opinionated recommendation + ADR keyDecisions). Spreading the whole
     // object — rather than cherry-picking fields — keeps the response in sync with
     // the schema so a later field addition can't be silently dropped (securityFloor
     // was). The full shape is what gets cached, so a cache HIT returns it too.
-    const responseBody: ArchitectureResult & { id?: string } = { ...estimated };
+    const responseBody: ArchitectureResult & { id?: string } = { ...scrubbedOutput.value };
 
     // Persist every real generation permanently (the gallery + model/template backbone).
     // Best-effort: a persistence failure must NEVER break the user's generation. The id

@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 
-import { scrubPrompt, scrubAll } from "./scrub.js";
+import { scrubPrompt, scrubAll, scrubObject } from "./scrub.js";
 
 describe("scrubPrompt", () => {
   it("leaves ordinary architecture text untouched", () => {
@@ -62,5 +62,38 @@ describe("scrubAll", () => {
   it("reports no redaction when clean", () => {
     const r = scrubAll(["realtime", "high traffic"]);
     expect(r.wasRedacted).toBe(false);
+  });
+});
+
+describe("scrubObject", () => {
+  it("redacts a secret buried in nested free-text and leaves structure intact", () => {
+    const design = {
+      recommendedTier: "balanced",
+      assumptions: ["uses key AKIAIOSFODNN7EXAMPLE for access"],
+      tiers: [{ name: "balanced", summary: "s", nodes: [{ id: "fn", awsService: "Lambda", role: "worker" }] }],
+      keyDecisions: [{ chosen: "Lambda", rationale: "db password=hunter2secret cheap" }],
+    };
+    const { value, wasRedacted } = scrubObject(design);
+    expect(wasRedacted).toBe(true);
+    const json = JSON.stringify(value);
+    expect(json).not.toContain("AKIAIOSFODNN7EXAMPLE");
+    expect(json).not.toContain("hunter2secret");
+    expect(json).toContain("[REDACTED]");
+    // non-secret values + structure preserved
+    expect(value.recommendedTier).toBe("balanced");
+    expect(json).toContain('"awsService":"Lambda"');
+  });
+
+  it("returns wasRedacted false and equal structure for a clean object", () => {
+    const design = { recommendedTier: "resilient", assumptions: ["multi-AZ"] };
+    const { value, wasRedacted } = scrubObject(design);
+    expect(wasRedacted).toBe(false);
+    expect(value).toEqual(design);
+  });
+
+  it("does not mutate the input", () => {
+    const design = { a: "key AKIAIOSFODNN7EXAMPLE" };
+    scrubObject(design);
+    expect(design.a).toBe("key AKIAIOSFODNN7EXAMPLE");
   });
 });

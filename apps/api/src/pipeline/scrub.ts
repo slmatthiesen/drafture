@@ -65,3 +65,31 @@ export function scrubAll(texts: string[]): { texts: string[]; wasRedacted: boole
   });
   return { texts: out, wasRedacted };
 }
+
+/**
+ * Defense-in-depth: scrub every string in an arbitrary object tree (the generation
+ * OUTPUT) — redacts any credential shape the model echoed into free-text fields
+ * (assumptions, summaries, rationale) even though the input was already scrubbed before
+ * the model saw it. Returns a NEW deep-cloned tree (input is not mutated) plus whether
+ * anything changed. Non-string leaves (enums, ids, numbers) pass through unchanged, and
+ * scrubPrompt is a no-op on strings with no credential shape, so legitimate architecture
+ * values are never altered.
+ */
+export function scrubObject<T>(value: T): { value: T; wasRedacted: boolean } {
+  let wasRedacted = false;
+  const walk = (v: unknown): unknown => {
+    if (typeof v === "string") {
+      const r = scrubPrompt(v);
+      if (r.wasRedacted) wasRedacted = true;
+      return r.text;
+    }
+    if (Array.isArray(v)) return v.map(walk);
+    if (v !== null && typeof v === "object") {
+      const out: Record<string, unknown> = {};
+      for (const [k, val] of Object.entries(v as Record<string, unknown>)) out[k] = walk(val);
+      return out;
+    }
+    return v;
+  };
+  return { value: walk(value) as T, wasRedacted };
+}
