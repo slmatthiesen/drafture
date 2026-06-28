@@ -262,7 +262,10 @@ function buildSeedFallback(): Map<string, PriceRecord[]> {
  */
 const KEYWORD_FALLBACK: ReadonlyArray<readonly [RegExp, string]> = [
   [/\baurora\b/i, "Aurora"],
-  [/\bfargate\b/i, "Fargate"],
+  // "fargate" but NOT "fargate-compatible" / "fargate compatible" — the latter is a
+  // task-definition PORTABILITY note on an EC2-backed ECS task, not a launch type, so
+  // it must not price phantom Fargate (the real compute is the "ECS on EC2" node).
+  [/\bfargate\b(?![- ]compatible)/i, "Fargate"],
   [/\beventbridge\b/i, "EventBridge"],
   [/\belasticache\b|\bredis\b|\bvalkey\b/i, "ElastiCache"],
   [/\bopensearch\b|\belasticsearch\b/i, "OpenSearch"],
@@ -297,6 +300,14 @@ function normalizeService(name: string): string {
   };
   const aliased = aliases[stripped];
   if (aliased) return aliased;
+  // ECS launch type drives the bill, not the word "ECS": an ECS-on-EC2 task is priced
+  // as the EC2 instance, an ECS/Fargate task as Fargate. Resolve this explicitly so
+  // "ECS on EC2" prices as EC2 (else it matched nothing → $0, hiding the real compute)
+  // and a "Fargate-compatible" EC2 task doesn't fall through to the Fargate keyword.
+  if (/\becs\b/i.test(stripped)) {
+    if (/\bon ec2\b|\bec2\b|\bon-ec2\b/i.test(stripped)) return "EC2";
+    if (/\bfargate\b(?![- ]compatible)/i.test(stripped)) return "Fargate";
+  }
   for (const [pattern, canonical] of KEYWORD_FALLBACK) {
     if (pattern.test(stripped)) return canonical;
   }
@@ -344,13 +355,20 @@ function driversForService(
 ): CostDriver[] {
   const { records, approximate } = lookupPrices(service, region, pricing);
   return records.map((r) => {
-    // Traffic units carry the volume multiplier inside monthlyBand (request-driven);
-    // request/capacity units take it via the fixed band × volumeScale. Either way the
-    // tier's robustness premium (tierMultiplier) is applied on top here.
+    // The robustness premium (tierMultiplier) applies ONLY to capacity/always-on
+    // units — the things redundancy actually duplicates (extra instances, replicas,
+    // multi-AZ nodes). Request-priced, traffic, and storage units already scale
+    // across tiers via volumeScale (0.1/1/10×) inside monthlyBand, so multiplying
+    // them by tierMultiplier TOO double-counts scale (it made a resilient SES line
+    // read $300–$3000/mo — 30× — when only the 10× volume step is real). Capacity
+    // units don't scale by volume, so tierMultiplier is the only thing that moves
+    // them across tiers; keep it there. Monotonicity holds either way (request lines
+    // rise via volumeScale, capacity lines via tierMultiplier).
     const band = monthlyBand(r.unit, volumeScale);
+    const effectiveMultiplier = CAPACITY_UNITS.has(r.unit) ? tierMultiplier : 1;
     const estimateRange = formatRange(
-      r.usd * band.low * tierMultiplier,
-      r.usd * band.high * tierMultiplier,
+      r.usd * band.low * effectiveMultiplier,
+      r.usd * band.high * effectiveMultiplier,
     );
     let note = r.note;
     if (isPrivateSubnetDefault) {

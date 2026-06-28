@@ -315,9 +315,11 @@ describe("estimateCosts", () => {
     expect(drivers.some((d) => d.service === "API Gateway WebSocket" && d.unit === "per 1k requests")).toBe(true);
   });
 
-  it("costs each tier at its own volume stage (budget 0.1× → balanced 1× → resilient 30×)", () => {
-    // Volume is intrinsic to the tier ladder, not an intake knob: the SAME service in
-    // each tier is priced at that tier's stage × its robustness multiplier.
+  it("scales a REQUEST line by volume only across tiers — NOT the robustness multiplier", () => {
+    // A request-priced line (per-1k-requests) scales across tiers via the volume stage
+    // (0.1×/1×/10×) ONLY. The robustness multiplier must NOT apply on top: sending a
+    // request doesn't cost 3× more because the tier is multi-region — that double-count
+    // is what made a resilient SES line read $300–$3000/mo (30×) instead of 10×.
     const sameNodes = [node("API Gateway")];
     const ladder: ArchitectureResult = {
       assumptions: [],
@@ -337,10 +339,35 @@ describe("estimateCosts", () => {
       t.costDrivers.find((d) => d.service === "API Gateway" && d.unit === "per 1k requests")!.estimateRange;
     for (const t of out.tiers as Tier[]) {
       const vol = TIER_VOLUME_SCALE[t.name];
+      expect(reqRange(t)).toBe(formatRange(price.usd * band.low * vol, price.usd * band.high * vol));
+    }
+  });
+
+  it("scales a CAPACITY line by the robustness multiplier across tiers — NOT volume", () => {
+    // An always-on capacity line (ALB, $/hr) is traffic-independent: it does not move
+    // with the request-volume stage. It scales across tiers via the robustness
+    // multiplier (1×/2×/3×) — the redundancy premium (extra AZs/replicas) is what
+    // actually costs more. This is the mirror of the request-line rule above.
+    const sameNodes = [node("ALB")];
+    const ladder: ArchitectureResult = {
+      assumptions: [],
+      clarificationsUsed: [],
+      securityFloor: SECURITY_FLOOR,
+      ...RECOMMENDATION,
+      tiers: [
+        tier("budget", sameNodes, ["baseline"]),
+        tier("balanced", sameNodes, ["+ multi-AZ"]),
+        tier("resilient", sameNodes, ["+ cross-region"]),
+      ],
+    };
+    const price = stores.pricing.get("ALB", REGION).find((r) => r.unit === "hour")!;
+    const band = ASSUMED_MONTHLY_VOLUME["hour"]!;
+    const out = estimateCosts(ladder, stores.pricing, REGION);
+    const hourRange = (t: Tier): string =>
+      t.costDrivers.find((d) => d.service === "ALB" && d.unit === "$/hr")!.estimateRange;
+    for (const t of out.tiers as Tier[]) {
       const mult = TIER_COST_MULTIPLIER[t.name];
-      expect(reqRange(t)).toBe(
-        formatRange(price.usd * (band.low * vol) * mult, price.usd * (band.high * vol) * mult),
-      );
+      expect(hourRange(t)).toBe(formatRange(price.usd * band.low * mult, price.usd * band.high * mult));
     }
   });
 
@@ -415,5 +442,17 @@ describe("normalizeService keyword fallback (GAP 3)", () => {
     ["EBS volume (gp3)", "EBS"],
   ])("prices %s as %s, not silently $0", (label, canonical) => {
     expect(driversFor(label)).toContain(canonical);
+  });
+
+  // ECS launch type drives the bill. An ECS-on-EC2 task is priced as the EC2 instance;
+  // "Fargate-compatible" on it is a task-def portability note, NOT a launch type, and
+  // must not price phantom Fargate (the real-dollar bug on the self-host budget tier).
+  it("prices 'ECS on EC2' as EC2, not $0", () => {
+    expect(driversFor("ECS on EC2")).toContain("EC2");
+  });
+
+  it("does NOT price a Fargate-compatible EC2 task as Fargate", () => {
+    const priced = driversFor("ECS Task (Fargate-compatible definition)");
+    expect(priced).not.toContain("Fargate");
   });
 });
