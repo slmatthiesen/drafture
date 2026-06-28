@@ -15,6 +15,7 @@ import type {
   ConfigResponse,
   CuratedSummary,
   CuratedRunFull,
+  DesignFull,
   KeyDecision,
   Tier,
   TierName,
@@ -170,6 +171,29 @@ export async function fetchCuratedRun(
   } catch {
     return null;
   }
+}
+
+const DESIGNS_ENDPOINT = "/api/designs";
+
+/**
+ * Load a deep-linked design for `/design/:id`. Tries the generation-gallery endpoint
+ * first; a curated example lives in its own store (separate ids), so on a 404 we fall
+ * back to the curated fetch and normalize it to the same shape. One id space, one
+ * renderer — no duplicated design data on the server. Returns null on unknown id.
+ */
+export async function fetchDesign(
+  id: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<DesignFull | null> {
+  try {
+    const res = await fetchImpl(`${DESIGNS_ENDPOINT}/${encodeURIComponent(id)}`);
+    if (res.ok) return (await res.json()) as DesignFull;
+  } catch {
+    /* transport error — fall through to the curated source */
+  }
+  const curated = await fetchCuratedRun(id, fetchImpl);
+  if (!curated) return null;
+  return { id: curated.id, prompt: curated.prompt, design: curated.design };
 }
 
 /** Cast an up (+1) or down (-1) vote. Returns the new counts, or null on error. */

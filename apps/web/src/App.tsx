@@ -1,18 +1,23 @@
 /**
- * U10 — the one page.
+ * U10 — the one page, now routed.
  *
- * Flow: a single textbox. On submit the prompt animates UP to become the page
- * header/goal (CSS transition driven by the `app--submitted` class), a loading
- * state shows, then either a ClarifyForm (R2) or the tiered results (R3) render
- * below. Error responses (rate-limited / budget-reached / too-large) surface as
- * friendly messages.
+ * `/` is the landing flow: a single textbox whose prompt animates UP to become the
+ * page header/goal (CSS `app--submitted`), a loading state, then either a ClarifyForm
+ * (R2) or the tiered results (R3) below. A FRESH generation renders inline in local
+ * state — no route change mid-generation, so the prompt-animates-up UX is intact.
+ *
+ * `/design/:id` is a real, shareable, reload-safe deep link. Opening a curated example
+ * or a saved design navigates there (pushing browser history, so Back returns to the
+ * landing page instead of leaving the site) and the SAME <DesignResult> renderer draws
+ * it — the only difference is deep-linked designs render without the feedback thumbs.
  */
 
 import { useEffect, useState } from "react";
+import { Routes, Route, useNavigate, useParams, useLocation } from "react-router-dom";
 import {
   generate,
   fetchCurated,
-  fetchCuratedRun,
+  fetchDesign,
   submitFeedback,
   type ApiOutcome,
 } from "./lib/api.js";
@@ -20,16 +25,14 @@ import { BudgetReachedNotice } from "./components/BudgetReachedNotice.js";
 import { ClarifyForm } from "./components/ClarifyForm.js";
 import { CopyButton } from "./components/CopyButton.js";
 import { CuratedGallery } from "./components/CuratedGallery.js";
+import { DesignResult } from "./components/DesignResult.js";
 import { IntakeForm } from "./components/IntakeForm.js";
-import { KeyDecisions } from "./components/KeyDecisions.js";
 import { LoadingDraft } from "./components/LoadingDraft.js";
 import { RecentDesigns } from "./components/RecentDesigns.js";
-import { ReferenceConfig } from "./components/ReferenceConfig.js";
-import { SecurityPanel } from "./components/SecurityPanel.js";
 import { SiteFooter } from "./components/SiteFooter.js";
-import { TierTabs } from "./components/TierTabs.js";
 import type {
   CuratedSummary,
+  DesignFull,
   GenerateResponse,
   TierName,
 } from "./lib/types.js";
@@ -82,7 +85,18 @@ function friendlyError(
   );
 }
 
+/** Top-level router: one route per renderable surface. */
 export function App(): JSX.Element {
+  return (
+    <Routes>
+      <Route path="/" element={<Home />} />
+      <Route path="/design/:id" element={<DesignPage />} />
+    </Routes>
+  );
+}
+
+function Home(): JSX.Element {
+  const navigate = useNavigate();
   const [draft, setDraft] = useState<string>("");
   const [goal, setGoal] = useState<string>("");
   const [phase, setPhase] = useState<Phase>("idle");
@@ -109,12 +123,11 @@ export function App(): JSX.Element {
   const [selectedTier, setSelectedTier] = useState<TierName>("balanced");
   // Admin-curated example designs (server-stored) shown on the landing page.
   const [curated, setCurated] = useState<CuratedSummary[]>([]);
-  // Thumbs-up/down on the current result. `feedbackFresh` is true only for results from a
-  // real generation — feedback keys off the generation's prompt inputs (goal + lastAttempt),
-  // which re-opened history/curated designs don't have, so it's hidden there in v1.
+  // Thumbs-up/down on the current (fresh-generation-only) result. Feedback keys off the
+  // generation's prompt inputs (goal + lastAttempt), so it only ever rides a result we
+  // produced here — re-opened designs deep-link to /design/:id and render without it.
   const [feedbackRating, setFeedbackRating] = useState<1 | -1 | null>(null);
   const [feedbackBusy, setFeedbackBusy] = useState(false);
-  const [feedbackFresh, setFeedbackFresh] = useState(false);
 
   // Load the curated gallery once on mount; failures degrade to no gallery.
   useEffect(() => {
@@ -144,7 +157,6 @@ export function App(): JSX.Element {
         setResult(response);
         setSelectedTier(response.recommendedTier);
         setFeedbackRating(null);
-        setFeedbackFresh(true);
         setPhase("result");
         if (promptForHistory)
           setHistory(addHistory(promptForHistory, response));
@@ -158,50 +170,22 @@ export function App(): JSX.Element {
     }
   };
 
-  // The gallery/recents sit far down the landing page; jump back to the top so the
-  // opened design (recommendation banner first) is what the user lands on.
-  const scrollToTop = (): void =>
-    window.scrollTo({ top: 0, behavior: "smooth" });
-
-  // Re-open a saved design: pure client-side, no fetch, $0.
+  // Re-open a saved design: hand the stored body to /design/:id via router state so
+  // it renders instantly with no fetch ($0), while the URL still becomes shareable and
+  // Back-button-correct (a direct reload of that id falls back to the server fetch).
   const openSaved = (entry: HistoryEntry): void => {
-    setGoal(entry.prompt);
-    setResult(entry.result);
-    setSelectedTier(entry.result.recommendedTier);
-    setClarifyState(null);
-    setErrorMessage("");
-    setFeedbackRating(null);
-    setFeedbackFresh(false);
-    setPhase("result");
-    scrollToTop();
+    const payload: DesignFull = {
+      id: entry.id,
+      prompt: entry.prompt,
+      design: entry.result,
+    };
+    navigate(`/design/${encodeURIComponent(entry.id)}`, { state: { design: payload } });
   };
 
-  // Open a curated example: one cheap GET for the stored design, then render it
-  // through the normal result view — no model call, no spend.
-  const openCurated = async (id: string): Promise<void> => {
-    const run = await fetchCuratedRun(id);
-    if (!run) return;
-    setGoal(run.prompt);
-    setResult(run.design);
-    setSelectedTier(run.design.recommendedTier);
-    setClarifyState(null);
-    setErrorMessage("");
-    setFeedbackRating(null);
-    setFeedbackFresh(false);
-    setPhase("result");
-    scrollToTop();
-  };
-
-  // Return to the landing/gallery from a result view without a page reload —
-  // otherwise a visitor viewing a curated design has to refresh to browse the rest.
-  const backToStart = (): void => {
-    setPhase("idle");
-    // Land on the gallery (rAF waits for the idle render to paint it first).
-    window.requestAnimationFrame(() => {
-      document
-        .getElementById("gallery")
-        ?.scrollIntoView({ behavior: "smooth", block: "start" });
-    });
+  // Open a curated example: just navigate — /design/:id fetches the stored body
+  // (curated lives in its own store; the loader falls back to it on a generation miss).
+  const openCurated = (id: string): void => {
+    navigate(`/design/${encodeURIComponent(id)}`);
   };
 
   const startGeneration = async (
@@ -255,6 +239,17 @@ export function App(): JSX.Element {
     });
     setFeedbackBusy(false);
     if (res) setFeedbackRating(res.rating);
+  };
+
+  // Return to the landing/gallery from a fresh result without a reload (no history entry
+  // was pushed for an inline generation, so this resets local state directly).
+  const backToStart = (): void => {
+    setPhase("idle");
+    window.requestAnimationFrame(() => {
+      document
+        .getElementById("gallery")
+        ?.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
   };
 
   return (
@@ -403,74 +398,115 @@ export function App(): JSX.Element {
       )}
 
       {phase === "result" && result && (
-        <>
-          {/* Diagram leads: the tier tabs (Budget/Balanced/Resilient, Balanced
-              pre-selected) sit at the top so the design is visible immediately. */}
-          <TierTabs
-            tiers={result.tiers}
-            assumptions={result.assumptions}
-            selected={selectedTier}
-            onSelect={setSelectedTier}
-          />
+        <DesignResult
+          result={result}
+          selectedTier={selectedTier}
+          onSelectTier={setSelectedTier}
+          feedback={{
+            rating: feedbackRating,
+            busy: feedbackBusy,
+            onRate: (r) => void submitResultFeedback(r),
+          }}
+        />
+      )}
 
-          {/* Useful-design rating sits just above the key decisions — after the
-              reader has seen the diagram, before the reasoning. */}
-          {feedbackFresh && (
-            <section className="banner banner--recommend">
-              <div
-                className="recommend__feedback"
-                role="group"
-                aria-label="Rate this design"
-              >
-                <span className="recommend__feedback-label">Useful design?</span>
-                <button
-                  type="button"
-                  className={`recommend__thumb recommend__thumb--up${feedbackRating === 1 ? " recommend__thumb--on" : ""}`}
-                  aria-label="Good design"
-                  aria-pressed={feedbackRating === 1}
-                  disabled={feedbackBusy}
-                  onClick={() => void submitResultFeedback(1)}
-                >
-                  👍
-                </button>
-                <button
-                  type="button"
-                  className={`recommend__thumb recommend__thumb--down${feedbackRating === -1 ? " recommend__thumb--on" : ""}`}
-                  aria-label="Needs improvement"
-                  aria-pressed={feedbackRating === -1}
-                  disabled={feedbackBusy}
-                  onClick={() => void submitResultFeedback(-1)}
-                >
-                  👎
-                </button>
-              </div>
-            </section>
-          )}
+      <SiteFooter />
+    </main>
+  );
+}
 
-          <KeyDecisions decisions={result.keyDecisions} />
+type LoadState =
+  | { status: "loading" }
+  | { status: "ready"; data: DesignFull }
+  | { status: "missing" };
 
-          <SecurityPanel floor={result.securityFloor} />
+/**
+ * `/design/:id` — a deep-linked design. Renders from router state when an in-app open
+ * passed the body (instant, $0); otherwise (reload / shared link / new tab) fetches it.
+ * Unknown/pending/hidden ids resolve to a friendly "isn't available" state.
+ */
+function DesignPage(): JSX.Element {
+  const { id } = useParams<{ id: string }>();
+  const navigate = useNavigate();
+  const location = useLocation();
+  const passed = (location.state as { design?: DesignFull } | null)?.design;
 
-          {result.assumptions.length > 0 && (
-            <section className="card assumptions" aria-label="Assumptions">
-              <h2>Assumptions</h2>
-              <ul>
-                {result.assumptions.map((a, i) => (
-                  <li key={i}>{a}</li>
-                ))}
-              </ul>
-            </section>
-          )}
+  const [state, setState] = useState<LoadState>(
+    passed ? { status: "ready", data: passed } : { status: "loading" },
+  );
+  const [selectedTier, setSelectedTier] = useState<TierName>(
+    passed?.design.recommendedTier ?? "balanced",
+  );
+  const [goalExpanded, setGoalExpanded] = useState<boolean>(false);
 
-          {/* Terraform last: read the design, security floor, and assumptions
-              first, then grab the tier-specific reference file. */}
-          <ReferenceConfig
-            tier={
-              result.tiers.find((t) => t.name === selectedTier) ??
-              result.tiers[0]!
-            }
-          />
-        </>
+  useEffect(() => {
+    if (passed || !id) return;
+    let live = true;
+    void fetchDesign(id).then((data) => {
+      if (!live) return;
+      if (!data) {
+        setState({ status: "missing" });
+        return;
+      }
+      setState({ status: "ready", data });
+      setSelectedTier(data.design.recommendedTier);
+    });
+    return () => {
+      live = false;
+    };
+  }, [id, passed]);
+
+  const goal = state.status === "ready" ? state.data.prompt : "";
+
+  return (
+    <main className="app app--submitted">
+      <header className="app__header">
+        <span className="app__brand">Drafture</span>
+        <div className="app__header-actions">
+          {/* Mirrors the browser Back button: both return to the landing page. */}
+          <button type="button" className="result__back" onClick={() => navigate("/")}>
+            ← All examples
+          </button>
+        </div>
+        {state.status === "ready" && (
+          <h1 className="app__goal">
+            <button
+              type="button"
+              className="app__goal-toggle"
+              aria-expanded={goalExpanded}
+              title={goalExpanded ? "Collapse" : "Show full description"}
+              onClick={() => setGoalExpanded((v) => !v)}
+            >
+              <span className="app__goal-label" aria-hidden="true">
+                Your description
+              </span>
+              <span className="app__goal-text">{goal}</span>
+              <span className="app__goal-caret" aria-hidden="true">
+                {goalExpanded ? "▲" : "▼"}
+              </span>
+            </button>
+            <CopyButton text={goal} variant="icon" />
+          </h1>
+        )}
+      </header>
+
+      {state.status === "loading" && <LoadingDraft />}
+
+      {state.status === "missing" && (
+        <div className="banner banner--error" role="alert">
+          <p>This design isn't available — it may be private or no longer exist.</p>
+          <button type="button" onClick={() => navigate("/")}>
+            Back to start
+          </button>
+        </div>
+      )}
+
+      {state.status === "ready" && (
+        <DesignResult
+          result={state.data.design}
+          selectedTier={selectedTier}
+          onSelectTier={setSelectedTier}
+        />
       )}
 
       <SiteFooter />

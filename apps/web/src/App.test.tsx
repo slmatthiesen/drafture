@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { MemoryRouter } from "react-router-dom";
 import type { GenerateResponse, Tier, TierName } from "./lib/types.js";
 
 // jsdom can't run Mermaid's SVG renderer — stub the module to canned SVG.
@@ -113,6 +114,17 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+// App now hosts <Routes>; a Router is required. MemoryRouter starts at "/" (the
+// landing flow) so every existing assertion holds unchanged; an in-app open navigates
+// to /design/:id within the same in-memory history.
+function renderApp(): ReturnType<typeof render> {
+  return render(
+    <MemoryRouter initialEntries={["/"]}>
+      <App />
+    </MemoryRouter>,
+  );
+}
+
 function typeAndSubmit(description: string): void {
   fireEvent.change(screen.getByLabelText("System description"), { target: { value: description } });
   fireEvent.click(screen.getByRole("button", { name: /design it/i }));
@@ -124,7 +136,7 @@ function skipIntake(): void {
 
 describe("App (U10 + E6 intake)", () => {
   it("moves the prompt into the header and shows the intake before generating", () => {
-    render(<App />);
+    renderApp();
     typeAndSubmit("A photo-sharing API");
 
     // Prompt is now the page goal/header (the textbox is gone).
@@ -139,7 +151,7 @@ describe("App (U10 + E6 intake)", () => {
     const pending = deferred<Response>();
     queueResponses(pending.promise);
 
-    render(<App />);
+    renderApp();
     typeAndSubmit("A photo-sharing API");
     skipIntake();
 
@@ -156,7 +168,7 @@ describe("App (U10 + E6 intake)", () => {
   it("answering intake chips passes labeled answers to generate", async () => {
     queueResponses(jsonResponse(fullResult));
 
-    render(<App />);
+    renderApp();
     typeAndSubmit("A photo-sharing API");
 
     fireEvent.click(screen.getByRole("radio", { name: "Mission-critical" }));
@@ -175,7 +187,7 @@ describe("App (U10 + E6 intake)", () => {
   it("preselects the Balanced tier (no model recommendation) and shows the feedback control", async () => {
     queueResponses(jsonResponse(balancedRecommended));
 
-    render(<App />);
+    renderApp();
     typeAndSubmit("A REST API");
     skipIntake();
 
@@ -193,7 +205,7 @@ describe("App (U10 + E6 intake)", () => {
   it("renders the key-decisions (ADR) card", async () => {
     queueResponses(jsonResponse(fullResult));
 
-    render(<App />);
+    renderApp();
     typeAndSubmit("A REST API");
     skipIntake();
 
@@ -209,7 +221,7 @@ describe("App (U10 + E6 intake)", () => {
       jsonResponse(fullResult),
     );
 
-    render(<App />);
+    renderApp();
     typeAndSubmit("An async job processor");
     skipIntake();
 
@@ -234,7 +246,7 @@ describe("App (U10 + E6 intake)", () => {
   it("renders the security floor ONCE globally, not inside each tier", async () => {
     queueResponses(jsonResponse(fullResult));
 
-    render(<App />);
+    renderApp();
     typeAndSubmit("A REST API");
     skipIntake();
 
@@ -254,7 +266,7 @@ describe("App (U10 + E6 intake)", () => {
   it("no setup-steps section is rendered (setup moved to the reference config)", async () => {
     queueResponses(jsonResponse(fullResult));
 
-    render(<App />);
+    renderApp();
     typeAndSubmit("A REST API");
     skipIntake();
 
@@ -265,7 +277,7 @@ describe("App (U10 + E6 intake)", () => {
   it("re-renders diagram + cost + delta when switching tiers", async () => {
     queueResponses(jsonResponse(fullResult));
 
-    render(<App />);
+    renderApp();
     typeAndSubmit("A REST API");
     skipIntake();
 
@@ -289,7 +301,7 @@ describe("App (U10 + E6 intake)", () => {
   it("re-opens a saved design from history instantly, with no network call ($0)", async () => {
     addHistory("A saved photo API", fullResult);
 
-    render(<App />);
+    renderApp();
 
     // Recents are listed on the landing; opening one renders the stored design.
     // Anchor to the open button (the remove button's label also names the prompt).
@@ -302,7 +314,7 @@ describe("App (U10 + E6 intake)", () => {
   it("saves a generated design to history for later free retrieval", async () => {
     queueResponses(jsonResponse(fullResult));
 
-    render(<App />);
+    renderApp();
     typeAndSubmit("A photo-sharing API");
     skipIntake();
 
@@ -315,7 +327,7 @@ describe("App (U10 + E6 intake)", () => {
   it("surfaces a friendly message for a rate-limit error", async () => {
     queueResponses(jsonResponse({ error: "rate_limited" }, 429));
 
-    render(<App />);
+    renderApp();
     typeAndSubmit("Anything");
     skipIntake();
 

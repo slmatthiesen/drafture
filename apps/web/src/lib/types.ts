@@ -99,3 +99,14 @@ export interface CuratedSummary {
 export interface CuratedRunFull extends Omit<CuratedSummary, "createdAt"> {
   design: GenerateResponse;
 }
+
+/**
+ * A deep-linkable design (`GET /api/designs/:id`) — the prompt plus a `design` body
+ * that renders like a fresh result. The shape curated also normalizes to, so one
+ * loader + one renderer serve both sources behind `/design/:id`.
+ */
+export interface DesignFull {
+  id: string;
+  prompt: string;
+  design: GenerateResponse;
+}
