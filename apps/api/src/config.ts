@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { resolve, isAbsolute } from "node:path";
 
 /**
  * Centralized, validated runtime configuration (12-factor).
@@ -31,9 +31,11 @@ const ConfigSchema = z.object({
   GLM_API_KEY: z.string().optional(),
   GLM_BASE_URL: z.string().default("https://open.bigmodel.cn/api/paas/v4"),
   LLM_MODEL: z.string().default("claude-sonnet-4-6"),
-  // `low` keeps generation fast/cheap for a public tool; the system prompt is
-  // detailed enough that higher effort adds latency without much quality gain.
-  LLM_EFFORT: z.enum(["low", "medium", "high"]).default("low"),
+  // Medium by default: at `low`, the model repeatedly flaked on the output schema
+  // (e.g. emitting `rationative` for `keyDecisions[].rationale`), failing validation
+  // and 502-ing. The system prompt is detailed; medium follows it reliably for a
+  // modest latency/cost premium. Override per-deploy with LLM_EFFORT if needed.
+  LLM_EFFORT: z.enum(["low", "medium", "high"]).default("medium"),
   // Headroom so a full three-tier design never truncates (truncation → parse
   // failure → retry → multi-minute latency). The conciseness directive in the
   // system prompt keeps actual output well under this.
@@ -125,7 +127,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
  * `--env-file` / inline shell always win. `.env` is gitignored, so a production
  * deploy with real env vars (no `.env` file) is unaffected (no-op).
  */
-function loadEnvFile(): void {
+function loadEnvFile(): string | undefined {
   let dir = process.cwd();
   for (let i = 0; i < 8; i++) {
     let text: string;
@@ -133,7 +135,7 @@ function loadEnvFile(): void {
       text = readFileSync(resolve(dir, ".env"), "utf8");
     } catch {
       const parent = resolve(dir, "..");
-      if (parent === dir) return; // filesystem root — no .env found
+      if (parent === dir) return undefined; // filesystem root — no .env found
       dir = parent;
       continue;
     }
@@ -149,13 +151,30 @@ function loadEnvFile(): void {
       value = value.replace(/^["']|["']$/g, ""); // surrounding quotes
       process.env[key] = value;
     }
-    return; // first .env found wins
+    return dir; // first .env found wins — this is the repo root
   }
+  return undefined;
+}
+
+/**
+ * Anchor a RELATIVE DB_PATH to the repo root, not the process CWD. `pnpm dev` runs
+ * tsx from `apps/api` while the curated gallery is seeded from the repo root, so a
+ * cwd-relative `./data/drafture.db` resolved to TWO different files (an empty one
+ * under apps/api, the seeded one at the root) and the gallery came up empty. Pin a
+ * relative path to the discovered repo root so every entry point opens the SAME DB.
+ * Absolute paths and production (real env, no `.env`) are untouched.
+ */
+function anchorDbPath(repoRoot: string | undefined): void {
+  if (!repoRoot) return;
+  const dbPath = process.env.DB_PATH ?? "./data/drafture.db";
+  if (isAbsolute(dbPath)) return;
+  process.env.DB_PATH = resolve(repoRoot, dbPath);
 }
 
 export function getConfig(): Config {
   if (!cached) {
-    loadEnvFile();
+    const repoRoot = loadEnvFile();
+    anchorDbPath(repoRoot);
     cached = loadConfig();
   }
   return cached;
