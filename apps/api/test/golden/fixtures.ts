@@ -230,10 +230,41 @@ export function incoherentDatastoreArchitecture(): ArchitectureResult {
   return { ...base, tiers: base.tiers.map(swapToRds) };
 }
 
+/**
+ * A clean serverless result whose ONLY queue-keyword node is an SNS *alarm notifier*
+ * (the CloudWatch alarm → SNS → email path), with NO work queue and NO DLQ/idempotency
+ * tags anywhere. Mirrors the real curated url-shortener. `queuesAreResilient` must PASS
+ * (the alert sink is not a work queue), proving the alerting path isn't mis-flagged.
+ */
+export function alertOnlySnsArchitecture(): ArchitectureResult {
+  const base = goodArchitecture();
+  const serverlessNoQueue = (tier: Tier): Tier => ({
+    ...tier,
+    // Lambda + DynamoDB + an SNS alarm notifier; drop the SQS work queue + its worker.
+    nodes: [
+      { id: "cdn", awsService: "CloudFront", role: "edge CDN + cache", security: ["WAF", "TLS 1.3"] },
+      { id: "api", awsService: "API Gateway", role: "REST front door", security: ["TLS", "throttling"] },
+      { id: "fn", awsService: "Lambda", role: "business logic", security: ["least-priv role"] },
+      { id: "db", awsService: "DynamoDB", role: "primary datastore", security: ["KMS at rest"] },
+      { id: "alarm", awsService: "SNS", role: "alarm notifier", security: ["TLS"] },
+    ],
+    edges: [
+      { from: "client", to: "cdn", payload: "HTTPS request", protocol: "HTTPS" },
+      { from: "cdn", to: "api", payload: "Forwarded request", protocol: "HTTPS" },
+      { from: "api", to: "fn", payload: "Invocation event", protocol: "AWS SDK" },
+      { from: "fn", to: "db", payload: "Item read/write", protocol: "HTTPS" },
+      { from: "alarm", to: "fn", payload: "Alarm state notification", protocol: "SNS" },
+    ],
+    delta: tier.name === "budget" ? ["baseline: single-AZ, DynamoDB on-demand"] : ["+ multi-AZ", "+ dashboards"],
+  });
+  return { ...base, tiers: base.tiers.map(serverlessNoQueue) };
+}
+
 // Validate the good fixture once at load — a drift here is a fixture bug.
 ArchitectureResultSchema.parse(goodArchitecture());
 ArchitectureResultSchema.parse(incoherentComputeArchitecture());
 ArchitectureResultSchema.parse(incoherentDatastoreArchitecture());
+ArchitectureResultSchema.parse(alertOnlySnsArchitecture());
 
 export interface FakeProvider {
   provider: LlmProvider;

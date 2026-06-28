@@ -242,8 +242,38 @@ const QUEUE_KEYWORDS = ["sqs", "queue", "sns", "eventbridge", "kinesis", "messag
 const DLQ_KEYWORDS = ["dead-letter", "dead letter", "dlq"] as const;
 const IDEMPOTENCY_KEYWORDS = ["idempotent", "idempotency", "dedupe", "deduplicat"] as const;
 
+// SNS (and the "message"/"notification" keywords) match BOTH a real work queue/topic
+// AND the observability alerting path (CloudWatch alarm → SNS → email/Slack/PagerDuty).
+// The latter carries no business payload and needs no DLQ/idempotency, so a node that
+// is clearly an alerting sink must NOT be counted as a work queue — otherwise a clean
+// serverless design (Lambda + DynamoDB + an SNS *alarm notifier*) is falsely flagged.
+const ALERT_SINK_ROLE_KEYWORDS = [
+  "alarm",
+  "alert",
+  "on-call",
+  "on call",
+  "oncall",
+  "notifier",
+  "notification",
+  "pagerduty",
+  "page ",
+  "ops notification",
+] as const;
+
+/** True when this node is an alerting/notification SINK (alarm → SNS → human), not a
+ *  work queue. Only applies to SNS/notification-style nodes — a real SQS/Kinesis work
+ *  queue is never an alert sink even if some role text overlaps. */
+function isAlertSinkNode(awsService: string, role: string): boolean {
+  const svc = awsService.toLowerCase();
+  // SQS / Kinesis / EventBridge buses are work transport, never an alarm sink.
+  const isPubSubNotifier = svc.includes("sns") || svc.includes("notification");
+  if (!isPubSubNotifier) return false;
+  return ALERT_SINK_ROLE_KEYWORDS.some((kw) => role.toLowerCase().includes(kw));
+}
+
 function tierHasQueue(tier: Tier): boolean {
   return tier.nodes.some((n) => {
+    if (isAlertSinkNode(n.awsService, n.role)) return false;
     const surface = `${n.awsService} ${n.role}`.toLowerCase();
     return QUEUE_KEYWORDS.some((kw) => surface.includes(kw));
   });

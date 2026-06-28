@@ -10,6 +10,7 @@ import {
   badArchitecture,
   incoherentComputeArchitecture,
   incoherentDatastoreArchitecture,
+  alertOnlySnsArchitecture,
   fakeProvider,
 } from "./fixtures.js";
 import {
@@ -83,6 +84,19 @@ describe("property checkers detect the known-bad regression", () => {
 
   it("the aggregate is not ok for the bad result", () => {
     expect(runAllProperties(bad).ok).toBe(false);
+  });
+});
+
+describe("queuesAreResilient does not mis-flag an SNS alarm-notifier as a work queue", () => {
+  const alertOnly = alertOnlySnsArchitecture();
+
+  it("passes: an SNS *alarm notifier* (no work queue) is not a DLQ/idempotency offender", () => {
+    const r = queuesAreResilient(alertOnly);
+    expect(r.ok, r.reason).toBe(true);
+  });
+
+  it("the whole aggregate is clean for the alert-only serverless design", () => {
+    expect(runAllProperties(alertOnly).ok).toBe(true);
   });
 });
 
