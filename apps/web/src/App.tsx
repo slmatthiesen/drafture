@@ -13,7 +13,7 @@
  */
 
 import { useEffect, useState } from "react";
-import { Routes, Route, useNavigate, useParams, useLocation } from "react-router-dom";
+import { Routes, Route, Link, useNavigate, useParams, useLocation } from "react-router-dom";
 import {
   generate,
   fetchCurated,
@@ -26,6 +26,7 @@ import { ClarifyForm } from "./components/ClarifyForm.js";
 import { CopyButton } from "./components/CopyButton.js";
 import { CuratedGallery } from "./components/CuratedGallery.js";
 import { DesignResult } from "./components/DesignResult.js";
+import { GalleryView } from "./components/GalleryView.js";
 import { IntakeForm } from "./components/IntakeForm.js";
 import { LoadingDraft } from "./components/LoadingDraft.js";
 import { RecentDesigns } from "./components/RecentDesigns.js";
@@ -90,6 +91,7 @@ export function App(): JSX.Element {
   return (
     <Routes>
       <Route path="/" element={<Home />} />
+      <Route path="/gallery" element={<GalleryView />} />
       <Route path="/design/:id" element={<DesignPage />} />
     </Routes>
   );
@@ -147,6 +149,7 @@ function Home(): JSX.Element {
         return;
       case "result": {
         const response: GenerateResponse = {
+          id: outcome.id,
           tiers: outcome.tiers,
           assumptions: outcome.assumptions,
           securityFloor: outcome.securityFloor,
@@ -357,6 +360,12 @@ function Home(): JSX.Element {
       {!submitted && <CuratedGallery entries={curated} onOpen={openCurated} />}
 
       {!submitted && (
+        <p className="gallery__browse">
+          <Link to="/gallery">Browse the community gallery →</Link>
+        </p>
+      )}
+
+      {!submitted && (
         <RecentDesigns
           entries={history}
           onOpen={openSaved}
@@ -402,6 +411,7 @@ function Home(): JSX.Element {
           result={result}
           selectedTier={selectedTier}
           onSelectTier={setSelectedTier}
+          generationId={result.id}
           feedback={{
             rating: feedbackRating,
             busy: feedbackBusy,
@@ -506,6 +516,7 @@ function DesignPage(): JSX.Element {
           result={state.data.design}
           selectedTier={selectedTier}
           onSelectTier={setSelectedTier}
+          generationId={state.data.id}
         />
       )}
 

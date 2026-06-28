@@ -27,11 +27,14 @@ export function DesignResult({
   selectedTier,
   onSelectTier,
   feedback,
+  generationId,
 }: {
   result: GenerateResponse;
   selectedTier: TierName;
   onSelectTier: (tier: TierName) => void;
   feedback?: DesignFeedback;
+  /** Stored-design id threaded into the Terraform pull so a re-pull is free. */
+  generationId?: string;
 }): JSX.Element {
   return (
     <>
@@ -99,6 +102,7 @@ export function DesignResult({
         tier={
           result.tiers.find((t) => t.name === selectedTier) ?? result.tiers[0]!
         }
+        generationId={generationId}
       />
     </>
   );

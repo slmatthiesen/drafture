@@ -16,6 +16,7 @@ import type {
   CuratedSummary,
   CuratedRunFull,
   DesignFull,
+  DesignSummary,
   KeyDecision,
   Tier,
   TierName,
@@ -33,6 +34,8 @@ export type ApiOutcome =
   | { kind: "clarify"; questions: string[]; round: number }
   | {
       kind: "result";
+      /** Persisted-generation id — present when the server stored the design. */
+      id?: string;
       tiers: Tier[];
       assumptions: string[];
       securityFloor: string[];
@@ -91,6 +94,7 @@ export async function generate(
   const tiers = result.tiers ?? [];
   return {
     kind: "result",
+    id: result.id,
     tiers,
     assumptions: result.assumptions ?? [],
     securityFloor: result.securityFloor ?? [],
@@ -111,6 +115,7 @@ export const clarify = generate;
  */
 export async function fetchConfig(
   tier: Tier,
+  generationId?: string,
   fetchImpl: typeof fetch = fetch,
 ): Promise<ConfigOutcome> {
   let res: Response;
@@ -118,7 +123,9 @@ export async function fetchConfig(
     res = await fetchImpl(CONFIG_ENDPOINT, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ tier }),
+      // generationId activates the server's lazy Terraform persist: the first pull on
+      // a stored design pays, every later pull (this id, this tier) is a free DB read.
+      body: JSON.stringify(generationId ? { tier, generationId } : { tier }),
     });
   } catch {
     return { kind: "error", status: 0, code: "network_error" };
@@ -174,6 +181,37 @@ export async function fetchCuratedRun(
 }
 
 const DESIGNS_ENDPOINT = "/api/designs";
+
+/** List the approved community gallery. Returns [] on any error — the gallery is optional UI. */
+export async function fetchDesigns(fetchImpl: typeof fetch = fetch): Promise<DesignSummary[]> {
+  try {
+    const res = await fetchImpl(DESIGNS_ENDPOINT);
+    if (!res.ok) return [];
+    const data = (await res.json()) as { designs?: DesignSummary[] };
+    return data.designs ?? [];
+  } catch {
+    return [];
+  }
+}
+
+/** Cast an up (+1) or down (-1) vote on a community design. Returns new counts, or null on error. */
+export async function voteDesign(
+  id: string,
+  value: 1 | -1,
+  fetchImpl: typeof fetch = fetch,
+): Promise<{ upvotes: number; downvotes: number } | null> {
+  try {
+    const res = await fetchImpl(`${DESIGNS_ENDPOINT}/${encodeURIComponent(id)}/vote`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ value }),
+    });
+    if (!res.ok) return null;
+    return (await res.json()) as { upvotes: number; downvotes: number };
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Load a deep-linked design for `/design/:id`. Tries the generation-gallery endpoint
