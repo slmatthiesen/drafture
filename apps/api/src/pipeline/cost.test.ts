@@ -202,6 +202,48 @@ describe("estimateCosts", () => {
     }
   });
 
+  it("does NOT add a NAT line for a VPC service explicitly tagged public-subnet (single-instance budget)", () => {
+    // The documented budget shape: a single public-IP EC2/ECS box with direct egress
+    // and NO NAT gateway. A node tagged "public subnet"/"no outbound NAT" must opt OUT
+    // of the forced NAT line — otherwise the cost engine fabricates a $33/mo gateway the
+    // design explicitly says it doesn't have.
+    const publicBox: ArchitectureResult = {
+      assumptions: [],
+      clarificationsUsed: [],
+      securityFloor: SECURITY_FLOOR,
+      ...RECOMMENDATION,
+      tiers: [
+        tier(
+          "budget",
+          [
+            node("ECS on EC2", {
+              role: "API server (t4g.small)",
+              security: ["public subnet, tight SG: 443 from CF only", "no outbound NAT needed (direct egress)"],
+            }),
+            node("S3"),
+          ],
+          ["baseline: single public-subnet box, direct egress, no NAT, no ALB"],
+        ),
+      ],
+    };
+    const out = estimateCosts(publicBox, stores.pricing, REGION);
+    expect(out.tiers[0]!.costDrivers.some((d) => d.service === "NAT Gateway")).toBe(false);
+  });
+
+  it("STILL adds a NAT line for a VPC service in a private subnet (no public-subnet tag)", () => {
+    // Guard the opt-out doesn't over-fire: a normal private-subnet EC2/Fargate box
+    // (no public-subnet tag) must keep its NAT line.
+    const privateBox: ArchitectureResult = {
+      assumptions: [],
+      clarificationsUsed: [],
+      securityFloor: SECURITY_FLOOR,
+      ...RECOMMENDATION,
+      tiers: [tier("balanced", [node("Fargate"), node("RDS")], ["+ multi-AZ"])],
+    };
+    const out = estimateCosts(privateBox, stores.pricing, REGION);
+    expect(out.tiers[0]!.costDrivers.some((d) => d.service === "NAT Gateway")).toBe(true);
+  });
+
   it("does NOT add a NAT/egress line for a tier with no private subnet", () => {
     const out = estimateCosts(result(), stores.pricing, REGION);
     const budget = out.tiers[1]!;

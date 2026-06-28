@@ -414,16 +414,31 @@ export const VPC_PRIVATE_SERVICE_KEYWORDS = [
 ] as const;
 
 /**
- * Detect a tier that actually runs VPC-bound resources, which forces a NAT gateway
- * + internet-egress recurring cost (R7 #5 / KTD6).
+ * A node's tags explicitly say it lives in a PUBLIC subnet (or needs no NAT). This is
+ * the documented single-public-instance budget shape: an EC2/ECS box with a public IP
+ * behind a tight SG and DIRECT outbound egress — no NAT gateway. NAT exists only to
+ * give PRIVATE-subnet resources egress, so a node that declares itself public must not
+ * trip the NAT cost line. Matched on the node's security TAGS (where the model states
+ * subnet placement), not free role prose.
+ */
+const PUBLIC_SUBNET_TAG = /\bpublic subnet\b|\bpublic ip\b|\bno (?:outbound )?nat\b|direct egress/i;
+
+function isExplicitlyPublicSubnet(node: GeneratedTier["nodes"][number]): boolean {
+  return node.security.some((tag) => PUBLIC_SUBNET_TAG.test(tag));
+}
+
+/**
+ * Detect a tier that actually runs VPC-bound resources IN A PRIVATE SUBNET, which
+ * forces a NAT gateway + internet-egress recurring cost (R7 #5 / KTD6).
  *
- * The ONLY trigger is the presence of a real VPC-bound service. We deliberately do
- * NOT trip on a "private subnet" text tag: the model sprinkles that phrase
- * inconsistently — even onto pure-serverless tiers (Lambda + DynamoDB + S3, no
- * VPC) — which produced a PHANTOM NAT line on some tiers and not others, making a
- * serverless budget tier look like it cost $40+/mo for a gateway it doesn't have.
- * Anchoring on the service list makes NAT correct (only when there's VPC compute/
- * data) and consistent across every tier that has it.
+ * Trigger: a real VPC-bound service whose node is NOT explicitly public-subnet. We
+ * deliberately do NOT trip on a bare "private subnet" text tag (the model sprinkles
+ * it inconsistently, even onto pure-serverless tiers, which produced a phantom NAT
+ * line). But we DO honor an explicit PUBLIC-subnet tag as an opt-out: the documented
+ * budget shape is a single public-IP EC2/ECS box with direct egress and no NAT, so a
+ * node tagged "public subnet"/"no NAT" must not fabricate a $33/mo gateway it doesn't
+ * have. A pure-serverless tier (Lambda + DynamoDB + S3) matches no VPC service and
+ * also correctly shows no NAT.
  */
 function egressesFromPrivateSubnet(tier: GeneratedTier): boolean {
   return tier.nodes.some((n) => {
@@ -433,7 +448,8 @@ function egressesFromPrivateSubnet(tier: GeneratedTier): boolean {
     // pure-serverless tiers that merely have a dashboards/records node. `\bkw\b`
     // requires the VPC service to appear as its own token ("rds", "fargate"…),
     // which is what we actually mean.
-    return VPC_PRIVATE_SERVICE_KEYWORDS.some((kw) => new RegExp(`\\b${kw}\\b`).test(serviceSurface));
+    const isVpcBound = VPC_PRIVATE_SERVICE_KEYWORDS.some((kw) => new RegExp(`\\b${kw}\\b`).test(serviceSurface));
+    return isVpcBound && !isExplicitlyPublicSubnet(n);
   });
 }
 
