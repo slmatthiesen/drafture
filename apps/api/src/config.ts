@@ -74,6 +74,14 @@ const ConfigSchema = z.object({
   RESEARCH_ON_MISS: boolish.default("false"),
   RESEARCH_MAX_CALLS_PER_REQUEST: z.coerce.number().int().nonnegative().default(2),
 
+  // Persistence / public gallery: every real generation is stored permanently as the
+  // backbone for the browsable gallery + model/template improvement. Off in test and
+  // probe environments so they never pollute the store with throwaway runs.
+  PERSIST_GENERATIONS: boolish.default("true"),
+  // Net (upvotes - downvotes) at or below which an APPROVED generation is auto-hidden
+  // back into the review queue — community-driven removal, hard-delete stays manual.
+  GENERATION_HIDE_NET_VOTES: z.coerce.number().int().default(-3),
+
   // Storage
   DB_PATH: z.string().default("./data/stackdraft.db"),
 

@@ -56,6 +56,8 @@ const REFERENCE_WARNING_HEADER = `##############################################
 interface ConfigBody {
   tier: Tier;
   description?: string;
+  /** Optional id of the persisted generation this tier belongs to (lazy Terraform cache). */
+  generationId?: string;
   turnstileToken?: string;
 }
 
@@ -71,6 +73,7 @@ const configBodySchema = {
   properties: {
     tier: { type: "object" },
     description: { type: "string", maxLength: 50_000 },
+    generationId: { type: "string", minLength: 1, maxLength: 128 },
     turnstileToken: { type: "string" },
   },
 } as const;
@@ -149,6 +152,21 @@ async function handleConfig(
   // same reference config, so an identical request is served free from cache.
   const cacheKey = hashPrompt({ tier, format: FORMAT });
 
+  // (0) Long-lived Terraform cache on the generation row (lazy-persist). Survives the
+  // 24h response cache and serves gallery pulls for $0 — the first config request for
+  // a (generation, tier) pays; every later pull is a free read. The client supplies
+  // generationId when the design was persisted; without it we fall through to the
+  // normal on-demand + 24h-cache path.
+  const tierName = typeof tier?.name === "string" ? tier.name : undefined;
+  const generationId = body.generationId;
+  if (generationId && tierName) {
+    const stored = ctx.stores.generations.getTerraform(generationId, tierName);
+    if (stored) {
+      emit("ok", { cacheHit: true, costUsd: 0 });
+      return reply.code(200).send({ format: FORMAT, code: stored.code });
+    }
+  }
+
   // (1) ResponseCache lookup. HIT short-circuits: no spend, costUsd 0 (KTD8).
   const cached = ctx.stores.responseCache.get(cacheKey, ctx.config.RESPONSE_CACHE_TTL_MS);
   if (cached) {
@@ -186,6 +204,17 @@ async function handleConfig(
     ctx.stores.spendLedger.reconcile(reservationId, actualUsd);
 
     const responseBody = { format: FORMAT, code: REFERENCE_WARNING_HEADER + generated.result };
+
+    // Persist this tier's Terraform onto the generation row so future pulls are free.
+    // Best-effort: a persist failure never breaks the artifact the user just paid for.
+    if (generationId && tierName) {
+      try {
+        ctx.stores.generations.setTerraform(generationId, tierName, responseBody.code);
+      } catch (err) {
+        req.log.error({ err }, "terraform persist failed (non-fatal)");
+      }
+    }
+
     ctx.stores.responseCache.set(cacheKey, JSON.stringify(responseBody));
 
     emit("ok", { costUsd: actualUsd });

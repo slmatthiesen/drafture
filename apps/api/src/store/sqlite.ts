@@ -16,6 +16,7 @@ import { SqlitePricingStore } from "./pricing.js";
 import { SqliteSpendLedger } from "./spendLedger.js";
 import { SqliteCuratedStore } from "./curated.js";
 import { SqliteFeedbackStore } from "./feedback.js";
+import { SqliteGenerationsStore } from "./generations.js";
 
 /** Instance type of an open better-sqlite3 database. */
 export type Db = Database.Database;
@@ -119,6 +120,37 @@ const MIGRATIONS = `
     UNIQUE(ip, prompt_hash)
   );
   CREATE INDEX IF NOT EXISTS idx_feedback_rating ON feedback(rating);
+
+  CREATE TABLE IF NOT EXISTS generations (
+    id TEXT PRIMARY KEY,
+    prompt_hash TEXT NOT NULL UNIQUE,
+    description TEXT NOT NULL,
+    answers_json TEXT NOT NULL,
+    model TEXT NOT NULL,
+    region TEXT NOT NULL,
+    recommended_tier TEXT NOT NULL,
+    tags_json TEXT NOT NULL,
+    body_json TEXT NOT NULL,
+    terraform_json TEXT,
+    status TEXT NOT NULL DEFAULT 'pending',
+    opt_out INTEGER NOT NULL DEFAULT 0,
+    gen_count INTEGER NOT NULL DEFAULT 1,
+    client_ip TEXT NOT NULL,
+    upvotes INTEGER NOT NULL DEFAULT 0,
+    downvotes INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_generations_status ON generations(status);
+  CREATE INDEX IF NOT EXISTS idx_generations_updated ON generations(updated_at);
+
+  CREATE TABLE IF NOT EXISTS generation_votes (
+    generation_id TEXT NOT NULL REFERENCES generations(id) ON DELETE CASCADE,
+    voter TEXT NOT NULL,
+    value INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (generation_id, voter)
+  );
 `;
 
 /** Open (creating parent dirs as needed), enable WAL, and migrate. */
@@ -133,7 +165,19 @@ export function getDb(path: string): Db {
   // holds the write lock (matters once a refresh job shares the file).
   db.pragma("busy_timeout = 5000");
   db.exec(MIGRATIONS);
+  // Idempotent column adds for tables CREATE TABLE IF NOT EXISTS can't extend.
+  // curated_runs gained a tags column so the gallery facets curated + user-generated
+  // designs uniformly (backfilled by the retag script).
+  addColumnIfMissing(db, "curated_runs", "tags_json", "TEXT NOT NULL DEFAULT '[]'");
   return db;
+}
+
+/** Add a column to a table only if it is absent (idempotent ALTER for migrations). */
+function addColumnIfMissing(db: Db, table: string, column: string, definition: string): void {
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
+  if (!cols.some((c) => c.name === column)) {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition};`);
+  }
 }
 
 /** Fresh isolated in-memory DB for tests (no file, nothing to clean up). */
@@ -153,6 +197,7 @@ export interface Stores {
   spendLedger: SqliteSpendLedger;
   curated: SqliteCuratedStore;
   feedback: SqliteFeedbackStore;
+  generations: SqliteGenerationsStore;
 }
 
 /** Construct all stores bound to one db instance (shared clock). */
@@ -164,5 +209,6 @@ export function createStores(db: Db, clock: Clock = systemClock): Stores {
     spendLedger: new SqliteSpendLedger(db, clock),
     curated: new SqliteCuratedStore(db, clock),
     feedback: new SqliteFeedbackStore(db, clock),
+    generations: new SqliteGenerationsStore(db, clock),
   };
 }

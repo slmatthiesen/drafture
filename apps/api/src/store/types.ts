@@ -165,3 +165,111 @@ export interface FeedbackStore {
   /** Most-recently-updated entries filtered by rating (operator review script). */
   listByRating(rating: 1 | -1, limit: number): FeedbackEntry[];
 }
+
+/**
+ * Lifecycle of a permanently-stored generation. `pending` = generated but not yet
+ * operator-approved (never public); `approved` = live in the gallery; `hidden` =
+ * crowd-downvoted or operator-suppressed, back in the review queue.
+ */
+export type GenerationStatus = "pending" | "approved" | "hidden";
+
+/**
+ * A permanently-stored generation — the gallery + model-improvement backbone. One
+ * row per distinct (description, answers, round, model, region): the UNIQUE
+ * `promptHash` IS the /api/generate response-cache key, which already folds in model
+ * + region, so a swap to a different model naturally produces a separate row (prior
+ * model versions are preserved, never overwritten). Re-running the exact same
+ * prompt under the same model upserts: `genCount` bumps, body/tags refresh, but id,
+ * status, votes, terraform, and opt-out are preserved.
+ *
+ * `description`/`answers` are FAITHFULLY SCRUBBED of credential shapes before the
+ * model ever sees them, so the stored text is exactly what generated `body` (no raw
+ * copy is kept — Option A). `tags` are derived deterministically from the body, never
+ * by the model.
+ */
+export interface GenerationRecord {
+  /** Opaque short id for deep links (/design/:id). Stable across re-runs of the same prompt. */
+  id: string;
+  promptHash: string;
+  description: string;
+  answers: string[];
+  model: string;
+  region: string;
+  recommendedTier: string;
+  /** Deterministic facet tags (compute, messaging, security, robustness, ...). */
+  tags: string[];
+  /** Verbatim ArchitectureResult JSON (tiers + costs + securityFloor + recommendation). */
+  body: string;
+  /** JSON map tierName -> { code, format }, filled lazily on first /api/config pull. Null until then. */
+  terraformJson: string | null;
+  status: GenerationStatus;
+  /** Submitter declined public/training use of this design. */
+  optOut: boolean;
+  genCount: number;
+  clientIp: string;
+  upvotes: number;
+  downvotes: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface GenerationSummary {
+  id: string;
+  description: string;
+  recommendedTier: string;
+  tags: string[];
+  status: GenerationStatus;
+  upvotes: number;
+  downvotes: number;
+  genCount: number;
+  model: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface GenerationUpsertResult {
+  id: string;
+  status: GenerationStatus;
+}
+
+export interface GenerationVoteResult {
+  upvotes: number;
+  downvotes: number;
+  status: GenerationStatus;
+}
+
+export interface GenerationsStore {
+  /**
+   * Insert a new generation, or refresh an existing one on promptHash conflict
+   * (genCount++, refresh body/tags/description, PRESERVE id/status/votes/terraform/
+   * opt-out). Best-effort callers should catch — persistence must not fail a generation.
+   */
+  upsert(input: {
+    promptHash: string;
+    description: string;
+    answers: string[];
+    model: string;
+    region: string;
+    recommendedTier: string;
+    tags: string[];
+    body: string;
+    clientIp: string;
+  }): GenerationUpsertResult;
+  getById(id: string): GenerationRecord | undefined;
+  getByPromptHash(promptHash: string): GenerationRecord | undefined;
+  /** Operator approval queue (status = pending), newest first. */
+  listPending(limit: number): GenerationSummary[];
+  /** Public gallery (status = approved), best community score first. */
+  listApproved(limit: number): GenerationSummary[];
+  setStatus(id: string, status: GenerationStatus): boolean;
+  /** Persist one tier's reference Terraform onto the row (lazy, from /api/config). */
+  setTerraform(id: string, tierName: string, code: string): boolean;
+  getTerraform(id: string, tierName: string): { code: string } | undefined;
+  /**
+   * Cast or change one voter's up/down vote, recomputing counters. If the row is
+   * `approved` and net votes (up - down) fall to/below `hideThreshold`, it is auto-
+   * hidden back into the review queue — community-driven removal without ceding the
+   * hard-delete. Returns undefined if the generation does not exist.
+   */
+  vote(id: string, voter: string, value: 1 | -1, hideThreshold: number): GenerationVoteResult | undefined;
+}
