@@ -260,20 +260,28 @@ const ALERT_SINK_ROLE_KEYWORDS = [
   "ops notification",
 ] as const;
 
-/** True when this node is an alerting/notification SINK (alarm → SNS → human), not a
- *  work queue. Only applies to SNS/notification-style nodes — a real SQS/Kinesis work
- *  queue is never an alert sink even if some role text overlaps. */
-function isAlertSinkNode(awsService: string, role: string): boolean {
+/**
+ * True when a node matches a queue keyword but is NOT a work queue that needs
+ * DLQ + idempotency. Two non-queue uses of these keywords:
+ *   1. Alert sink — an SNS/notification node whose role is an alarm/on-call path
+ *      (CloudWatch alarm → SNS → human); no business payload.
+ *   2. Scheduler — EventBridge *Scheduler* / a cron trigger fires a job on a timer;
+ *      it's a clock, not an at-least-once work queue (the JOB it triggers may need a
+ *      DLQ, and that job's own SQS node would still be checked).
+ */
+function isNonQueueNode(awsService: string, role: string): boolean {
   const svc = awsService.toLowerCase();
-  // SQS / Kinesis / EventBridge buses are work transport, never an alarm sink.
+  const r = role.toLowerCase();
   const isPubSubNotifier = svc.includes("sns") || svc.includes("notification");
-  if (!isPubSubNotifier) return false;
-  return ALERT_SINK_ROLE_KEYWORDS.some((kw) => role.toLowerCase().includes(kw));
+  if (isPubSubNotifier && ALERT_SINK_ROLE_KEYWORDS.some((kw) => r.includes(kw))) return true;
+  // "EventBridge Scheduler" / "... scheduler" / "cron" trigger — a timer, not a queue.
+  if (`${svc} ${r}`.includes("scheduler") || r.includes("cron")) return true;
+  return false;
 }
 
 function tierHasQueue(tier: Tier): boolean {
   return tier.nodes.some((n) => {
-    if (isAlertSinkNode(n.awsService, n.role)) return false;
+    if (isNonQueueNode(n.awsService, n.role)) return false;
     const surface = `${n.awsService} ${n.role}`.toLowerCase();
     return QUEUE_KEYWORDS.some((kw) => surface.includes(kw));
   });
@@ -430,14 +438,18 @@ function tierStoreKinds(tier: Tier): { serverless: string[]; vpcbound: string[] 
   const serverless: string[] = [];
   const vpcbound: string[] = [];
   for (const n of tier.nodes) {
-    const surface = `${n.awsService} ${n.role}`.toLowerCase();
-    // Aurora Serverless is not VPC-NAT-forcing in the same way; classify by the "serverless" tag.
-    const auroraServerless = surface.includes("aurora") && surface.includes("serverless");
-    if (SERVERLESS_STORES.some((kw) => new RegExp(`\\b${kw}\\b`).test(surface)) || auroraServerless) {
+    // Classify what a node IS by its SERVICE name only, never the role prose — a role
+    // like "distributed trace (app→Aurora→LLM)" on an X-Ray node names Aurora to
+    // describe a data flow, but the node is not a store. Keying on awsService keeps
+    // "is this node a VPC-bound store?" honest. Aurora Serverless v2 keeps the
+    // "serverless" qualifier where it appears in the service label.
+    const svc = n.awsService.toLowerCase();
+    const auroraServerless = svc.includes("aurora") && svc.includes("serverless");
+    if (SERVERLESS_STORES.some((kw) => new RegExp(`\\b${kw}\\b`).test(svc)) || auroraServerless) {
       serverless.push(n.awsService);
     }
-    if (VPC_BOUND_STORES.some((kw) => new RegExp(`\\b${kw}\\b`).test(surface))) vpcbound.push(n.awsService);
-    else if (surface.includes("aurora") && !surface.includes("serverless")) vpcbound.push(n.awsService);
+    if (VPC_BOUND_STORES.some((kw) => new RegExp(`\\b${kw}\\b`).test(svc))) vpcbound.push(n.awsService);
+    else if (svc.includes("aurora") && !svc.includes("serverless")) vpcbound.push(n.awsService);
   }
   return { serverless, vpcbound };
 }
