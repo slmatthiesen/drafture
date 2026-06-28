@@ -57,7 +57,14 @@ const TIER_LABEL: Record<string, string> = {
   resilient: "Resilient",
 };
 
-export function ReferenceConfig({ tier }: { tier: Tier }): JSX.Element {
+export function ReferenceConfig({
+  tier,
+  generationId,
+}: {
+  tier: Tier;
+  /** When set (a stored design), pulls persist to the row so a re-pull is free. */
+  generationId?: string;
+}): JSX.Element {
   const [open, setOpen] = useState(false);
   const [state, setState] = useState<State>({ status: "idle" });
   const [showHowTo, setShowHowTo] = useState(false);
@@ -78,7 +85,7 @@ export function ReferenceConfig({ tier }: { tier: Tier }): JSX.Element {
 
   const load = async (): Promise<void> => {
     setState({ status: "loading" });
-    const outcome = await fetchConfig(tier);
+    const outcome = await fetchConfig(tier, generationId);
     if (outcome.kind === "config") {
       setState({ status: "ready", code: outcome.code, format: outcome.format });
     } else {

@@ -60,6 +60,8 @@ export interface KeyDecision {
 
 /** 200 response from `/api/generate` when a full design is produced. */
 export interface GenerateResponse {
+  /** Persisted-generation id (present when PERSIST_GENERATIONS is on) — the deep link. */
+  id?: string;
   tiers: Tier[];
   assumptions: string[];
   /** The safe-by-default security floor — stated ONCE; applies to every tier (R7). */
@@ -98,6 +100,23 @@ export interface CuratedSummary {
 /** A full curated run from `GET /api/curated/:id` — `design` renders like a fresh result. */
 export interface CuratedRunFull extends Omit<CuratedSummary, "createdAt"> {
   design: GenerateResponse;
+}
+
+/**
+ * A community-gallery card as listed by `GET /api/designs` (no design body). Mirrors
+ * the API's `GenerationSummary`; the list endpoint also sends `status`/`updatedAt`,
+ * which the gallery UI ignores. Sorted server-side by net community score.
+ */
+export interface DesignSummary {
+  id: string;
+  description: string;
+  recommendedTier: TierName;
+  tags: string[];
+  upvotes: number;
+  downvotes: number;
+  genCount: number;
+  model: string;
+  createdAt: number;
 }
 
 /**

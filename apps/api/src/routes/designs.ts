@@ -1,6 +1,8 @@
 /**
  * Generation-gallery routes — the public, server-stored user-generated designs.
  *
+ *   GET  /api/designs          → the browsable community gallery: approved summaries
+ *                               only ($0, no LLM; same cheap-read shape as /api/curated).
  *   GET  /api/designs/:id      → one approved design's full body for a deep-link render
  *                               ($0, no LLM). 404 unless status === "approved", so
  *                               pending/hidden rows are never publicly reachable by id.
@@ -8,8 +10,9 @@
  *                               downvotes at/below the threshold auto-hide an
  *                               approved design back into the review queue.
  *
- * (GET /api/designs — the browsable gallery list — arrives with the Phase 2 gallery
- * UI.) The vote route reuses the existing friction chain (access gate → Turnstile →
+ * The list/detail GETs are unguarded beyond the access gate (cheap reads, never touch
+ * the model or spend ledger). The vote route reuses the existing friction chain
+ * (access gate → Turnstile →
  * per-IP rate limit) and keys one vote per voter off the same client-IP strategy the
  * guards use, so a refresh can't stuff the ballot.
  */
@@ -40,7 +43,14 @@ const idParamsSchema = {
 
 const ROUTE = "/api/designs";
 
+// Cap the gallery payload — client-side filtering fetches the list once (Phase 2 v1).
+const LIST_LIMIT = 200;
+
 export async function registerDesignsRoutes(app: FastifyInstance, ctx: AppContext): Promise<void> {
+  app.get(ROUTE, { preHandler: [ctx.guards.accessGate] }, (_req, reply) => {
+    return reply.code(200).send({ designs: ctx.stores.generations.listApproved(LIST_LIMIT) });
+  });
+
   app.get(
     `${ROUTE}/:id`,
     { schema: { params: idParamsSchema }, preHandler: [ctx.guards.accessGate] },

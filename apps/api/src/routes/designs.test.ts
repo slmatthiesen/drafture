@@ -73,3 +73,49 @@ describe("designs routes — GET /api/designs/:id", () => {
     await app.close();
   });
 });
+
+describe("designs routes — GET /api/designs (community gallery list)", () => {
+  let app: FastifyInstance;
+  let stores: Stores;
+
+  beforeEach(async () => {
+    ({ app, stores } = await buildHarness());
+  });
+
+  it("lists only approved designs — pending and hidden are excluded", async () => {
+    const approved = stores.generations.upsert(genInput("h-approved"));
+    const pending = stores.generations.upsert(genInput("h-pending"));
+    const hidden = stores.generations.upsert(genInput("h-hidden"));
+    stores.generations.setStatus(approved.id, "approved");
+    stores.generations.setStatus(hidden.id, "hidden");
+    // `pending` is left in its default pending status.
+
+    const res = await app.inject({ method: "GET", url: "/api/designs" });
+    expect(res.statusCode).toBe(200);
+    const ids = res.json().designs.map((d: { id: string }) => d.id);
+    expect(ids).toEqual([approved.id]);
+    expect(ids).not.toContain(pending.id);
+    expect(ids).not.toContain(hidden.id);
+    await app.close();
+  });
+
+  it("returns gallery summary fields and an empty list when nothing is approved", async () => {
+    const empty = await app.inject({ method: "GET", url: "/api/designs" });
+    expect(empty.json().designs).toEqual([]);
+
+    const { id } = stores.generations.upsert(genInput("h-summary"));
+    stores.generations.setStatus(id, "approved");
+    const res = await app.inject({ method: "GET", url: "/api/designs" });
+    const design = res.json().designs[0];
+    expect(design).toMatchObject({
+      id,
+      description: "build a chat app",
+      recommendedTier: "balanced",
+      tags: ["messaging"],
+      model: "claude-sonnet-4-6",
+    });
+    expect(typeof design.upvotes).toBe("number");
+    expect(typeof design.createdAt).toBe("number");
+    await app.close();
+  });
+});
