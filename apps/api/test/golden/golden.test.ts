@@ -5,7 +5,13 @@ import { openTempDb, createStores, type Stores } from "../../src/store/sqlite.js
 import { seedKnowledgeBase } from "../../src/store/kbLoader.js";
 import { runEval } from "../../src/eval/runner.js";
 
-import { goodArchitecture, badArchitecture, incoherentComputeArchitecture, fakeProvider } from "./fixtures.js";
+import {
+  goodArchitecture,
+  badArchitecture,
+  incoherentComputeArchitecture,
+  incoherentDatastoreArchitecture,
+  fakeProvider,
+} from "./fixtures.js";
 import {
   runAllProperties,
   securityFloorCoversAllBaselines,
@@ -17,6 +23,7 @@ import {
   hasKeyDecisions,
   queuesAreResilient,
   computeMatchesDecision,
+  datastoreMatchesDecision,
 } from "./properties.js";
 
 const PASS_RATE_FLOOR = 0.9;
@@ -41,16 +48,17 @@ describe("property checkers on the known-good result", () => {
       hasKeyDecisions,
       queuesAreResilient,
       computeMatchesDecision,
+      datastoreMatchesDecision,
     ]) {
       const r = property(good);
       expect(r.ok, `${r.name}: ${r.reason}`).toBe(true);
     }
   });
 
-  it("the aggregator reports ok with all nine properties green", () => {
+  it("the aggregator reports ok with all ten properties green", () => {
     const agg = runAllProperties(good);
     expect(agg.ok).toBe(true);
-    expect(agg.results).toHaveLength(9);
+    expect(agg.results).toHaveLength(10);
     expect(agg.results.every((r) => r.ok)).toBe(true);
   });
 });
@@ -95,6 +103,26 @@ describe("computeMatchesDecision detects the serverless-decision / always-on-nod
   it("isolates the defect: only computeMatchesDecision fails on the incoherent fixture", () => {
     const failing = runAllProperties(incoherent).results.filter((r) => !r.ok).map((r) => r.name);
     expect(failing).toEqual(["computeMatchesDecision"]);
+  });
+});
+
+describe("datastoreMatchesDecision detects the serverless-decision / VPC-bound-store contradiction", () => {
+  const incoherent = incoherentDatastoreArchitecture();
+
+  it("passes on the coherent good fixture (DynamoDB decision + DynamoDB nodes)", () => {
+    expect(datastoreMatchesDecision(goodArchitecture()).ok).toBe(true);
+  });
+
+  it("flips to FAIL when the keyDecision chose DynamoDB but the tiers run RDS", () => {
+    const r = datastoreMatchesDecision(incoherent);
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(/serverless/i);
+    expect(r.reason).toMatch(/RDS/);
+  });
+
+  it("isolates the defect: only datastoreMatchesDecision fails on the incoherent fixture", () => {
+    const failing = runAllProperties(incoherent).results.filter((r) => !r.ok).map((r) => r.name);
+    expect(failing).toEqual(["datastoreMatchesDecision"]);
   });
 });
 

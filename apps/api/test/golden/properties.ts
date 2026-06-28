@@ -29,7 +29,8 @@ export type PropertyName =
   | "recommendsATier"
   | "hasKeyDecisions"
   | "queuesAreResilient"
-  | "computeMatchesDecision";
+  | "computeMatchesDecision"
+  | "datastoreMatchesDecision";
 
 export interface PropertyResult {
   name: PropertyName;
@@ -360,6 +361,95 @@ export const computeMatchesDecision: Property = (result) => {
   };
 };
 
+// --- Datastore coherence (the graph must agree with its datastore decision) --
+//
+// Same failure class as compute, second-most-damaging: a datastore keyDecision
+// commits to a managed/serverless store ("DynamoDB on-demand", "Aurora Serverless")
+// while a tier's nodes run a VPC-bound RDS/Aurora-provisioned instance — or names a
+// store that is then absent from the graph entirely. A VPC-bound store drags in the
+// private-subnet + NAT-gateway floor (~$33/mo always-on), so a "serverless,
+// scale-to-zero" datastore recommendation that's actually drawn as RDS silently
+// bills NAT. Conservative, like computeMatchesDecision: fires only on a clear
+// contradiction, passes on mixed/unknown.
+
+/** A keyDecision is "about the datastore" if it names the datastore/database choice. */
+const DATASTORE_DECISION_KEYWORDS = ["datastore", "database", "data store", "primary data", "persistence"] as const;
+
+/** Stores that are VPC-bound (force a private subnet → NAT): always-on DB engines. */
+const VPC_BOUND_STORES = ["rds", "elasticache", "opensearch", "redshift", "neptune", "documentdb", "memorydb"] as const;
+/** Stores that are managed/serverless and need NO VPC/NAT. */
+const SERVERLESS_STORES = ["dynamodb", "s3"] as const;
+
+/** What a datastore decision committed to, read from its `chosen` text. */
+type StoreChoice = "serverless" | "vpcbound" | "unknown";
+
+function classifyChosenStore(chosen: string): StoreChoice {
+  const c = chosen.toLowerCase();
+  // "Aurora Serverless" is serverless-shaped (scale-to-zero, no instance to keep warm);
+  // plain "Aurora"/"RDS" is a VPC-bound always-on instance. Disambiguate on "serverless".
+  const saysServerless =
+    SERVERLESS_STORES.some((kw) => c.includes(kw)) || (c.includes("aurora") && c.includes("serverless"));
+  const saysVpcBound =
+    VPC_BOUND_STORES.some((kw) => c.includes(kw)) || (c.includes("aurora") && !c.includes("serverless"));
+  if (saysServerless && !saysVpcBound) return "serverless";
+  if (saysVpcBound && !saysServerless) return "vpcbound";
+  return "unknown";
+}
+
+function tierStoreKinds(tier: Tier): { serverless: string[]; vpcbound: string[] } {
+  const serverless: string[] = [];
+  const vpcbound: string[] = [];
+  for (const n of tier.nodes) {
+    const surface = `${n.awsService} ${n.role}`.toLowerCase();
+    // Aurora Serverless is not VPC-NAT-forcing in the same way; classify by the "serverless" tag.
+    const auroraServerless = surface.includes("aurora") && surface.includes("serverless");
+    if (SERVERLESS_STORES.some((kw) => new RegExp(`\\b${kw}\\b`).test(surface)) || auroraServerless) {
+      serverless.push(n.awsService);
+    }
+    if (VPC_BOUND_STORES.some((kw) => new RegExp(`\\b${kw}\\b`).test(surface))) vpcbound.push(n.awsService);
+    else if (surface.includes("aurora") && !surface.includes("serverless")) vpcbound.push(n.awsService);
+  }
+  return { serverless, vpcbound };
+}
+
+/**
+ * Coherence: a stated datastore decision must not be contradicted by the tiers'
+ * datastore nodes. A "serverless" datastore decision with a VPC-bound store node
+ * present (the case that secretly adds NAT), or a "vpcbound" decision with no such
+ * store anywhere, is a hard fail. Mixed/unknown decisions pass.
+ */
+export const datastoreMatchesDecision: Property = (result) => {
+  const storeDecisions = result.keyDecisions.filter((d) =>
+    DATASTORE_DECISION_KEYWORDS.some((kw) => `${d.decision} ${d.chosen}`.toLowerCase().includes(kw)),
+  );
+  const offenders: string[] = [];
+  for (const d of storeDecisions) {
+    const choice = classifyChosenStore(d.chosen);
+    if (choice === "unknown") continue;
+    for (const tier of result.tiers) {
+      const kinds = tierStoreKinds(tier);
+      if (choice === "serverless" && kinds.vpcbound.length > 0) {
+        offenders.push(
+          `${tier.name}: decision chose a serverless datastore ("${d.chosen}") but tier runs a VPC-bound store [${kinds.vpcbound.join(", ")}] (forces NAT)`,
+        );
+      }
+      if (choice === "vpcbound" && kinds.vpcbound.length === 0) {
+        offenders.push(
+          `${tier.name}: decision chose a VPC-bound datastore ("${d.chosen}") but tier has no such store node`,
+        );
+      }
+    }
+  }
+  return {
+    name: "datastoreMatchesDecision",
+    ok: offenders.length === 0,
+    reason:
+      offenders.length === 0
+        ? "datastore nodes are consistent with the stated datastore decision"
+        : offenders.join("; "),
+  };
+};
+
 /** R3 — exactly budget/balanced/resilient, no more, no fewer. */
 export const exactlyThreeTiers: Property = (result) => {
   const names = result.tiers.map((t) => t.name);
@@ -383,6 +473,7 @@ export const ALL_PROPERTIES: readonly Property[] = [
   hasKeyDecisions,
   queuesAreResilient,
   computeMatchesDecision,
+  datastoreMatchesDecision,
 ];
 
 export interface AggregateResult {

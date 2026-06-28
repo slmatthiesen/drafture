@@ -210,9 +210,30 @@ export function incoherentComputeArchitecture(): ArchitectureResult {
   return { ...base, tiers: base.tiers.map(breakCompute) };
 }
 
+/**
+ * A known-BAD result reproducing the datastore half of the same bug: the
+ * "Primary datastore" keyDecision still commits to serverless DynamoDB, but every
+ * tier's store node is a VPC-bound RDS Postgres instance — which silently drags in
+ * the private-subnet + NAT-gateway floor the serverless choice was meant to avoid.
+ * `datastoreMatchesDecision` must flip to fail while the rest stay green.
+ */
+export function incoherentDatastoreArchitecture(): ArchitectureResult {
+  const base = goodArchitecture();
+  const swapToRds = (tier: Tier): Tier => ({
+    ...tier,
+    nodes: tier.nodes.map((n) =>
+      n.id === "db"
+        ? { id: "db", awsService: "RDS", role: "Postgres datastore", security: ["private subnet", "KMS at rest", "least-priv role"] }
+        : n,
+    ),
+  });
+  return { ...base, tiers: base.tiers.map(swapToRds) };
+}
+
 // Validate the good fixture once at load — a drift here is a fixture bug.
 ArchitectureResultSchema.parse(goodArchitecture());
 ArchitectureResultSchema.parse(incoherentComputeArchitecture());
+ArchitectureResultSchema.parse(incoherentDatastoreArchitecture());
 
 export interface FakeProvider {
   provider: LlmProvider;

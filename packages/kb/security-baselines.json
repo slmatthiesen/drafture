@@ -29,9 +29,9 @@
   },
   {
     "id": "no-public-data-tier",
-    "rule": "Place data stores (RDS, ElastiCache, OpenSearch) in private subnets with no public IP or internet route; reach them only from app-tier security groups.",
-    "rationale": "Keeping the data tier off the public internet removes direct attack surface; access flows through the app tier only.",
-    "summary": "Keep data stores in private subnets — no public IP or internet route, app-tier access only.",
+    "rule": "Keep the data tier off the public internet. VPC-bound stores (RDS, ElastiCache, OpenSearch) go in private subnets with no public IP or internet route, reached only from app-tier security groups. Managed/serverless stores (DynamoDB, S3, Aurora Serverless) are already private — reached over the AWS network via IAM/endpoint policies — and need NO VPC or NAT gateway; do not place them in a subnet to satisfy this baseline.",
+    "rationale": "Keeping the data tier off the public internet removes direct attack surface. For VPC-bound engines that means a private subnet; for managed/serverless stores IAM + endpoint policies already provide it without the cost of a VPC/NAT, so forcing them into a subnet only adds an always-on NAT bill for no security gain.",
+    "summary": "Keep the data tier private: VPC-bound stores in private subnets with no public route; managed/serverless stores (DynamoDB/S3) are already private via IAM and need no VPC or NAT.",
     "source": "https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_VPC.WorkingWithRDSInstanceinaVPC.html"
   },
   {
