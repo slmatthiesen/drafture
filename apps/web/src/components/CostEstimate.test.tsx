@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import { render, screen, fireEvent, within } from "@testing-library/react";
 import { CostEstimate } from "./CostEstimate.js";
 import type { CostDriver } from "../lib/types.js";
+import type { SizeId } from "../lib/sizeLadder.js";
 
 const drivers: CostDriver[] = [
   { service: "Lambda", unit: "per 1k requests", estimateRange: "$0.20–$0.90/mo", note: "" },
@@ -67,7 +68,7 @@ describe("CostEstimate", () => {
       { service: "EC2", unit: "$/hr", estimateRange: "$40–$80/mo", note: "" },
       { service: "RDS", unit: "$/hr", estimateRange: "$12–$25/mo", note: "" },
     ];
-    const props = (sel: Record<string, string>) => (
+    const props = (sel: Record<string, SizeId>) => (
       <CostEstimate drivers={drivers} assumptions={[]} sizeSelection={sel} onSizeChange={() => undefined} />
     );
     const { container, rerender } = render(props({ "EC2|$/hr": "m", "RDS|$/hr": "m" }));

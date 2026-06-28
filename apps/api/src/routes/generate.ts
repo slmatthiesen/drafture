@@ -17,6 +17,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest, preHandlerHookHandl
 
 import type { AppContext } from "../app/context.js";
 import type { Usage } from "../llm/provider.js";
+import type { ArchitectureResult } from "../schema/architecture.js";
 
 import { clientIp } from "../guards/clientIp.js";
 import { assertWithinInputBudget } from "../guards/inputCap.js";
@@ -26,6 +27,8 @@ import { runClarify, roundCapReached } from "../pipeline/clarify.js";
 import { assembleGrounding } from "../pipeline/ground.js";
 import { generateArchitecture } from "../pipeline/generate.js";
 import { estimateCosts } from "../pipeline/cost.js";
+import { scrubAll, scrubObject, scrubPrompt } from "../pipeline/scrub.js";
+import { tagDesign } from "../pipeline/tags.js";
 import { researchMissingTopics } from "../research/bestPractice.js";
 
 import { hashPrompt } from "../store/responseCache.js";
@@ -98,10 +101,18 @@ async function handleGenerate(
   const startedAt = Date.now();
   const requestId = req.id;
   const body = req.body as GenerateBody;
-  const description = body.description;
-  const answers = body.answers ?? [];
-  const round = body.round ?? 0;
   const ip = clientIp(req);
+  const round = body.round ?? 0;
+  // Scrub credential shapes from the prompt BEFORE it reaches the model, the cache key,
+  // or storage. The model never sees a pasted secret (so it can't echo one back), and
+  // the stored description == exactly what generated the body — no raw copy kept (Opt A).
+  const scrubbedDescription = scrubPrompt(body.description);
+  const scrubbedAnswers = scrubAll(body.answers ?? []);
+  const description = scrubbedDescription.text;
+  const answers = scrubbedAnswers.texts;
+  if (scrubbedDescription.wasRedacted || scrubbedAnswers.wasRedacted) {
+    req.log.info({ route: ROUTE }, "prompt redacted before generation");
+  }
 
   // Accumulate token usage across every LLM call in this request (clarify + research
   // + generate) so the ledger reconcile and the telemetry line report the true cost.
@@ -228,12 +239,44 @@ async function handleGenerate(
     const actualUsd = llmCostUsd(usage, ctx.pricing);
     ctx.stores.spendLedger.reconcile(reservationId, actualUsd);
 
+    // Defense-in-depth: scrub the OUTPUT too. The input was scrubbed before the model
+    // saw it, but redact any credential shape that slipped through into free-text fields
+    // (assumptions, summaries, rationale) before it is returned, cached, or stored.
+    const scrubbedOutput = scrubObject(estimated);
+    if (scrubbedOutput.wasRedacted) {
+      req.log.warn({ route: ROUTE }, "secret shape redacted from generation output");
+    }
+
     // Return the full validated result (tiers + costs + the global securityFloor +
     // the opinionated recommendation + ADR keyDecisions). Spreading the whole
     // object — rather than cherry-picking fields — keeps the response in sync with
     // the schema so a later field addition can't be silently dropped (securityFloor
     // was). The full shape is what gets cached, so a cache HIT returns it too.
-    const responseBody = { ...estimated };
+    const responseBody: ArchitectureResult & { id?: string } = { ...scrubbedOutput.value };
+
+    // Persist every real generation permanently (the gallery + model/template backbone).
+    // Best-effort: a persistence failure must NEVER break the user's generation. The id
+    // becomes the deep link (/design/:id) and rides in the cached body so a cache HIT
+    // returns it too. Off in test/probe envs (PERSIST_GENERATIONS) so they don't pollute.
+    if (ctx.config.PERSIST_GENERATIONS) {
+      try {
+        const { id } = ctx.stores.generations.upsert({
+          promptHash: cacheKey,
+          description,
+          answers,
+          model: ctx.config.LLM_MODEL,
+          region: ctx.config.DEFAULT_REGION,
+          recommendedTier: responseBody.recommendedTier,
+          tags: tagDesign(responseBody),
+          body: JSON.stringify(responseBody),
+          clientIp: ip,
+        });
+        responseBody.id = id;
+      } catch (err) {
+        req.log.error({ err }, "generation persistence failed (non-fatal)");
+      }
+    }
+
     ctx.stores.responseCache.set(cacheKey, JSON.stringify(responseBody));
 
     emit("ok", { costUsd: actualUsd, researchCalls });
