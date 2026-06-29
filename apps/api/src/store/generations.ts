@@ -48,7 +48,7 @@ interface GenRow {
   updated_at: number;
 }
 
-interface SummaryRow extends Omit<GenRow, "answers_json" | "body_json" | "terraform_json" | "opt_out"> {}
+type SummaryRow = Omit<GenRow, "answers_json" | "body_json" | "terraform_json" | "opt_out">;
 
 /** 12 url-safe chars (~72 bits) — short, shareable deep-link id, collision-safe at scale. */
 function newId(): string {

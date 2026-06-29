@@ -9,6 +9,8 @@ export default tseslint.config(
       "**/node_modules/**",
       "**/coverage/**",
       "**/*.d.ts",
+      // Runtime-artifact dir (SQLite DBs + ad-hoc inspection scripts), not source.
+      "**/data/**",
     ],
   },
   js.configs.recommended,

@@ -515,6 +515,28 @@ describe("normalizeService keyword fallback (GAP 3)", () => {
     expect(driversFor("ECS on EC2")).toContain("EC2");
   });
 
+  // REGRESSION (self-host budget showed no compute cost): the prompt now asks the
+  // model to name the instance class IN the service label, which the alias/exact path
+  // could not resolve — so EC2/RDS drivers vanished entirely. Every named compute node
+  // MUST still price.
+  it.each([
+    ["EC2 (t4g.small)", "EC2"],
+    ["RDS Postgres (db.t4g.micro)", "RDS"],
+    ["RDS (db.r6g.large)", "RDS"],
+    ["EC2 instance (m7g.large)", "EC2"],
+  ])("prices %s as %s when the class is in the service label, not silently $0", (label, canonical) => {
+    expect(driversFor(label)).toContain(canonical);
+  });
+
+  it("still stamps the parsed instance class when it is in the service label", () => {
+    const base = result();
+    base.tiers = [tier("budget", [node("EC2 (t4g.small)")], [])];
+    const driver = estimateCosts(base, stores.pricing, REGION).tiers[0]!.costDrivers.find(
+      (d) => d.service === "EC2" && d.unit === "$/hr",
+    );
+    expect(driver?.instanceType).toBe("t4g.small");
+  });
+
   it("does NOT price a Fargate-compatible EC2 task as Fargate", () => {
     const priced = driversFor("ECS Task (Fargate-compatible definition)");
     expect(priced).not.toContain("Fargate");
