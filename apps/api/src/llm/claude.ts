@@ -5,6 +5,7 @@ import type { Config } from "../config.js";
 import { GeneratedArchitectureSchema, ClarificationSchema } from "../schema/architecture.js";
 import type { GeneratedArchitecture, Clarification, GeneratedTier } from "../schema/architecture.js";
 import { architectureToolSchema, clarificationToolSchema } from "./schema-utils.js";
+import { renderTerraformWireupRules } from "./configPrompt.js";
 import { ProviderError } from "./provider.js";
 import type {
   GenerateOptions,
@@ -165,7 +166,7 @@ export class ClaudeProvider implements LlmProvider {
       system: [
         {
           type: "text",
-          text: CONFIG_SYSTEM,
+          text: CONFIG_SYSTEM + "\n\n" + renderTerraformWireupRules(),
           cache_control: { type: "ephemeral" },
         },
       ],

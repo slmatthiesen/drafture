@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 
 import { loadConfig } from "../config.js";
-import { stripCodeFence, flagIfIncomplete } from "./config.js";
+import { stripCodeFence, flagIfIncomplete, detectWireupGaps, annotateWireupGaps } from "./config.js";
 import type { LlmProvider, ProviderResult, Usage } from "../llm/provider.js";
 import type { ArchitectureResult, Clarification, Tier } from "../schema/architecture.js";
 
@@ -35,6 +35,121 @@ describe("flagIfIncomplete", () => {
     const out = flagIfIncomplete('resource "x" "y" {\n  bucket = "a"');
     expect(out).toContain("INCOMPLETE");
     expect(out).toContain("will NOT 'terraform plan'");
+  });
+});
+
+// --- Wire-up validator fixtures --------------------------------------------
+// BROKEN: a compact reference carrying every confirmed blocker — a CMK with no key
+// policy (encrypting Logs + SNS), an https-only CF origin on an EC2 public_dns, an
+// ACM DNS cert with no validation resource, a null rotation lambda, and a CF
+// logging_config bucket with no delivery policy. `terraform plan` stays green on all.
+const BROKEN_HCL = [
+  'resource "aws_kms_key" "main" {',
+  "  enable_key_rotation = true",
+  "}",
+  'resource "aws_instance" "engine" {',
+  '  ami           = "ami-x"',
+  '  instance_type = "t4g.small"',
+  "}",
+  'resource "aws_cloudwatch_log_group" "app" {',
+  "  kms_key_id = aws_kms_key.main.arn",
+  "}",
+  'resource "aws_sns_topic" "alerts" {',
+  "  kms_master_key_id = aws_kms_key.main.arn",
+  "}",
+  'resource "aws_acm_certificate" "cf" {',
+  '  domain_name       = "example.com"',
+  '  validation_method = "DNS"',
+  "}",
+  'resource "aws_cloudfront_distribution" "main" {',
+  "  origin {",
+  "    domain_name = aws_instance.engine.public_dns",
+  "    custom_origin_config {",
+  '      origin_protocol_policy = "https-only"',
+  "    }",
+  "  }",
+  "  logging_config {",
+  "    bucket = aws_s3_bucket.cf_logs.id",
+  "  }",
+  "}",
+  'resource "aws_secretsmanager_secret_rotation" "app" {',
+  "  secret_id           = aws_secretsmanager_secret.app.id",
+  "  rotation_lambda_arn = null",
+  "}",
+].join("\n");
+
+// CLEAN: the same shape with the wire-up present — CMK key policy grants the Logs +
+// CloudWatch service principals, an ACM validation resource, an ALB origin (not an
+// EC2 public_dns), a log-delivery bucket policy, and no placeholder rotation.
+const CLEAN_HCL = [
+  'data "aws_iam_policy_document" "kms_main" {',
+  "  statement {",
+  "    principals {",
+  '      type        = "Service"',
+  '      identifiers = ["logs.us-east-1.amazonaws.com", "cloudwatch.amazonaws.com"]',
+  "    }",
+  "  }",
+  "}",
+  'resource "aws_kms_key" "main" {',
+  "  enable_key_rotation = true",
+  "  policy              = data.aws_iam_policy_document.kms_main.json",
+  "}",
+  'resource "aws_cloudwatch_log_group" "app" {',
+  "  kms_key_id = aws_kms_key.main.arn",
+  "}",
+  'resource "aws_sns_topic" "alerts" {',
+  "  kms_master_key_id = aws_kms_key.main.arn",
+  "}",
+  'resource "aws_acm_certificate" "cf" {',
+  '  domain_name       = "example.com"',
+  '  validation_method = "DNS"',
+  "}",
+  'resource "aws_acm_certificate_validation" "cf" {',
+  "  certificate_arn = aws_acm_certificate.cf.arn",
+  "}",
+  'resource "aws_cloudfront_distribution" "main" {',
+  "  origin {",
+  "    domain_name = aws_lb.app.dns_name",
+  "    custom_origin_config {",
+  '      origin_protocol_policy = "https-only"',
+  "    }",
+  "  }",
+  "  logging_config {",
+  "    bucket = aws_s3_bucket.cf_logs.id",
+  "  }",
+  "}",
+  'resource "aws_s3_bucket_policy" "cf_logs" {',
+  "  bucket = aws_s3_bucket.cf_logs.id",
+  "}",
+].join("\n");
+
+describe("detectWireupGaps", () => {
+  it("flags every blocker in a broken reference", () => {
+    const ids = detectWireupGaps(BROKEN_HCL).map((g) => g.id);
+    expect(ids).toContain("kms-key-policy");
+    expect(ids).toContain("cloudfront-origin-tls");
+    expect(ids).toContain("acm-certificate-validation");
+    expect(ids).toContain("secretsmanager-rotation-lambda");
+    expect(ids).toContain("s3-access-log-delivery");
+  });
+  it("returns no gaps for a wired-up reference", () => {
+    expect(detectWireupGaps(CLEAN_HCL)).toEqual([]);
+  });
+});
+
+describe("annotateWireupGaps", () => {
+  it("leaves clean HCL untouched", () => {
+    expect(annotateWireupGaps(CLEAN_HCL)).toBe(CLEAN_HCL);
+  });
+  it("appends a WIRE-UP GAPS banner citing each rule id as valid `#` comments", () => {
+    const out = annotateWireupGaps(BROKEN_HCL);
+    expect(out).toContain("WIRE-UP GAPS");
+    expect(out).toContain("[kms-key-policy]");
+    expect(out).toContain("[acm-certificate-validation]");
+    // The banner is plain `#` comments so it survives `terraform plan`.
+    expect(out.split("\n").filter((l) => l.startsWith("#")).length).toBeGreaterThan(0);
+    // The original HCL body is preserved above the banner.
+    expect(out.startsWith(BROKEN_HCL)).toBe(true);
   });
 });
 

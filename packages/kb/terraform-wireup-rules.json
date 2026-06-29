@@ -1,0 +1,44 @@
+[
+  {
+    "id": "kms-key-policy",
+    "rule": "An aws_kms_key (customer-managed key) that encrypts another AWS service's data MUST carry a key policy (the `policy` argument, or a separate aws_kms_key_policy) granting the consuming service principal kms:Decrypt and kms:GenerateDataKey*. A KMS-encrypted CloudWatch Logs group needs `logs.<region>.amazonaws.com`; an encrypted SNS topic that receives CloudWatch alarm actions needs `cloudwatch.amazonaws.com` and `sns.amazonaws.com`. Keep an account-root `kms:*` statement so IAM grants on roles still delegate.",
+    "rationale": "Without the service-principal grant, `terraform plan` succeeds but PutLogEvents and CloudWatch-to-SNS alarm publish fail at runtime with KMS AccessDenied — a silent failure with no apply error to catch it.",
+    "source": "https://docs.aws.amazon.com/kms/latest/developerguide/key-policies.html"
+  },
+  {
+    "id": "cloudfront-origin-tls",
+    "rule": "A CloudFront origin with `origin_protocol_policy = \"https-only\"` (a custom_origin_config) MUST present a trusted-CA certificate matching its hostname. Never point an https-only origin at an EC2 `public_dns` (`*.compute-1.amazonaws.com`): no trusted CA cert is available for that name and the DNS changes on instance replacement. Use an ALB+ACM origin, an Elastic IP + custom domain + cert on the box, or move the origin to API Gateway / Lambda.",
+    "rationale": "CloudFront validates the origin certificate; an EC2 public DNS cannot satisfy https-only, so the origin 502s, and the public DNS churns whenever the instance is replaced (silently breaking the distribution).",
+    "source": "https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/using-https-cloudfront-to-custom-origin.html"
+  },
+  {
+    "id": "acm-certificate-validation",
+    "rule": "An aws_acm_certificate with `validation_method = \"DNS\"` MUST be paired with an aws_acm_certificate_validation resource and a Route53 aws_route53_record per validation option; consumers (e.g. a CloudFront viewer_certificate) should reference `aws_acm_certificate_validation.*.certificate_arn`, not the raw certificate ARN.",
+    "rationale": "Without the validation resource and records the certificate stays PENDING_VALIDATION, so HTTPS never serves even though the cert resource was created cleanly.",
+    "source": "https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/acm_certificate_validation"
+  },
+  {
+    "id": "s3-access-log-delivery",
+    "rule": "An S3 bucket that receives access logs (referenced by a CloudFront `logging_config.bucket`, ALB access logs, or S3 server access logs) MUST grant the log-delivery principal via a bucket POLICY (s3:PutObject, and s3:GetBucketAcl where required) using the service's canonical user ID or `cloudfront.amazonaws.com`. This works alongside S3 Block Public Access — a canonical-user / service-principal policy is not 'public'.",
+    "rationale": "With Block Public Access enabled and no delivery policy, the logging service cannot write to the bucket — logging silently no-ops while every other resource looks correct.",
+    "source": "https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/AccessLogs.html"
+  },
+  {
+    "id": "secretsmanager-rotation-lambda",
+    "rule": "An aws_secretsmanager_secret_rotation resource REQUIRES a non-null `rotation_lambda_arn` and a `rotation_rules` block. If you have no rotation Lambda, OMIT the resource entirely — a placeholder with `rotation_lambda_arn = null` is invalid.",
+    "rationale": "Rotation only works with a real handler; a null/placeholder rotation block fails to configure and is dead weight at best.",
+    "source": "https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/secretsmanager_secret_rotation"
+  },
+  {
+    "id": "principal-reads-secret",
+    "rule": "A compute principal (Lambda / EC2 / ECS) that reads a Secrets Manager secret needs BOTH (a) `secretsmanager:GetSecretValue` on the secret ARN in its IAM role policy AND (b) a network path: if the principal is VPC-attached, a Secrets Manager interface VPC endpoint (or a NAT); if it is NOT in a VPC, it reaches the public Secrets Manager endpoint directly (no endpoint needed).",
+    "rationale": "The IAM grant alone is insufficient when the principal is in a VPC without an endpoint, and the endpoint alone is insufficient without the IAM grant. Both must hold or the read fails at runtime.",
+    "source": "https://docs.aws.amazon.com/secretsmanager/latest/userguide/vpc-endpoint-overview.html"
+  },
+  {
+    "id": "gateway-endpoint-vpc-principals",
+    "rule": "An aws_vpc_endpoint of type `Gateway` (DynamoDB / S3) only applies to resources INSIDE that VPC. Do NOT list a non-VPC principal (e.g. a Lambda with no `vpc_config`, or any workload that runs outside the VPC) as a Principal in a Gateway endpoint policy — it is incoherent, since that principal uses the public service endpoint, not the gateway.",
+    "rationale": "A gateway endpoint policy that grants a non-VPC principal has no effect and implies a network path that does not exist — a confusing no-op in the generated config.",
+    "source": "https://docs.aws.amazon.com/vpc/latest/privatelink/concepts.html"
+  }
+]
