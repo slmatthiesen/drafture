@@ -63,10 +63,15 @@ const ConfigSchema = z.object({
   EMBEDDING_MODEL: z.string().default("voyage-3-lite"),
   // Cosine ≥ RETURN → serve the nearest approved design verbatim (re-costed), $0 +
   // instant. GROUND ≤ cosine < RETURN → inject the nearest designs as exemplars into
-  // the generation prompt (faster convergence, more consistent). Conservative defaults
-  // so we only short-circuit on a genuinely-close match.
-  SEMANTIC_RETURN_THRESHOLD: z.coerce.number().min(0).max(1).default(0.93),
-  SEMANTIC_GROUND_THRESHOLD: z.coerce.number().min(0).max(1).default(0.82),
+  // the generation prompt (faster convergence, more consistent).
+  // Defaults CALIBRATED against scripts/eval/retrievalEval.ts on voyage-3-lite: a
+  // labeled paraphrase/negative set ranks top-1 at 100%, with true matches ~0.78 and
+  // the unrelated noise floor ~0.52 (max 0.68). GROUND 0.70 → precision 1.0 / recall
+  // 0.94 (no noise fires); RETURN 0.80 sits a clear margin above the noise floor so
+  // only near-identical prompts short-circuit (and top-1 accuracy means they're the
+  // right design). Re-run the eval after the corpus grows or the embed model changes.
+  SEMANTIC_RETURN_THRESHOLD: z.coerce.number().min(0).max(1).default(0.8),
+  SEMANTIC_GROUND_THRESHOLD: z.coerce.number().min(0).max(1).default(0.7),
   SEMANTIC_GROUND_TOPK: z.coerce.number().int().positive().default(2),
 
   // Region / pricing
