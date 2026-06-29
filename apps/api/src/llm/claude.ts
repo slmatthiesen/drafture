@@ -201,7 +201,13 @@ export class ClaudeProvider implements LlmProvider {
   ): Promise<ProviderResult<T>> {
     let lastError: unknown;
 
-    for (let attempt = 0; attempt < 2; attempt++) {
+    // Weaker/cheaper models (e.g. Haiku) intermittently malform the forced-tool
+    // output two ways: (1) JSON-encode a nested field as a STRING ("tiers": "[...]"),
+    // (2) omit a required field entirely. (1) is repaired in-place (parse stringified
+    // JSON before validating); (2) is non-recoverable from one response, so we give a
+    // few fresh attempts — a clean retry usually succeeds. Caveat: frequent retries
+    // erode a cheap model's cost advantage (each attempt is billed).
+    for (let attempt = 0; attempt < 3; attempt++) {
       let message: Anthropic.Message;
       try {
         message = await this.callModel(params);
@@ -217,17 +223,29 @@ export class ClaudeProvider implements LlmProvider {
         throw new ProviderError("Model refused the request", false, message.stop_reason);
       }
 
-      try {
-        const candidate = extractStructuredOutput(message);
-        const result = schema.parse(candidate);
-        return { result, usage: mapUsage(message.usage) };
-      } catch (err) {
-        lastError = err;
+      const candidate = (() => {
+        try {
+          return extractStructuredOutput(message);
+        } catch (err) {
+          lastError = err;
+          return undefined;
+        }
+      })();
+      if (candidate === undefined) continue;
+
+      // First try as-is; on failure, retry the SAME response with stringified-JSON
+      // fields coerced, before spending another model call.
+      for (const value of [candidate, repairStructured(candidate)]) {
+        try {
+          return { result: schema.parse(value), usage: mapUsage(message.usage) };
+        } catch (err) {
+          lastError = err;
+        }
       }
     }
 
     throw new ProviderError(
-      `Model response failed schema validation after one retry: ${describe(lastError)}`,
+      `Model response failed schema validation after retries: ${describe(lastError)}`,
       false,
       lastError,
     );
@@ -333,6 +351,33 @@ function extractStructuredOutput(message: Anthropic.Message): unknown {
     if (block.type === "tool_use") return (block as Anthropic.ToolUseBlock).input;
   }
   throw new Error("model did not emit the required structured tool call");
+}
+
+/**
+ * Repair a common forced-tool-use malformation from weaker models: a nested array
+ * or object emitted as a JSON-encoded STRING (e.g. `"tiers": "[{...}]"`). Recursively
+ * walk the value; any string that parses to an array/object is replaced with the
+ * parsed value (and re-repaired). Non-JSON strings and scalars are left untouched, so
+ * this only ever turns invalid-shape into maybe-valid — it never corrupts good output.
+ */
+function repairStructured(value: unknown): unknown {
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        if (parsed !== null && typeof parsed === "object") return repairStructured(parsed);
+      } catch {
+        // not JSON — leave the string as-is
+      }
+    }
+    return value;
+  }
+  if (Array.isArray(value)) return value.map(repairStructured);
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, repairStructured(v)]));
+  }
+  return value;
 }
 
 /** Map the SDK usage onto the ledger-facing Usage shape (KTD7/KTD11). */

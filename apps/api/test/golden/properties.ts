@@ -258,6 +258,17 @@ const ALERT_SINK_ROLE_KEYWORDS = [
   "pagerduty",
   "page ",
   "ops notification",
+  // Alerting CHANNELS — an SNS/notification node delivering to one of these is an
+  // observability sink (CloudWatch alarm → SNS → human), not a work queue. Without
+  // these, a clean design using Slack/webhook/email alerting was falsely flagged.
+  "slack",
+  "webhook",
+  "incident",
+  "email",
+  "sms",
+  "teams",
+  "chime",
+  "opsgenie",
 ] as const;
 
 /**
@@ -273,6 +284,9 @@ function isNonQueueNode(awsService: string, role: string): boolean {
   const svc = awsService.toLowerCase();
   const r = role.toLowerCase();
   const isPubSubNotifier = svc.includes("sns") || svc.includes("notification");
+  // An SNS *subscription* node is a delivery endpoint (email/Slack/HTTP), never a
+  // work queue — regardless of how its role is phrased.
+  if (isPubSubNotifier && svc.includes("subscription")) return true;
   if (isPubSubNotifier && ALERT_SINK_ROLE_KEYWORDS.some((kw) => r.includes(kw))) return true;
   // "EventBridge Scheduler" / "... scheduler" / "cron" trigger — a timer, not a queue.
   if (`${svc} ${r}`.includes("scheduler") || r.includes("cron")) return true;
