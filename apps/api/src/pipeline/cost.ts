@@ -373,14 +373,7 @@ const KEYWORD_FALLBACK: ReadonlyArray<readonly [RegExp, string]> = [
 ];
 
 function normalizeService(name: string): string {
-  // Also drop a TRAILING parenthetical — the model now states the instance class /
-  // volume inline in the service label ("EC2 (t4g.small)", "EBS (gp3, 20 GB)"). The
-  // class is still parsed for sizing from the node's full text; here we only want the
-  // bare service for the price lookup, so "EC2 (t4g.small)" keys as "EC2".
-  const stripped = name
-    .trim()
-    .replace(/^(amazon|aws)\s+/i, "")
-    .replace(/\s*\([^)]*\)\s*$/, "");
+  const stripped = name.trim().replace(/^(amazon|aws)\s+/i, "");
   const aliases: Record<string, string> = {
     "Application Load Balancer": "ALB",
     "Elastic Load Balancing": "ALB",

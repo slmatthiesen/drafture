@@ -524,6 +524,9 @@ describe("normalizeService keyword fallback (GAP 3)", () => {
     ["RDS Postgres (db.t4g.micro)", "RDS"],
     ["RDS (db.r6g.large)", "RDS"],
     ["EC2 instance (m7g.large)", "EC2"],
+    // A trailing parenthetical can carry the ECS LAUNCH TYPE, not an instance class —
+    // it must still resolve to Fargate (must NOT be stripped away before detection).
+    ["ECS (Fargate)", "Fargate"],
   ])("prices %s as %s when the class is in the service label, not silently $0", (label, canonical) => {
     expect(driversFor(label)).toContain(canonical);
   });
