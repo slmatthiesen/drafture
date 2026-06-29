@@ -13,7 +13,7 @@
  */
 
 import { useEffect, useState } from "react";
-import { Routes, Route, Link, useNavigate, useParams, useLocation } from "react-router-dom";
+import { Routes, Route, useNavigate, useParams, useLocation } from "react-router-dom";
 import {
   generate,
   fetchCurated,
@@ -358,12 +358,6 @@ function Home(): JSX.Element {
       )}
 
       {!submitted && <CuratedGallery entries={curated} onOpen={openCurated} />}
-
-      {!submitted && (
-        <p className="gallery__browse">
-          <Link to="/gallery">Browse the community gallery →</Link>
-        </p>
-      )}
 
       {!submitted && (
         <RecentDesigns
