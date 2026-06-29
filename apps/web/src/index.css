@@ -473,9 +473,9 @@ body {
 }
 
 .tiers__tab--active {
-  background: var(--ink);
+  background: var(--brand-dark);
   color: #fff;
-  border-color: var(--ink);
+  border-color: var(--brand-dark);
 }
 
 .tiers__tab-name {
@@ -530,7 +530,7 @@ body {
 }
 
 .tiers__tab--active .tiers__tab-badge {
-  color: #d7ef8a; /* light green on ink background → AA */
+  color: #f3f7e4; /* near-white on the brand-dark green active bg → AA */
 }
 
 /* ---- cost summary badge ---- */
