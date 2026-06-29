@@ -32,11 +32,32 @@ const ROUTE = "/api/config";
 const FORMAT = "terraform";
 
 /**
- * Output budget for the bounded reference-config call. Kept small (matches the
- * provider default) so the on-demand artifact stays cheap; the provisional spend
- * reserve is sized off this same number to avoid over-reserving against the ceiling.
+ * Output budget for the reference-config call. Sized to fit a COMPLETE single-tier
+ * HCL file: the old 2500 (and an interim 8000) truncated a real design — the
+ * self-host budget tier carries the whole security floor (KMS, CloudTrail, 3 S3
+ * buckets, CloudFront OAC, IAM, CloudWatch) and runs ~8k+ tokens — shipping a file
+ * that won't `terraform plan`. Set to the provider's STREAMING_THRESHOLD so the call
+ * streams (a non-streaming request this large risks the SDK HTTP timeout). The
+ * provisional spend reserve is sized off this number; a cache HIT costs $0 and the
+ * reserve reconciles to the actual (usually far smaller) output on a MISS.
  */
-const CONFIG_MAX_OUTPUT_TOKENS = 2500;
+const CONFIG_MAX_OUTPUT_TOKENS = 16_000;
+
+/**
+ * Strip a Markdown code fence the model wraps the HCL in (```hcl … ```), so the
+ * artifact is valid Terraform, not a fenced snippet. We instruct plain HCL, but
+ * models still fence it intermittently; this is the provider-agnostic backstop.
+ * Removes a leading ```lang line and a trailing ``` line; leaves un-fenced output
+ * untouched.
+ */
+export function stripCodeFence(s: string): string {
+  const trimmed = s.trim();
+  const fence = /^```[^\n]*\n([\s\S]*?)\n?```$/;
+  const m = fence.exec(trimmed);
+  if (m) return m[1]!.trim();
+  // Tolerate a missing closing fence (e.g. truncated output): drop just the opener.
+  return trimmed.replace(/^```[^\n]*\n/, "").replace(/\n?```$/, "");
+}
 
 /**
  * Warning banner prepended to the generated HCL itself (before line 1), so the danger
@@ -203,7 +224,7 @@ async function handleConfig(
     const actualUsd = llmCostUsd(usage, ctx.pricing);
     ctx.stores.spendLedger.reconcile(reservationId, actualUsd);
 
-    const responseBody = { format: FORMAT, code: REFERENCE_WARNING_HEADER + generated.result };
+    const responseBody = { format: FORMAT, code: REFERENCE_WARNING_HEADER + stripCodeFence(generated.result) };
 
     // Persist this tier's Terraform onto the generation row so future pulls are free.
     // Best-effort: a persist failure never breaks the artifact the user just paid for.

@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 
 import { loadConfig } from "../config.js";
+import { stripCodeFence } from "./config.js";
 import type { LlmProvider, ProviderResult, Usage } from "../llm/provider.js";
 import type { ArchitectureResult, Clarification, Tier } from "../schema/architecture.js";
 
@@ -12,6 +13,18 @@ import { buildAppContext, registerApiRoutes, type AppContext } from "../app/cont
 
 const USAGE: Usage = { inputTokens: 600, outputTokens: 1200, cacheReadTokens: 2048, cacheWriteTokens: 0 };
 const CANNED_HCL = 'resource "aws_lambda_function" "api" {\n  function_name = "api"\n}';
+
+describe("stripCodeFence", () => {
+  it("removes a ```hcl fence so the artifact is valid HCL", () => {
+    expect(stripCodeFence('```hcl\nresource "x" "y" {}\n```')).toBe('resource "x" "y" {}');
+  });
+  it("leaves un-fenced HCL untouched", () => {
+    expect(stripCodeFence('resource "x" "y" {}')).toBe('resource "x" "y" {}');
+  });
+  it("drops a dangling opener when the closing fence was truncated", () => {
+    expect(stripCodeFence('```hcl\nresource "x" "y" {')).toBe('resource "x" "y" {');
+  });
+});
 
 // --- Canned tier ------------------------------------------------------------
 
