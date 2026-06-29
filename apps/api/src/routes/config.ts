@@ -33,15 +33,15 @@ const FORMAT = "terraform";
 
 /**
  * Output budget for the reference-config call. Sized to fit a COMPLETE single-tier
- * HCL file: the old 2500 (and an interim 8000) truncated a real design — the
- * self-host budget tier carries the whole security floor (KMS, CloudTrail, 3 S3
- * buckets, CloudFront OAC, IAM, CloudWatch) and runs ~8k+ tokens — shipping a file
- * that won't `terraform plan`. Set to the provider's STREAMING_THRESHOLD so the call
- * streams (a non-streaming request this large risks the SDK HTTP timeout). The
- * provisional spend reserve is sized off this number; a cache HIT costs $0 and the
- * reserve reconciles to the actual (usually far smaller) output on a MISS.
+ * HCL file: smaller caps truncated real designs mid-resource (2500 cut the self-host
+ * budget tier; 16000 cut the notification-system RESILIENT tier — full security floor
+ * across 2 regions, ~109 resources). 32000 is above the provider STREAMING_THRESHOLD
+ * (16000) so the call streams past the SDK HTTP timeout, and below Sonnet 4.6's 64K
+ * output ceiling. `flagIfIncomplete` is the backstop for any design that still
+ * overflows. The provisional spend reserve is sized off this number; a cache HIT costs
+ * $0 and the reserve reconciles to the actual (usually far smaller) output on a MISS.
  */
-const CONFIG_MAX_OUTPUT_TOKENS = 16_000;
+const CONFIG_MAX_OUTPUT_TOKENS = 32_000;
 
 /**
  * Strip a Markdown code fence the model wraps the HCL in (```hcl … ```), so the
@@ -57,6 +57,27 @@ export function stripCodeFence(s: string): string {
   if (m) return m[1]!.trim();
   // Tolerate a missing closing fence (e.g. truncated output): drop just the opener.
   return trimmed.replace(/^```[^\n]*\n/, "").replace(/\n?```$/, "");
+}
+
+/**
+ * Backstop for a design too large to render in one file even at the raised token
+ * budget: unbalanced braces mean the HCL was cut off mid-resource. Rather than ship a
+ * file that won't parse and looks broken, append a clear marker so the user knows it's
+ * incomplete and why. Valid HCL keeps braces balanced (interpolation `${…}` and
+ * `jsonencode({…})` pairs included), so an imbalance is a reliable truncation signal.
+ */
+export function flagIfIncomplete(hcl: string): string {
+  const opens = (hcl.match(/{/g) ?? []).length;
+  const closes = (hcl.match(/}/g) ?? []).length;
+  if (opens === closes) return hcl;
+  return (
+    `${hcl.trimEnd()}\n\n` +
+    `# ============================================================================\n` +
+    `# ⚠  INCOMPLETE — this reference file was cut off (the design is too large to\n` +
+    `# render as a single Terraform file). It will NOT 'terraform plan' as-is.\n` +
+    `# Pull a smaller tier, or split the design, and regenerate.\n` +
+    `# ============================================================================\n`
+  );
 }
 
 /**
@@ -224,7 +245,10 @@ async function handleConfig(
     const actualUsd = llmCostUsd(usage, ctx.pricing);
     ctx.stores.spendLedger.reconcile(reservationId, actualUsd);
 
-    const responseBody = { format: FORMAT, code: REFERENCE_WARNING_HEADER + stripCodeFence(generated.result) };
+    const responseBody = {
+      format: FORMAT,
+      code: REFERENCE_WARNING_HEADER + flagIfIncomplete(stripCodeFence(generated.result)),
+    };
 
     // Persist this tier's Terraform onto the generation row so future pulls are free.
     // Best-effort: a persist failure never breaks the artifact the user just paid for.

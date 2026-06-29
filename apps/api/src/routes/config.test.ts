@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 
 import { loadConfig } from "../config.js";
-import { stripCodeFence } from "./config.js";
+import { stripCodeFence, flagIfIncomplete } from "./config.js";
 import type { LlmProvider, ProviderResult, Usage } from "../llm/provider.js";
 import type { ArchitectureResult, Clarification, Tier } from "../schema/architecture.js";
 
@@ -23,6 +23,18 @@ describe("stripCodeFence", () => {
   });
   it("drops a dangling opener when the closing fence was truncated", () => {
     expect(stripCodeFence('```hcl\nresource "x" "y" {')).toBe('resource "x" "y" {');
+  });
+});
+
+describe("flagIfIncomplete", () => {
+  it("leaves balanced HCL untouched (incl. interpolation/jsonencode braces)", () => {
+    const hcl = 'resource "x" "y" {\n  tags = jsonencode({ name = "${var.p}" })\n}';
+    expect(flagIfIncomplete(hcl)).toBe(hcl);
+  });
+  it("appends an INCOMPLETE marker when braces are unbalanced (truncated mid-resource)", () => {
+    const out = flagIfIncomplete('resource "x" "y" {\n  bucket = "a"');
+    expect(out).toContain("INCOMPLETE");
+    expect(out).toContain("will NOT 'terraform plan'");
   });
 });
 
