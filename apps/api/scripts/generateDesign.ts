@@ -29,6 +29,7 @@ import { generateArchitecture } from "../src/pipeline/generate.js";
 import { estimateCosts, trafficVolumeScale } from "../src/pipeline/cost.js";
 import { tagDesign } from "../src/pipeline/tags.js";
 import { hashPrompt } from "../src/store/responseCache.js";
+import { assembleTier } from "../src/pipeline/terraform/assemble.js";
 import { runAllProperties } from "../test/golden/properties.js";
 import {
   REFERENCE_WARNING_HEADER,
@@ -45,10 +46,12 @@ interface Args {
   tiers: string[];
   out: string;
   persist: boolean;
-  /** Generate reference Terraform per tier. OFF by default — each tier is a large
-   *  (~32k-token) extra LLM call, and verifying a design/cost posture never needs it.
-   *  Opt in explicitly with --with-tf when you actually want the .tf artifacts. */
+  /** Generate reference Terraform per tier. OFF by default — verifying a design/cost
+   *  posture reads design.json only. Opt in with --with-tf for the .tf artifacts. */
   withTf: boolean;
+  /** Force the legacy LLM `generateConfig` path instead of the deterministic emitter
+   *  (for side-by-side comparison). Default: deterministic, $0 for templated tiers. */
+  tfLlm: boolean;
 }
 
 function parseArgs(): Args {
@@ -73,6 +76,7 @@ function parseArgs(): Args {
     out: get("--out") ?? "out",
     persist: a.includes("--persist"),
     withTf: a.includes("--with-tf"),
+    tfLlm: a.includes("--tf-llm"),
   };
 }
 
@@ -111,22 +115,42 @@ async function main(): Promise<void> {
   writeFileSync(join(args.out, "design.json"), JSON.stringify(estimated, null, 2));
   console.log(`wrote ${join(args.out, "design.json")}`);
 
-  // Terraform generation is OPT-IN: each tier is a large extra LLM call, and design/
-  // cost/posture verification reads design.json only. Skip unless --with-tf is given.
+  // Terraform generation is OPT-IN (--with-tf). Default path is now the DETERMINISTIC
+  // emitter: $0/instant for any tier whose services all have templates, with the wire-up
+  // gaps structurally impossible. A tier with an unsupported service is emitted with the
+  // templated part + a `# TODO` for the long tail (and, with --tf-llm-fallback, an extra
+  // `<tier>.llm.tf` full LLM rendering for comparison). --tf-llm forces the legacy path.
   if (!args.withTf) {
-    console.log(`\nskipped Terraform (design-only). Pass --with-tf to generate reference .tf — ${args.tiers.length} extra ~32k-token LLM call(s).`);
-  } else {
+    console.log(`\nskipped Terraform (design-only). Pass --with-tf to generate reference .tf.`);
+  } else if (args.tfLlm) {
     for (const tierName of args.tiers) {
       const tier = estimated.tiers.find((t) => t.name === tierName) as Tier | undefined;
-      if (!tier) {
-        console.error(`  ! no tier '${tierName}' in result`);
-        continue;
-      }
+      if (!tier) { console.error(`  ! no tier '${tierName}' in result`); continue; }
       const { result: raw } = await ctx.provider.generateConfig(tier, { maxTokens: 32_000 });
       const { code, gaps } = renderReferenceTf(raw);
       const file = join(args.out, `${tierName}.tf`);
       writeFileSync(file, code);
-      console.log(`wrote ${file}${gaps.length ? `  ⚠ wire-up gaps: ${gaps.join(", ")}` : "  ✓ no wire-up gaps"}`);
+      console.log(`wrote ${file} (LLM)${gaps.length ? `  ⚠ wire-up gaps: ${gaps.join(", ")}` : "  ✓ no wire-up gaps"}`);
+    }
+  } else {
+    const fillLlm = process.argv.includes("--tf-llm-fallback");
+    for (const tierName of args.tiers) {
+      const tier = estimated.tiers.find((t) => t.name === tierName) as Tier | undefined;
+      if (!tier) { console.error(`  ! no tier '${tierName}' in result`); continue; }
+      const { code, coverage, gaps } = assembleTier(tier, { region: config.DEFAULT_REGION });
+      const file = join(args.out, `${tierName}.tf`);
+      writeFileSync(file, code);
+      const cov = `${coverage.templated}/${coverage.total} (${Math.round(coverage.ratio * 100)}%)`;
+      const gapNote = gaps.length ? `  ⚠ wire-up gaps: ${gaps.map((g) => g.id).join(", ")}` : "  ✓ no wire-up gaps";
+      const tail = coverage.unsupported.length ? `  long-tail (LLM/TODO): ${coverage.unsupported.join(", ")}` : "";
+      console.log(`wrote ${file} (deterministic, coverage ${cov})${gapNote}${tail}`);
+      // Optional side-by-side: a full LLM rendering for any tier that isn't fully templated.
+      if (fillLlm && coverage.unsupported.length > 0) {
+        const { result: raw } = await ctx.provider.generateConfig(tier, { maxTokens: 32_000 });
+        const llmFile = join(args.out, `${tierName}.llm.tf`);
+        writeFileSync(llmFile, renderReferenceTf(raw).code);
+        console.log(`  also wrote ${llmFile} (LLM full-tier, for the long tail)`);
+      }
     }
   }
 

@@ -78,6 +78,13 @@ const ConfigSchema = z.object({
   DEFAULT_REGION: z.string().default("us-east-1"),
   PRICING_REFRESH_CRON: z.string().default("0 3 1 * *"),
 
+  // Deterministic Terraform — emit reference HCL from the typed graph (per-service
+  // emitters + edge-derived wiring) instead of a per-tier LLM call. A fully-templated
+  // tier costs $0 and is instant, and its wire-up gaps are structurally impossible;
+  // a tier containing an unsupported service falls back to the LLM generateConfig
+  // path. On by default; set false to force the legacy LLM path everywhere.
+  TERRAFORM_DETERMINISTIC: boolish.default("true"),
+
   // Cost + abuse controls (R11). Tight by default: this is a self-funded public
   // demo, so each visitor gets a small daily allotment of (expensive) full
   // generations. The daily cap is the real "a couple per visitor per day" lever;

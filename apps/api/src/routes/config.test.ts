@@ -156,31 +156,56 @@ describe("annotateWireupGaps", () => {
 
 // --- Canned tier ------------------------------------------------------------
 
+// A tier built from services with NO deterministic emitter (Cognito + Kinesis), so it
+// always routes to the LLM fallback — used to exercise the LLM path's spend/cache/error
+// behavior. (API Gateway + DynamoDB are now templated, hence not used here.)
 function balancedTier(): Tier {
   return {
     name: "balanced",
     summary: "balanced tier",
     nodes: [
       {
-        id: "api",
-        awsService: "API Gateway",
-        role: "front door",
-        security: ["TLS", "WAF", "throttling", "least-priv role"],
+        id: "auth",
+        awsService: "Amazon Cognito",
+        role: "user pool",
+        security: ["TLS", "MFA", "least-priv role"],
       },
       {
-        id: "db",
-        awsService: "DynamoDB",
-        role: "primary datastore",
-        security: ["encryption at rest", "on-demand", "least-priv role"],
+        id: "stream",
+        awsService: "Amazon Kinesis Data Streams",
+        role: "event firehose",
+        security: ["encryption at rest", "least-priv role"],
       },
     ],
     edges: [
-      { from: "client", to: "api", payload: "JSON request body", protocol: "HTTPS" },
-      { from: "api", to: "db", payload: "item read/write", protocol: "HTTPS" },
+      { from: "client", to: "auth", payload: "auth request", protocol: "HTTPS" },
+      { from: "auth", to: "stream", payload: "event record", protocol: "HTTPS" },
     ],
-    costDrivers: [{ service: "API Gateway", unit: "per 1k requests", estimateRange: "$0.20–$0.90", note: "" }],
+    costDrivers: [{ service: "Amazon Cognito", unit: "per MAU", estimateRange: "$0.00–$0.55", note: "" }],
     delta: ["+ multi-AZ"],
     tradeoffs: ["vs resilient: cheaper, single-region"],
+  };
+}
+
+// A FULLY-TEMPLATED tier (every service has a deterministic emitter) — used to
+// exercise the $0/instant deterministic path. API Gateway + DynamoDB (balancedTier)
+// have no emitters yet, so that tier still routes to the LLM fallback.
+function templatedTier(): Tier {
+  return {
+    name: "budget",
+    summary: "templated single-box-ish",
+    nodes: [
+      { id: "store", awsService: "S3", role: "asset store", security: ["SSE-KMS", "block public access"] },
+      { id: "fn", awsService: "Lambda", role: "api worker", security: ["least-priv role"] },
+      { id: "secrets", awsService: "AWS Secrets Manager", role: "credentials store", security: ["KMS-encrypted"] },
+    ],
+    edges: [
+      { from: "fn", to: "store", payload: "object read/write", protocol: "HTTPS" },
+      { from: "fn", to: "secrets", payload: "db creds", protocol: "HTTPS" },
+    ],
+    costDrivers: [],
+    delta: ["baseline"],
+    tradeoffs: ["cheapest correct"],
   };
 }
 
@@ -342,6 +367,54 @@ describe("POST /api/config", () => {
     expect(res.json().error).toBe("config_generation_failed");
     expect(ctx.stores.spendLedger.spentTodayUsd()).toBeCloseTo(0);
     expect(lastTelemetry(lines).outcome).toBe("error");
+
+    await app.close();
+  });
+});
+
+describe("POST /api/config — deterministic Terraform (TERRAFORM_DETERMINISTIC)", () => {
+  it("renders a fully-templated tier with NO LLM call, $0 spend, and the deterministic banner", async () => {
+    const fake = makeFake();
+    const { app, ctx, lines } = await buildHarness(fake);
+
+    const res = await app.inject({ method: "POST", url: "/api/config", payload: { tier: templatedTier() } });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.format).toBe("terraform");
+    // The deterministic banner identifies the path; the reference warning still leads.
+    expect(body.code).toContain("DETERMINISTICALLY");
+    expect(body.code).toMatch(/^#+\n# ⚠ {2}REFERENCE ONLY/);
+    // The typed graph was rendered directly — the provider was never called.
+    expect(fake.calls.generateConfig).toBe(0);
+    // And no spend was reserved/consumed (it's a $0 path).
+    expect(ctx.stores.spendLedger.spentTodayUsd()).toBeCloseTo(0);
+
+    const rec = lastTelemetry(lines);
+    expect(rec.outcome).toBe("ok");
+    expect(rec.cacheHit).toBe(false);
+    expect(rec.costUsd).toBe(0);
+
+    await app.close();
+  });
+
+  it("forcing TERRAFORM_DETERMINISTIC=false routes the same templated tier to the LLM path", async () => {
+    const fake = makeFake();
+    const { app } = await buildHarness(fake, { TERRAFORM_DETERMINISTIC: "false" });
+
+    const res = await app.inject({ method: "POST", url: "/api/config", payload: { tier: templatedTier() } });
+    expect(res.statusCode).toBe(200);
+    expect(fake.calls.generateConfig).toBe(1);
+
+    await app.close();
+  });
+
+  it("a tier with an unsupported service (Cognito + Kinesis) falls back to the LLM long tail", async () => {
+    const fake = makeFake();
+    const { app } = await buildHarness(fake);
+
+    const res = await app.inject({ method: "POST", url: "/api/config", payload: { tier: balancedTier() } });
+    expect(res.statusCode).toBe(200);
+    expect(fake.calls.generateConfig).toBe(1);
 
     await app.close();
   });
