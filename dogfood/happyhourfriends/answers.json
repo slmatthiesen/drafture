@@ -1,0 +1,6 @@
+[
+  "Expected traffic: very low today; optimize for cost first, not high availability. Growth is in cached content volume and pipeline throughput, not concurrent dynamic traffic.",
+  "Availability/SLA: no strict SLA at current scale; single-AZ is acceptable. Nightly DB backups with ~14-day retention; relaxed RPO/RTO.",
+  "Data sensitivity: low — user-uploaded venue/evidence photos and public venue data; no payments or regulated data.",
+  "Cost posture: cost-optimized; prefer lean managed services over premium high-availability tiers until traffic or an SLA justifies them."
+]

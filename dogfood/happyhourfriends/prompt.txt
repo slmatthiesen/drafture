@@ -1,0 +1,39 @@
+A requirements brief for an AWS-architecture recommendation. Describes the workload's shape and constraints, not the codebase. External SaaS integrations are intentionally omitted — they run off-AWS and only add noise to a service recommendation.
+
+## 1. Application profile
+- SSR/ISR web app (Next.js App Router + React, Node runtime). Needs a persistent Node server with ISR caching and on-demand revalidation — not pure static/edge.
+- Public, read-heavy pages (city/venue tables, sitemap) plus a gated /admin section.
+- A background AI pipeline that must be decoupled from the request path.
+
+## 2. Compute
+- Web tier: containerized (Docker) Node service. Stateless apart from the ISR cache.
+- Orchestrator tier: a Postgres-backed job queue running async pipeline jobs (fetch, AI calls, persist). Bursty but lightweight — it coordinates work rather than doing the heavy lifting itself. Should scale independently of the web tier.
+- On-demand render service: a stateless function ("URL in -> rendered HTML/screenshot out") that runs headless Chromium. This is the memory-heavy, spiky part of the workload (heavy during city onboarding/re-extract, idle otherwise), so it belongs in a scale-to-zero, pay-per-invocation service the orchestrator calls synchronously — not in an always-on host. Note: rendered output can exceed a synchronous response size limit (~6 MB), so large pages/screenshots should be written to object storage and returned by reference rather than inline.
+- Scheduled jobs: nightly database backup and periodic data-reconciliation crons.
+- Current footprint: single host, 2 vCPU / 4 GB RAM, serving all tiers today; the goal is to split the render workload out first.
+
+## 3. Data
+- PostgreSQL with the PostGIS extension — geospatial queries are load-bearing (boundary tiling, radius/ST_DWithin, point-in-polygon). A managed Postgres must support PostGIS.
+- Relational, single primary. Read volume scales with traffic; write volume with the pipeline. No sharding required near-term.
+- Versioned schema migrations run as a deploy step.
+
+## 4. Object storage
+- User-uploaded evidence photos plus server-side image processing. Needs blob storage (e.g. S3), ideally CDN-fronted. Media volume is low today and not a current priority.
+
+## 5. Traffic & scale
+- Traffic is very low today. Optimize for cost first, not high availability.
+- Read surface is largely cacheable (mostly-static city/venue pages), so dynamic request rate stays modest even as content grows.
+- Product goal: expand toward ~1000 cities. Growth is in cached content volume and pipeline throughput, not in concurrent dynamic traffic.
+
+## 6. Availability / SLA
+- No strict SLA at current scale; single-AZ is acceptable for now.
+- Database backups: nightly, ~14-day retention. RPO/RTO are relaxed.
+
+## 7. Geography
+- Single region (US audience). A CDN handles global static/ISR asset delivery. No multi-region database requirement.
+
+## 8. Storage / disk
+- Not a concern at current scale; no large datasets or media catalog to plan around.
+
+## 9. Cost posture
+- Cost-optimized. Prefer lean managed services over premium high-availability tiers until traffic or an SLA justifies them.
