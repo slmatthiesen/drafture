@@ -1,0 +1,1197 @@
+{
+  "assumptions": [
+    "Traffic ~<1k/month — extremely low volume; serverless-no-VPC is the correct floor (near-zero idle cost).",
+    "TradingView sends webhook POSTs with a shared secret in the payload or header for HMAC/token verification.",
+    "Downstream targets (existing graph + table display) are reached via HTTP or a known AWS integration — modeled as an external HTTP destination and DynamoDB (canonical store for later AI step).",
+    "'Pushes data where it needs to go' = persist the raw signal + fan-out to the existing frontend via HTTP callback / EventBridge.",
+    "The 'AI step' (Python evaluation, not in scope now) is pre-wired as a stub Lambda + S3 data lake so the architecture is ready without building it today.",
+    "No PII or regulated data — no HIPAA/PCI scope.",
+    "Downtime tolerance of 'a few minutes' maps to budget single-AZ serverless (Lambda is multi-AZ by default within a region, so even budget tier is highly available here).",
+    "Cost estimates are on-demand list prices for us-east-1, presented as ranges over assumed monthly volumes. They exclude the AWS Free Tier, Savings Plans, Reserved Instances, and negotiated discounts.",
+    "Assumed traffic ~100k–1M requests/month, applied equally to all three tiers (tiers differ by robustness, not traffic). Set \"expected monthly visitors\" in intake to change it."
+  ],
+  "clarificationsUsed": [
+    "Downtime tolerance: best-effort, a few minutes acceptable → single-AZ budget tier is fine; Lambda's regional multi-AZ default satisfies this anyway.",
+    "No PII/regulated data → no compliance-scoping keyDecision needed.",
+    "Traffic <1k/month → serverless on-demand, no provisioned capacity anywhere; idle cost ~$0."
+  ],
+  "tiers": [
+    {
+      "name": "budget",
+      "summary": "Serverless no-VPC ingest: API Gateway → Lambda (token verify + write) → DynamoDB + SQS fan-out. S3 data lake stub wired via DynamoDB Streams. Near-zero idle cost.",
+      "nodes": [
+        {
+          "id": "cf_waf",
+          "awsService": "CloudFront + WAF",
+          "role": "edge WAF / TLS termination",
+          "security": [
+            "TLS",
+            "WAF managed rules",
+            "rate-based rule",
+            "Shield Standard",
+            "access logging"
+          ]
+        },
+        {
+          "id": "apigw",
+          "awsService": "API Gateway (HTTP API)",
+          "role": "ingest HTTP endpoint",
+          "security": [
+            "TLS",
+            "least-priv resource policy",
+            "throttle 10 rps"
+          ]
+        },
+        {
+          "id": "ingest_lambda",
+          "awsService": "Lambda",
+          "role": "token verify + persist",
+          "security": [
+            "least-priv role",
+            "Secrets Manager token read",
+            "signature verified",
+            "reserved concurrency 10",
+            "X-Ray tracing"
+          ]
+        },
+        {
+          "id": "secrets",
+          "awsService": "Secrets Manager",
+          "role": "webhook secret store",
+          "security": [
+            "KMS encrypted",
+            "least-priv read-only"
+          ]
+        },
+        {
+          "id": "dynamo",
+          "awsService": "DynamoDB",
+          "role": "canonical trade store (on-demand)",
+          "security": [
+            "KMS SSE",
+            "least-priv IAM",
+            "point-in-time recovery",
+            "Streams enabled"
+          ]
+        },
+        {
+          "id": "sqs_fanout",
+          "awsService": "SQS",
+          "role": "fan-out delivery queue",
+          "security": [
+            "KMS SSE",
+            "DLQ",
+            "idempotent consumer",
+            "visibility timeout 30s"
+          ]
+        },
+        {
+          "id": "sqs_dlq",
+          "awsService": "SQS",
+          "role": "fan-out dead-letter queue",
+          "security": [
+            "KMS SSE",
+            "alarm on depth > 0"
+          ]
+        },
+        {
+          "id": "dispatch_lambda",
+          "awsService": "Lambda",
+          "role": "HTTP dispatcher to frontend",
+          "security": [
+            "least-priv role",
+            "idempotent consumer",
+            "X-Ray tracing",
+            "retry with backoff"
+          ]
+        },
+        {
+          "id": "streams_lambda",
+          "awsService": "Lambda",
+          "role": "Streams → S3 data lake stub",
+          "security": [
+            "least-priv role",
+            "X-Ray tracing"
+          ]
+        },
+        {
+          "id": "s3_datalake",
+          "awsService": "S3",
+          "role": "raw trade signal archive",
+          "security": [
+            "SSE-KMS",
+            "block public access",
+            "versioning",
+            "lifecycle to IA 90d"
+          ]
+        },
+        {
+          "id": "cw_logs",
+          "awsService": "CloudWatch Logs",
+          "role": "centralized structured logs",
+          "security": [
+            "retention 90d",
+            "KMS encrypted"
+          ]
+        },
+        {
+          "id": "cw_alarm",
+          "awsService": "CloudWatch Alarms",
+          "role": "golden-signal alarms",
+          "security": [
+            "p99 latency",
+            "error rate",
+            "DLQ depth",
+            "throttles"
+          ]
+        },
+        {
+          "id": "sns_alert",
+          "awsService": "SNS",
+          "role": "ops alert topic",
+          "security": [
+            "TLS",
+            "least-priv publish"
+          ]
+        },
+        {
+          "id": "cloudtrail",
+          "awsService": "CloudTrail",
+          "role": "API audit trail",
+          "security": [
+            "management events",
+            "S3 data events",
+            "log file validation"
+          ]
+        }
+      ],
+      "edges": [
+        {
+          "from": "client",
+          "to": "cf_waf",
+          "payload": "TradingView alert POST (JSON signal + bearer token)",
+          "protocol": "HTTPS"
+        },
+        {
+          "from": "cf_waf",
+          "to": "apigw",
+          "payload": "filtered alert POST",
+          "protocol": "HTTPS"
+        },
+        {
+          "from": "apigw",
+          "to": "ingest_lambda",
+          "payload": "alert JSON + headers",
+          "protocol": "AWS invoke"
+        },
+        {
+          "from": "ingest_lambda",
+          "to": "secrets",
+          "payload": "GetSecretValue request",
+          "protocol": "AWS SDK / TLS"
+        },
+        {
+          "from": "ingest_lambda",
+          "to": "dynamo",
+          "payload": "PutItem: tradeId, signal, timestamp, raw JSON",
+          "protocol": "AWS SDK / TLS"
+        },
+        {
+          "from": "ingest_lambda",
+          "to": "sqs_fanout",
+          "payload": "SendMessage: tradeId + signal payload",
+          "protocol": "AWS SDK / TLS"
+        },
+        {
+          "from": "sqs_fanout",
+          "to": "dispatch_lambda",
+          "payload": "trade signal event (at-least-once)",
+          "protocol": "SQS trigger"
+        },
+        {
+          "from": "sqs_fanout",
+          "to": "sqs_dlq",
+          "payload": "failed messages after 3 retries",
+          "protocol": "SQS redrive"
+        },
+        {
+          "from": "dispatch_lambda",
+          "to": "client",
+          "payload": "HTTP POST: trade signal JSON to existing frontend endpoint",
+          "protocol": "HTTPS"
+        },
+        {
+          "from": "dynamo",
+          "to": "streams_lambda",
+          "payload": "DynamoDB Streams NEW_IMAGE record",
+          "protocol": "DynamoDB Streams"
+        },
+        {
+          "from": "streams_lambda",
+          "to": "s3_datalake",
+          "payload": "PutObject: trade signal JSON/Parquet",
+          "protocol": "AWS SDK / TLS"
+        },
+        {
+          "from": "ingest_lambda",
+          "to": "cw_logs",
+          "payload": "structured ingest logs (JSON)",
+          "protocol": "CloudWatch"
+        },
+        {
+          "from": "dispatch_lambda",
+          "to": "cw_logs",
+          "payload": "dispatch result logs",
+          "protocol": "CloudWatch"
+        },
+        {
+          "from": "cw_logs",
+          "to": "cw_alarm",
+          "payload": "metric filters: errors, latency, throttles",
+          "protocol": "CloudWatch Metrics"
+        },
+        {
+          "from": "cw_alarm",
+          "to": "sns_alert",
+          "payload": "alarm state change notification",
+          "protocol": "CloudWatch → SNS"
+        },
+        {
+          "from": "sns_alert",
+          "to": "client",
+          "payload": "email alert to operator",
+          "protocol": "SMTP/HTTPS"
+        }
+      ],
+      "delta": [
+        "Baseline: fully serverless, no VPC, no NAT gateway, near-zero idle cost at <1k/mo.",
+        "Single Lambda concurrency reservation (10) absorbs all realistic burst without over-provisioning.",
+        "DynamoDB on-demand: zero capacity planning, instant scale.",
+        "SQS + DLQ decouples ingest from frontend delivery; retries absorb transient downstream failures.",
+        "S3 data lake stub wired now via DynamoDB Streams — AI step can be dropped in without rearchitecting.",
+        "Observability: CloudWatch logs + alarms on error rate / DLQ depth / latency → SNS email."
+      ],
+      "tradeoffs": [
+        "No multi-AZ explicit redundancy beyond Lambda's default regional distribution — acceptable at best-effort tolerance.",
+        "No SQS FIFO: standard queue may deliver out-of-order at very high burst (irrelevant at <1k/mo).",
+        "Bearer token auth is weaker than HMAC but is the ceiling of TradingView's capability.",
+        "Single CloudFront distribution adds ~10–20ms latency vs direct API GW, offset by WAF coverage."
+      ],
+      "costDrivers": [
+        {
+          "service": "CloudFront",
+          "unit": "$/GB transferred",
+          "estimateRange": "$0.043–$0.425/mo",
+          "note": "Data transfer out to internet, first 10TB/month tier (North America). First 1TB/month is free."
+        },
+        {
+          "service": "CloudFront",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.075–$0.750/mo",
+          "note": "HTTPS requests ($0.0075 per 10,000). North America/Europe."
+        },
+        {
+          "service": "WAF",
+          "unit": "$/web-ACL-month",
+          "estimateRange": "$5.00–$5.00/mo",
+          "note": "Per web ACL/month. Add ~$1.00 per rule/month and ~$0.60 per 1M requests inspected."
+        },
+        {
+          "service": "Lambda",
+          "unit": "$/GB-second",
+          "estimateRange": "$0.167–$1.67/mo",
+          "note": "Compute duration: $0.0000166667 per GB-second (x86). Multiply by memoryGB x durationSeconds per invocation."
+        },
+        {
+          "service": "Lambda",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.020–$0.200/mo",
+          "note": "On-demand list price ($0.20 per 1M requests). Excludes Free Tier."
+        },
+        {
+          "service": "DynamoDB",
+          "unit": "per 1k read units",
+          "estimateRange": "$0.013–$0.125/mo",
+          "note": "On-demand read request units ($0.125 per 1M RRU). 1 RRU = 1 strongly-consistent read up to 4KB."
+        },
+        {
+          "service": "DynamoDB",
+          "unit": "per 1k write units",
+          "estimateRange": "$0.063–$0.625/mo",
+          "note": "On-demand write request units ($0.625 per 1M WRU). 1 WRU = 1 write up to 1KB."
+        },
+        {
+          "service": "SQS",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.040–$0.400/mo",
+          "note": "Standard queue requests ($0.40 per 1M). First 1M/month free. FIFO is $0.50 per 1M."
+        },
+        {
+          "service": "S3",
+          "unit": "$/GB-month",
+          "estimateRange": "$0.230–$2.30/mo",
+          "note": "S3 Standard storage, first 50TB/month tier."
+        },
+        {
+          "service": "S3",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.500–$5.00/mo",
+          "note": "PUT/COPY/POST/LIST requests per 1,000. GET/SELECT requests are ~$0.0004 per 1,000."
+        },
+        {
+          "service": "CloudWatch Logs",
+          "unit": "$/GB ingested",
+          "estimateRange": "$0.010–$0.100/mo",
+          "note": "CloudWatch Logs ingestion $0.50/GB (first 10GB/mo free in some accounts). Archival storage is cheaper; Insights queries extra."
+        },
+        {
+          "service": "SNS",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.050–$0.500/mo",
+          "note": "Standard topic API requests ($0.50 per 1M). Delivery (HTTP/SMS/email) priced separately."
+        }
+      ]
+    },
+    {
+      "name": "balanced",
+      "summary": "Adds SQS FIFO for ordered delivery, dead-letter alarm tightened, enhanced tracing, CloudWatch dashboard, and Slack SNS subscription for critical alarms. Lambda provisioned concurrency option noted.",
+      "nodes": [
+        {
+          "id": "cf_waf",
+          "awsService": "CloudFront + WAF",
+          "role": "edge WAF / TLS termination",
+          "security": [
+            "TLS",
+            "WAF managed rules",
+            "rate-based rule",
+            "Shield Standard",
+            "access logging"
+          ]
+        },
+        {
+          "id": "apigw",
+          "awsService": "API Gateway (HTTP API)",
+          "role": "ingest HTTP endpoint",
+          "security": [
+            "TLS",
+            "least-priv resource policy",
+            "throttle 10 rps"
+          ]
+        },
+        {
+          "id": "ingest_lambda",
+          "awsService": "Lambda",
+          "role": "token verify + persist",
+          "security": [
+            "least-priv role",
+            "Secrets Manager token read",
+            "signature verified",
+            "reserved concurrency 10",
+            "X-Ray tracing"
+          ]
+        },
+        {
+          "id": "secrets",
+          "awsService": "Secrets Manager",
+          "role": "webhook secret store",
+          "security": [
+            "KMS encrypted",
+            "least-priv read-only"
+          ]
+        },
+        {
+          "id": "dynamo",
+          "awsService": "DynamoDB",
+          "role": "canonical trade store (on-demand)",
+          "security": [
+            "KMS SSE",
+            "least-priv IAM",
+            "point-in-time recovery",
+            "Streams enabled"
+          ]
+        },
+        {
+          "id": "sqs_fanout",
+          "awsService": "SQS FIFO",
+          "role": "ordered fan-out queue",
+          "security": [
+            "KMS SSE",
+            "DLQ",
+            "idempotent consumer",
+            "MessageGroupId per tradeId",
+            "deduplication enabled"
+          ]
+        },
+        {
+          "id": "sqs_dlq",
+          "awsService": "SQS",
+          "role": "fan-out dead-letter queue",
+          "security": [
+            "KMS SSE",
+            "alarm on depth > 0"
+          ]
+        },
+        {
+          "id": "dispatch_lambda",
+          "awsService": "Lambda",
+          "role": "HTTP dispatcher to frontend",
+          "security": [
+            "least-priv role",
+            "idempotent consumer",
+            "X-Ray tracing",
+            "retry with backoff"
+          ]
+        },
+        {
+          "id": "streams_lambda",
+          "awsService": "Lambda",
+          "role": "Streams → S3 data lake stub",
+          "security": [
+            "least-priv role",
+            "X-Ray tracing"
+          ]
+        },
+        {
+          "id": "s3_datalake",
+          "awsService": "S3",
+          "role": "raw trade signal archive",
+          "security": [
+            "SSE-KMS",
+            "block public access",
+            "versioning",
+            "lifecycle to IA 90d"
+          ]
+        },
+        {
+          "id": "cw_logs",
+          "awsService": "CloudWatch Logs",
+          "role": "centralized structured logs",
+          "security": [
+            "retention 90d",
+            "KMS encrypted"
+          ]
+        },
+        {
+          "id": "cw_alarm",
+          "awsService": "CloudWatch Alarms",
+          "role": "golden-signal alarms",
+          "security": [
+            "p99 latency",
+            "error rate",
+            "DLQ depth",
+            "throttles"
+          ]
+        },
+        {
+          "id": "sns_alert",
+          "awsService": "SNS",
+          "role": "ops alert topic",
+          "security": [
+            "TLS",
+            "least-priv publish"
+          ]
+        },
+        {
+          "id": "cloudtrail",
+          "awsService": "CloudTrail",
+          "role": "API audit trail",
+          "security": [
+            "management events",
+            "S3 data events",
+            "log file validation"
+          ]
+        },
+        {
+          "id": "cw_dashboard",
+          "awsService": "CloudWatch Dashboard",
+          "role": "live ops dashboard",
+          "security": [
+            "read-only IAM"
+          ]
+        },
+        {
+          "id": "xray_map",
+          "awsService": "AWS X-Ray",
+          "role": "distributed service map",
+          "security": [
+            "least-priv read"
+          ]
+        }
+      ],
+      "edges": [
+        {
+          "from": "client",
+          "to": "cf_waf",
+          "payload": "TradingView alert POST (JSON signal + bearer token)",
+          "protocol": "HTTPS"
+        },
+        {
+          "from": "cf_waf",
+          "to": "apigw",
+          "payload": "filtered alert POST",
+          "protocol": "HTTPS"
+        },
+        {
+          "from": "apigw",
+          "to": "ingest_lambda",
+          "payload": "alert JSON + headers",
+          "protocol": "AWS invoke"
+        },
+        {
+          "from": "ingest_lambda",
+          "to": "secrets",
+          "payload": "GetSecretValue request",
+          "protocol": "AWS SDK / TLS"
+        },
+        {
+          "from": "ingest_lambda",
+          "to": "dynamo",
+          "payload": "PutItem: tradeId, signal, timestamp, raw JSON",
+          "protocol": "AWS SDK / TLS"
+        },
+        {
+          "from": "ingest_lambda",
+          "to": "sqs_fanout",
+          "payload": "SendMessage: tradeId + signal payload",
+          "protocol": "AWS SDK / TLS"
+        },
+        {
+          "from": "sqs_fanout",
+          "to": "dispatch_lambda",
+          "payload": "ordered trade signal event (FIFO, deduplicated)",
+          "protocol": "SQS FIFO trigger"
+        },
+        {
+          "from": "sqs_fanout",
+          "to": "sqs_dlq",
+          "payload": "failed messages after 3 retries",
+          "protocol": "SQS redrive"
+        },
+        {
+          "from": "dispatch_lambda",
+          "to": "client",
+          "payload": "HTTP POST: trade signal JSON to existing frontend endpoint",
+          "protocol": "HTTPS"
+        },
+        {
+          "from": "dynamo",
+          "to": "streams_lambda",
+          "payload": "DynamoDB Streams NEW_IMAGE record",
+          "protocol": "DynamoDB Streams"
+        },
+        {
+          "from": "streams_lambda",
+          "to": "s3_datalake",
+          "payload": "PutObject: trade signal JSON/Parquet",
+          "protocol": "AWS SDK / TLS"
+        },
+        {
+          "from": "ingest_lambda",
+          "to": "cw_logs",
+          "payload": "structured ingest logs (JSON)",
+          "protocol": "CloudWatch"
+        },
+        {
+          "from": "dispatch_lambda",
+          "to": "cw_logs",
+          "payload": "dispatch result logs",
+          "protocol": "CloudWatch"
+        },
+        {
+          "from": "cw_logs",
+          "to": "cw_alarm",
+          "payload": "metric filters: errors, latency, throttles",
+          "protocol": "CloudWatch Metrics"
+        },
+        {
+          "from": "cw_alarm",
+          "to": "sns_alert",
+          "payload": "critical alarm → Slack webhook subscription",
+          "protocol": "SNS → HTTPS"
+        },
+        {
+          "from": "sns_alert",
+          "to": "client",
+          "payload": "email alert to operator",
+          "protocol": "SMTP/HTTPS"
+        }
+      ],
+      "delta": [
+        "SQS Standard → SQS FIFO: per-tradeId ordering + exactly-once deduplication window (5 min).",
+        "CloudWatch Dashboard added: latency p50/p99, error rate, DLQ depth, invocation count.",
+        "X-Ray service map across API GW → ingest Lambda → DynamoDB + SQS edges.",
+        "SNS alert subscriber upgraded: email + Slack webhook for critical alarms.",
+        "Lambda provisioned concurrency (1 unit) available as opt-in if cold-start latency matters."
+      ],
+      "tradeoffs": [
+        "SQS FIFO throughput cap 3k msg/s (per group) — irrelevant at this traffic but noted for future.",
+        "Provisioned concurrency adds always-on Lambda cost — opt-in, not default.",
+        "Marginally higher per-message cost for FIFO vs Standard — negligible at <1k/mo."
+      ],
+      "costDrivers": [
+        {
+          "service": "CloudFront",
+          "unit": "$/GB transferred",
+          "estimateRange": "$0.043–$0.425/mo",
+          "note": "Data transfer out to internet, first 10TB/month tier (North America). First 1TB/month is free."
+        },
+        {
+          "service": "CloudFront",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.075–$0.750/mo",
+          "note": "HTTPS requests ($0.0075 per 10,000). North America/Europe."
+        },
+        {
+          "service": "WAF",
+          "unit": "$/web-ACL-month",
+          "estimateRange": "$10.00–$10.00/mo",
+          "note": "Per web ACL/month. Add ~$1.00 per rule/month and ~$0.60 per 1M requests inspected."
+        },
+        {
+          "service": "Lambda",
+          "unit": "$/GB-second",
+          "estimateRange": "$0.167–$1.67/mo",
+          "note": "Compute duration: $0.0000166667 per GB-second (x86). Multiply by memoryGB x durationSeconds per invocation."
+        },
+        {
+          "service": "Lambda",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.020–$0.200/mo",
+          "note": "On-demand list price ($0.20 per 1M requests). Excludes Free Tier."
+        },
+        {
+          "service": "DynamoDB",
+          "unit": "per 1k read units",
+          "estimateRange": "$0.013–$0.125/mo",
+          "note": "On-demand read request units ($0.125 per 1M RRU). 1 RRU = 1 strongly-consistent read up to 4KB."
+        },
+        {
+          "service": "DynamoDB",
+          "unit": "per 1k write units",
+          "estimateRange": "$0.063–$0.625/mo",
+          "note": "On-demand write request units ($0.625 per 1M WRU). 1 WRU = 1 write up to 1KB."
+        },
+        {
+          "service": "SQS",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.040–$0.400/mo",
+          "note": "Standard queue requests ($0.40 per 1M). First 1M/month free. FIFO is $0.50 per 1M."
+        },
+        {
+          "service": "S3",
+          "unit": "$/GB-month",
+          "estimateRange": "$0.230–$2.30/mo",
+          "note": "S3 Standard storage, first 50TB/month tier."
+        },
+        {
+          "service": "S3",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.500–$5.00/mo",
+          "note": "PUT/COPY/POST/LIST requests per 1,000. GET/SELECT requests are ~$0.0004 per 1,000."
+        },
+        {
+          "service": "CloudWatch Logs",
+          "unit": "$/GB ingested",
+          "estimateRange": "$0.010–$0.100/mo",
+          "note": "CloudWatch Logs ingestion $0.50/GB (first 10GB/mo free in some accounts). Archival storage is cheaper; Insights queries extra."
+        },
+        {
+          "service": "SNS",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.050–$0.500/mo",
+          "note": "Standard topic API requests ($0.50 per 1M). Delivery (HTTP/SMS/email) priced separately."
+        },
+        {
+          "service": "X-Ray",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.500–$5.00/mo",
+          "note": "X-Ray traces: $5.00 per 1M traces recorded (first 100k/mo free)."
+        }
+      ]
+    },
+    {
+      "name": "resilient",
+      "summary": "Adds DynamoDB Global Tables (second region), S3 Cross-Region Replication, EventBridge for multi-consumer fan-out, Lambda@Edge health probe, and PagerDuty SNS subscription for escalation.",
+      "nodes": [
+        {
+          "id": "cf_waf",
+          "awsService": "CloudFront + WAF",
+          "role": "edge WAF / TLS termination",
+          "security": [
+            "TLS",
+            "WAF managed rules",
+            "rate-based rule",
+            "Shield Standard",
+            "access logging"
+          ]
+        },
+        {
+          "id": "apigw",
+          "awsService": "API Gateway (HTTP API)",
+          "role": "ingest HTTP endpoint",
+          "security": [
+            "TLS",
+            "least-priv resource policy",
+            "throttle 10 rps"
+          ]
+        },
+        {
+          "id": "ingest_lambda",
+          "awsService": "Lambda",
+          "role": "token verify + persist",
+          "security": [
+            "least-priv role",
+            "Secrets Manager token read",
+            "signature verified",
+            "reserved concurrency 10",
+            "X-Ray tracing"
+          ]
+        },
+        {
+          "id": "secrets",
+          "awsService": "Secrets Manager",
+          "role": "webhook secret store",
+          "security": [
+            "KMS encrypted",
+            "least-priv read-only"
+          ]
+        },
+        {
+          "id": "dynamo",
+          "awsService": "DynamoDB Global Tables",
+          "role": "multi-region trade store",
+          "security": [
+            "KMS SSE",
+            "least-priv IAM",
+            "point-in-time recovery",
+            "Streams enabled",
+            "global table replica"
+          ]
+        },
+        {
+          "id": "sqs_fanout",
+          "awsService": "SQS FIFO",
+          "role": "ordered fan-out queue",
+          "security": [
+            "KMS SSE",
+            "DLQ",
+            "idempotent consumer",
+            "MessageGroupId per tradeId",
+            "deduplication enabled"
+          ]
+        },
+        {
+          "id": "sqs_dlq",
+          "awsService": "SQS",
+          "role": "fan-out dead-letter queue",
+          "security": [
+            "KMS SSE",
+            "alarm on depth > 0"
+          ]
+        },
+        {
+          "id": "dispatch_lambda",
+          "awsService": "Lambda",
+          "role": "HTTP dispatcher to frontend",
+          "security": [
+            "least-priv role",
+            "idempotent consumer",
+            "X-Ray tracing",
+            "retry with backoff"
+          ]
+        },
+        {
+          "id": "streams_lambda",
+          "awsService": "Lambda",
+          "role": "Streams → S3 data lake stub",
+          "security": [
+            "least-priv role",
+            "X-Ray tracing"
+          ]
+        },
+        {
+          "id": "s3_datalake",
+          "awsService": "S3 + CRR",
+          "role": "cross-region trade archive",
+          "security": [
+            "SSE-KMS",
+            "block public access",
+            "versioning",
+            "CRR to secondary region",
+            "lifecycle to IA 90d"
+          ]
+        },
+        {
+          "id": "cw_logs",
+          "awsService": "CloudWatch Logs",
+          "role": "centralized structured logs",
+          "security": [
+            "retention 90d",
+            "KMS encrypted"
+          ]
+        },
+        {
+          "id": "cw_alarm",
+          "awsService": "CloudWatch Alarms",
+          "role": "golden-signal alarms",
+          "security": [
+            "p99 latency",
+            "error rate",
+            "DLQ depth",
+            "throttles"
+          ]
+        },
+        {
+          "id": "sns_alert",
+          "awsService": "SNS",
+          "role": "ops alert topic",
+          "security": [
+            "TLS",
+            "least-priv publish"
+          ]
+        },
+        {
+          "id": "cloudtrail",
+          "awsService": "CloudTrail",
+          "role": "API audit trail",
+          "security": [
+            "management events",
+            "S3 data events",
+            "log file validation"
+          ]
+        },
+        {
+          "id": "cw_dashboard",
+          "awsService": "CloudWatch Dashboard",
+          "role": "live ops dashboard",
+          "security": [
+            "read-only IAM"
+          ]
+        },
+        {
+          "id": "xray_map",
+          "awsService": "AWS X-Ray",
+          "role": "distributed service map",
+          "security": [
+            "least-priv read"
+          ]
+        },
+        {
+          "id": "eventbridge",
+          "awsService": "EventBridge",
+          "role": "multi-consumer event bus",
+          "security": [
+            "least-priv resource policy",
+            "TLS",
+            "archive enabled"
+          ]
+        },
+        {
+          "id": "health_lambda",
+          "awsService": "Lambda",
+          "role": "ingest health probe",
+          "security": [
+            "least-priv role",
+            "scheduled every 1 min"
+          ]
+        },
+        {
+          "id": "pagerduty_sub",
+          "awsService": "SNS Subscription",
+          "role": "PagerDuty escalation sink",
+          "security": [
+            "HTTPS endpoint",
+            "TLS"
+          ]
+        }
+      ],
+      "edges": [
+        {
+          "from": "client",
+          "to": "cf_waf",
+          "payload": "TradingView alert POST (JSON signal + bearer token)",
+          "protocol": "HTTPS"
+        },
+        {
+          "from": "cf_waf",
+          "to": "apigw",
+          "payload": "filtered alert POST",
+          "protocol": "HTTPS"
+        },
+        {
+          "from": "apigw",
+          "to": "ingest_lambda",
+          "payload": "alert JSON + headers",
+          "protocol": "AWS invoke"
+        },
+        {
+          "from": "ingest_lambda",
+          "to": "secrets",
+          "payload": "GetSecretValue request",
+          "protocol": "AWS SDK / TLS"
+        },
+        {
+          "from": "ingest_lambda",
+          "to": "dynamo",
+          "payload": "PutItem: tradeId, signal, timestamp, raw JSON",
+          "protocol": "AWS SDK / TLS"
+        },
+        {
+          "from": "ingest_lambda",
+          "to": "sqs_fanout",
+          "payload": "SendMessage: tradeId + signal payload",
+          "protocol": "AWS SDK / TLS"
+        },
+        {
+          "from": "sqs_fanout",
+          "to": "sqs_dlq",
+          "payload": "failed messages after 3 retries",
+          "protocol": "SQS redrive"
+        },
+        {
+          "from": "dispatch_lambda",
+          "to": "client",
+          "payload": "HTTP POST: trade signal JSON to existing frontend endpoint",
+          "protocol": "HTTPS"
+        },
+        {
+          "from": "streams_lambda",
+          "to": "s3_datalake",
+          "payload": "PutObject: trade signal JSON/Parquet",
+          "protocol": "AWS SDK / TLS"
+        },
+        {
+          "from": "ingest_lambda",
+          "to": "cw_logs",
+          "payload": "structured ingest logs (JSON)",
+          "protocol": "CloudWatch"
+        },
+        {
+          "from": "dispatch_lambda",
+          "to": "cw_logs",
+          "payload": "dispatch result logs",
+          "protocol": "CloudWatch"
+        },
+        {
+          "from": "cw_logs",
+          "to": "cw_alarm",
+          "payload": "metric filters: errors, latency, throttles",
+          "protocol": "CloudWatch Metrics"
+        },
+        {
+          "from": "cw_alarm",
+          "to": "sns_alert",
+          "payload": "critical alarm → Slack webhook subscription",
+          "protocol": "SNS → HTTPS"
+        },
+        {
+          "from": "sns_alert",
+          "to": "client",
+          "payload": "email alert to operator",
+          "protocol": "SMTP/HTTPS"
+        },
+        {
+          "from": "ingest_lambda",
+          "to": "eventbridge",
+          "payload": "PutEvents: trade signal + metadata",
+          "protocol": "AWS SDK / TLS"
+        },
+        {
+          "from": "eventbridge",
+          "to": "dispatch_lambda",
+          "payload": "trade.signal.received event",
+          "protocol": "EventBridge rule"
+        },
+        {
+          "from": "eventbridge",
+          "to": "streams_lambda",
+          "payload": "trade.signal.received event (parallel consumer)",
+          "protocol": "EventBridge rule"
+        },
+        {
+          "from": "health_lambda",
+          "to": "apigw",
+          "payload": "synthetic health-check POST",
+          "protocol": "HTTPS"
+        },
+        {
+          "from": "health_lambda",
+          "to": "cw_alarm",
+          "payload": "availability metric",
+          "protocol": "CloudWatch"
+        },
+        {
+          "from": "cw_alarm",
+          "to": "pagerduty_sub",
+          "payload": "P1 alarm → PagerDuty incident",
+          "protocol": "SNS → HTTPS"
+        },
+        {
+          "from": "s3_datalake",
+          "to": "s3_datalake",
+          "payload": "object replication to secondary region",
+          "protocol": "S3 CRR"
+        }
+      ],
+      "delta": [
+        "DynamoDB Global Tables: active-active replica in second region, RPO ~1s.",
+        "S3 Cross-Region Replication: data lake mirrored to DR region.",
+        "EventBridge bus replaces direct SQS trigger: decoupled multi-consumer fan-out, event archive for replay.",
+        "Synthetic health probe Lambda runs every minute; feeds availability alarm.",
+        "PagerDuty escalation added to SNS for P1 alarms (ingest down, DLQ depth spike).",
+        "EventBridge event archive enables replay of missed signals after downstream incident."
+      ],
+      "tradeoffs": [
+        "Global Tables cost: ~2× DynamoDB reads/writes — still negligible at <1k/mo but non-trivial at scale.",
+        "EventBridge adds ~$1/million events (free tier: 1M/mo) — effectively free at this volume.",
+        "Multi-region adds operational complexity (key replication, IAM cross-region roles) disproportionate to current traffic — justified only if ingest availability SLA hardens beyond best-effort.",
+        "Synthetic probe raises alarm within 1–2 min of ingest failure; no active-active failover route to second region is wired (DR is data-only, not traffic failover — upgrade to Route 53 failover if needed)."
+      ],
+      "costDrivers": [
+        {
+          "service": "CloudFront",
+          "unit": "$/GB transferred",
+          "estimateRange": "$0.043–$0.425/mo",
+          "note": "Data transfer out to internet, first 10TB/month tier (North America). First 1TB/month is free."
+        },
+        {
+          "service": "CloudFront",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.075–$0.750/mo",
+          "note": "HTTPS requests ($0.0075 per 10,000). North America/Europe."
+        },
+        {
+          "service": "WAF",
+          "unit": "$/web-ACL-month",
+          "estimateRange": "$15.00–$15.00/mo",
+          "note": "Per web ACL/month. Add ~$1.00 per rule/month and ~$0.60 per 1M requests inspected."
+        },
+        {
+          "service": "Lambda",
+          "unit": "$/GB-second",
+          "estimateRange": "$0.167–$1.67/mo",
+          "note": "Compute duration: $0.0000166667 per GB-second (x86). Multiply by memoryGB x durationSeconds per invocation."
+        },
+        {
+          "service": "Lambda",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.020–$0.200/mo",
+          "note": "On-demand list price ($0.20 per 1M requests). Excludes Free Tier."
+        },
+        {
+          "service": "DynamoDB",
+          "unit": "per 1k read units",
+          "estimateRange": "$0.013–$0.125/mo",
+          "note": "On-demand read request units ($0.125 per 1M RRU). 1 RRU = 1 strongly-consistent read up to 4KB."
+        },
+        {
+          "service": "DynamoDB",
+          "unit": "per 1k write units",
+          "estimateRange": "$0.063–$0.625/mo",
+          "note": "On-demand write request units ($0.625 per 1M WRU). 1 WRU = 1 write up to 1KB."
+        },
+        {
+          "service": "SQS",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.040–$0.400/mo",
+          "note": "Standard queue requests ($0.40 per 1M). First 1M/month free. FIFO is $0.50 per 1M."
+        },
+        {
+          "service": "S3",
+          "unit": "$/GB-month",
+          "estimateRange": "$0.230–$2.30/mo",
+          "note": "S3 Standard storage, first 50TB/month tier."
+        },
+        {
+          "service": "S3",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.500–$5.00/mo",
+          "note": "PUT/COPY/POST/LIST requests per 1,000. GET/SELECT requests are ~$0.0004 per 1,000."
+        },
+        {
+          "service": "CloudWatch Logs",
+          "unit": "$/GB ingested",
+          "estimateRange": "$0.010–$0.100/mo",
+          "note": "CloudWatch Logs ingestion $0.50/GB (first 10GB/mo free in some accounts). Archival storage is cheaper; Insights queries extra."
+        },
+        {
+          "service": "SNS",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.050–$0.500/mo",
+          "note": "Standard topic API requests ($0.50 per 1M). Delivery (HTTP/SMS/email) priced separately."
+        },
+        {
+          "service": "X-Ray",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.500–$5.00/mo",
+          "note": "X-Ray traces: $5.00 per 1M traces recorded (first 100k/mo free)."
+        },
+        {
+          "service": "EventBridge",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.100–$1.00/mo",
+          "note": "Custom event-bus events: $1.00 per 1M events published. Pipes/schema registry priced separately."
+        }
+      ]
+    }
+  ],
+  "keyDecisions": [
+    {
+      "decision": "Compute model for the ingest endpoint",
+      "chosen": "Lambda behind API Gateway (HTTP API)",
+      "alternativesConsidered": [
+        "EC2/Fargate always-on container",
+        "App Runner"
+      ],
+      "rationale": "At <1k/mo the per-invocation model costs cents vs always-on VMs at ~$15–50/mo floor; reliability pillar is satisfied because Lambda runs across multiple AZs by default, meeting best-effort tolerance."
+    },
+    {
+      "decision": "Webhook authenticity — TradingView has no HMAC; use shared-secret token",
+      "chosen": "Bearer token / passphrase in Authorization header validated in Lambda before any side-effect",
+      "alternativesConsidered": [
+        "HMAC-SHA256 signature (ideal but TradingView does not sign payloads)",
+        "API Gateway API key (no replay protection)"
+      ],
+      "rationale": "A secret bearer token in the TradingView alert message is the only feasible tamper-detection mechanism the platform supports; Lambda rejects mismatched tokens before writing, preventing forged signals and billing fraud."
+    },
+    {
+      "decision": "Canonical trade store",
+      "chosen": "DynamoDB on-demand (single table, tradeId partition key)",
+      "alternativesConsidered": [
+        "Aurora Serverless v2 Postgres",
+        "S3-only flat files"
+      ],
+      "rationale": "On-demand DynamoDB has zero idle cost, scales instantly to any burst, and the AI step can query or stream via DynamoDB Streams — performance efficiency + cost optimization pillars win at this traffic level."
+    },
+    {
+      "decision": "Fan-out to existing frontend",
+      "chosen": "SQS queue → Lambda dispatcher → HTTP POST to existing endpoint",
+      "alternativesConsidered": [
+        "Direct synchronous HTTP call from ingest Lambda",
+        "EventBridge pipe"
+      ],
+      "rationale": "Decoupling ingest from delivery via SQS means a slow or failing downstream cannot block or lose the ingest write; reliability pillar: at-least-once + DLQ absorbs transient frontend outages."
+    },
+    {
+      "decision": "AI evaluation step (future) — pre-wire stub now",
+      "chosen": "S3 data lake + stub Lambda triggered by DynamoDB Streams",
+      "alternativesConsidered": [
+        "Dump to RDS for SQL queries",
+        "Build full AI step now"
+      ],
+      "rationale": "Writing raw signals to S3 (Parquet/JSON) from a Streams-triggered Lambda is zero-cost at this volume and gives the Python evaluation job a durable, queryable dataset without blocking current scope."
+    }
+  ],
+  "securityFloor": [
+    "Encrypt all data at rest (KMS / service-native SSE), preferring customer-managed keys.",
+    "Enforce TLS in transit everywhere; terminate HTTPS at the edge and reject plaintext.",
+    "Least-privilege IAM: scoped per-service roles, no wildcards, no long-lived access keys.",
+    "Enable S3 Block Public Access account-wide so no bucket or object can be made public.",
+    "Keep the data tier private: VPC-bound stores in private subnets with no public route; managed/serverless stores (DynamoDB/S3) are already private via IAM and need no VPC or NAT.",
+    "Store secrets in AWS Secrets Manager / SSM Parameter Store — never in code or images.",
+    "Front public endpoints with CloudFront + AWS WAF (managed + rate-based rules); Shield Standard for L3/L4.",
+    "Enable CloudTrail plus S3/CloudFront/ALB access logs and VPC Flow Logs for audit."
+  ],
+  "recommendedTier": "balanced",
+  "recommendationRationale": ""
+}

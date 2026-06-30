@@ -226,11 +226,18 @@ function applyTierDelta(prev: GeneratedTier, d: GeneratedTierDelta): GeneratedTi
   const removeEdge = new Set(d.removeEdges.map(edgeKey));
   const edges = new Map(prev.edges.filter((e) => !removeEdge.has(edgeKey(e))).map((e) => [edgeKey(e), e] as const));
   for (const e of d.addEdges) edges.set(edgeKey(e), e);
+  // A removed node takes its edges with it. The model routinely lists a node in
+  // removeNodeIds (e.g. budget's single box → split into Fargate at balanced) but
+  // forgets the edges that touched it, which would reconstruct into a dangling edge.
+  // Drop any edge whose endpoint was removed and not re-added — an EXPLICIT removal,
+  // so this never masks a typo'd id (those still fail graphHasNoDanglingEdges).
+  const droppedByRemoval = (id: string): boolean => removeNode.has(id) && !nodes.has(id);
+  const wiredEdges = [...edges.values()].filter((e) => !droppedByRemoval(e.from) && !droppedByRemoval(e.to));
   return {
     name: d.name,
     summary: d.summary,
     nodes: [...nodes.values()],
-    edges: [...edges.values()],
+    edges: wiredEdges,
     delta: d.delta,
     tradeoffs: d.tradeoffs,
   };

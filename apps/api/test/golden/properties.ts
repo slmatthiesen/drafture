@@ -17,6 +17,10 @@ import type { SecurityBaseline } from "@drafture/kb";
 
 import { TIER_NAMES } from "../../src/schema/architecture.js";
 import type { ArchitectureResult, Tier } from "../../src/schema/architecture.js";
+import { graphHasNoDanglingEdges, primaryDatastoreReachable, isPrimaryDatastore } from "../../src/pipeline/completeness.js";
+import { budgetIdleFloor } from "../../src/pipeline/costFloor.js";
+// Re-export so the golden test (and any caller) keeps importing them from here.
+export { graphHasNoDanglingEdges, primaryDatastoreReachable };
 
 const baselines = securityBaselines as SecurityBaseline[];
 
@@ -32,7 +36,10 @@ export type PropertyName =
   | "computeMatchesDecision"
   | "datastoreMatchesDecision"
   | "graphHasNoDanglingEdges"
-  | "primaryDatastoreReachable";
+  | "primaryDatastoreReachable"
+  | "graphHasNoOrphanNodes"
+  | "readPathWhenUiImplied"
+  | "budgetTierIsCostHonest";
 
 export interface PropertyResult {
   name: PropertyName;
@@ -275,16 +282,22 @@ const ALERT_SINK_ROLE_KEYWORDS = [
 
 /**
  * True when a node matches a queue keyword but is NOT a work queue that needs
- * DLQ + idempotency. Two non-queue uses of these keywords:
+ * DLQ + idempotency. Three non-queue uses of these keywords:
  *   1. Alert sink — an SNS/notification node whose role is an alarm/on-call path
  *      (CloudWatch alarm → SNS → human); no business payload.
  *   2. Scheduler — EventBridge *Scheduler* / a cron trigger fires a job on a timer;
  *      it's a clock, not an at-least-once work queue (the JOB it triggers may need a
  *      DLQ, and that job's own SQS node would still be checked).
+ *   3. Primary datastore — a store whose ROLE mentions "message" (DynamoDB "message +
+ *      session store", a "message" table) is a datastore, not a work queue. The bare
+ *      "message" keyword matched it and demanded a DLQ/idempotency it has no use for.
  */
 function isNonQueueNode(awsService: string, role: string): boolean {
   const svc = awsService.toLowerCase();
   const r = role.toLowerCase();
+  // A primary datastore is never a work queue, however its role is phrased — a
+  // "message store" persists messages, it doesn't deliver them at-least-once.
+  if (isPrimaryDatastore(awsService, role)) return true;
   const isPubSubNotifier = svc.includes("sns") || svc.includes("notification");
   // An SNS *subscription* node is a delivery endpoint (email/Slack/HTTP), never a
   // work queue — regardless of how its role is phrased.
@@ -365,15 +378,47 @@ function classifyChosenCompute(chosen: string): ComputeChoice {
   return "unknown";
 }
 
-function tierComputeKinds(tier: Tier): { serverless: string[]; alwayson: string[] } {
+function computeKindsOf(nodes: Tier["nodes"]): { serverless: string[]; alwayson: string[] } {
   const serverless: string[] = [];
   const alwayson: string[] = [];
-  for (const n of tier.nodes) {
+  for (const n of nodes) {
     const surface = `${n.awsService} ${n.role}`.toLowerCase();
     if (SERVERLESS_COMPUTE.some((kw) => new RegExp(`\\b${kw}\\b`).test(surface))) serverless.push(n.awsService);
     if (ALWAYSON_COMPUTE.some((kw) => new RegExp(`\\b${kw}\\b`).test(surface))) alwayson.push(n.awsService);
   }
   return { serverless, alwayson };
+}
+
+// PER-SERVICE SCOPING (hybrid-compute false-positive fix). A compute decision often
+// targets a SPECIFIC component ("Render service compute model" → Lambda) rather than
+// the whole tier. The honest cost-first design is now frequently HYBRID — an always-on
+// box for the web/orchestrator PLUS a scale-to-zero Lambda for a spiky render — so
+// judging a "render = Lambda" decision against the web box's EC2 is a false positive.
+// We scope a SERVERLESS decision to the nodes it is about: derive subject tokens from
+// the decision's question text and check only the nodes whose surface matches one. A
+// decision with no locatable subject (tokens empty) falls back to the whole tier, so
+// the canonical "serverless decision drawn entirely as EC2+ALB" bug is still caught.
+// Only the serverless direction is scoped; the always-on check stays tier-wide (a
+// store-hosting decision that says "EC2 box" must still find the box anywhere).
+const COMPUTE_SCOPE_STOPWORDS = new Set([
+  "compute", "model", "tier", "service", "hosting", "runtime", "shape", "split",
+  "placement", "strategy", "mechanism", "budget", "single", "managed", "stack",
+  "host", "layer", "the", "for", "and", "vs", "with", "of", "at", "an", "a",
+]);
+
+function decisionScopeTokens(decision: string): string[] {
+  return decision
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter((w) => w.length >= 4 && !COMPUTE_SCOPE_STOPWORDS.has(w))
+    .filter((w) => w !== "lambda" && w !== "serverless" && !ALWAYSON_COMPUTE.some((k) => k.includes(w) || w.includes(k)));
+}
+
+/** Nodes a scoped decision is ABOUT; the whole tier when the subject isn't locatable
+ *  (empty tokens → unscoped → strict tier-wide check). */
+function scopedComputeNodes(tier: Tier, tokens: string[]): Tier["nodes"] {
+  if (tokens.length === 0) return tier.nodes;
+  return tier.nodes.filter((n) => tokens.some((t) => `${n.awsService} ${n.role}`.toLowerCase().includes(t)));
 }
 
 /**
@@ -391,14 +436,19 @@ export const computeMatchesDecision: Property = (result) => {
   for (const d of computeDecisions) {
     const choice = classifyChosenCompute(d.chosen);
     if (choice === "unknown") continue;
+    const scopeTokens = decisionScopeTokens(d.decision);
     for (const tier of result.tiers) {
-      const kinds = tierComputeKinds(tier);
-      if (choice === "serverless" && kinds.alwayson.length > 0) {
-        offenders.push(
-          `${tier.name}: decision chose serverless ("${d.chosen}") but tier runs always-on compute [${kinds.alwayson.join(", ")}]`,
-        );
+      if (choice === "serverless") {
+        // Scope to the nodes this serverless decision is about, so a per-service
+        // Lambda decision isn't contradicted by an unrelated always-on box (hybrid).
+        const scoped = computeKindsOf(scopedComputeNodes(tier, scopeTokens));
+        if (scoped.alwayson.length > 0) {
+          offenders.push(
+            `${tier.name}: decision chose serverless ("${d.chosen}") but its scoped compute runs always-on [${scoped.alwayson.join(", ")}]`,
+          );
+        }
       }
-      if (choice === "alwayson" && kinds.alwayson.length === 0) {
+      if (choice === "alwayson" && computeKindsOf(tier.nodes).alwayson.length === 0) {
         offenders.push(
           `${tier.name}: decision chose always-on compute ("${d.chosen}") but tier has no always-on compute node`,
         );
@@ -472,9 +522,21 @@ function tierStoreKinds(tier: Tier): { serverless: string[]; vpcbound: string[] 
 
 /**
  * Coherence: a stated datastore decision must not be contradicted by the tiers'
- * datastore nodes. A "serverless" datastore decision with a VPC-bound store node
- * present (the case that secretly adds NAT), or a "vpcbound" decision with no such
- * store anywhere, is a hard fail. Mixed/unknown decisions pass.
+ * datastore nodes. The two directions scope DIFFERENTLY:
+ *
+ *  - serverless decision ↔ VPC-bound node: checked PER TIER. A serverless store
+ *    decision drawn as a VPC-bound store secretly adds NAT, and that harm is local
+ *    to the tier that carries the store, so any such tier is a hard fail.
+ *
+ *  - vpcbound decision ↔ store absent: checked DESIGN-WIDE ("no such store
+ *    anywhere"). A datastore decision is commonly a TIER LADDER ("self-managed
+ *    Postgres at budget; RDS at balanced; Aurora at resilient") — the budget tier
+ *    legitimately DEFERS the managed VPC store, so demanding EVERY tier carry it is
+ *    a false positive. The real contradiction is naming a VPC-bound store that NO
+ *    tier ever draws; we fail only then. (Mirrors `computeMatchesDecision`'s
+ *    scoping fix: judge the decision against where it actually applies, not blanket.)
+ *
+ * Mixed/unknown decisions pass.
  */
 export const datastoreMatchesDecision: Property = (result) => {
   const storeDecisions = result.keyDecisions.filter((d) =>
@@ -484,16 +546,21 @@ export const datastoreMatchesDecision: Property = (result) => {
   for (const d of storeDecisions) {
     const choice = classifyChosenStore(d.chosen);
     if (choice === "unknown") continue;
-    for (const tier of result.tiers) {
-      const kinds = tierStoreKinds(tier);
-      if (choice === "serverless" && kinds.vpcbound.length > 0) {
-        offenders.push(
-          `${tier.name}: decision chose a serverless datastore ("${d.chosen}") but tier runs a VPC-bound store [${kinds.vpcbound.join(", ")}] (forces NAT)`,
-        );
+    if (choice === "serverless") {
+      for (const tier of result.tiers) {
+        const kinds = tierStoreKinds(tier);
+        if (kinds.vpcbound.length > 0) {
+          offenders.push(
+            `${tier.name}: decision chose a serverless datastore ("${d.chosen}") but tier runs a VPC-bound store [${kinds.vpcbound.join(", ")}] (forces NAT)`,
+          );
+        }
       }
-      if (choice === "vpcbound" && kinds.vpcbound.length === 0) {
+    }
+    if (choice === "vpcbound") {
+      const presentSomewhere = result.tiers.some((t) => tierStoreKinds(t).vpcbound.length > 0);
+      if (!presentSomewhere) {
         offenders.push(
-          `${tier.name}: decision chose a VPC-bound datastore ("${d.chosen}") but tier has no such store node`,
+          `decision chose a VPC-bound datastore ("${d.chosen}") but no tier draws such a store node`,
         );
       }
     }
@@ -523,48 +590,56 @@ export const exactlyThreeTiers: Property = (result) => {
 
 // --- Completeness critic (R-completeness) -----------------------------------
 //
-// Structural completeness the model must satisfy regardless of domain. These
-// matter MORE since tier-delta emission: balanced/resilient are reconstructed from
-// deltas, so a delta that references a renamed/removed node id would otherwise
-// produce a silently-broken graph. Both checks are high-confidence (no realistic
-// false positive), so they gate launch.
+// The two structural-completeness checks (graphHasNoDanglingEdges,
+// primaryDatastoreReachable) now live in `src/pipeline/completeness.ts` so the
+// SAME logic gates the offline eval AND rides the runtime telemetry line
+// (`completenessOk`). They are imported above and slot into ALL_PROPERTIES below.
 
-// PRIMARY data stores only (OLTP / cache / search) — deliberately EXCLUDES S3,
-// which is often a legitimately-unconnected asset/audit-log sink. A primary store
-// with no edge is always an incomplete design (you can't read or write it).
-const PRIMARY_DATASTORE_KEYWORDS = [
-  "dynamodb", "rds", "aurora", "elasticache", "redis", "memcached",
-  "opensearch", "elasticsearch", "documentdb", "neptune", "redshift", "timestream",
+// An unwired node is usually a bug (a delta added it but never connected it), but a
+// few service kinds are LEGITIMATELY edgeless sinks: passive asset stores and the
+// audit/log destinations the security floor requires (S3 assets, CloudWatch Logs,
+// CloudTrail, Config). Exempt those — mirroring why primaryDatastoreReachable skips
+// S3 — so the check fires only on genuinely-orphaned active nodes (a stray compute,
+// queue, or primary datastore left dangling).
+const ORPHAN_EXEMPT_KEYWORDS = [
+  "s3", "cloudwatch logs", "cloudwatch log", "cloudtrail", "aws config", "log group",
+  "access log", "audit", "flow log",
+  // Passive OBSERVABILITY surfaces — edgeless by nature, like CloudWatch Logs:
+  // X-Ray traces instrument services in-process, so they carry no graph edge.
+  "x-ray", "xray",
+  // Passive build/deploy INFRA — an image registry that compute pulls from at task
+  // launch, not a runtime data-flow participant (present in every container design).
+  "ecr", "elastic container registry", "container registry",
+  // Passive PROTECTION LAYERS — a web ACL / DDoS subscription ATTACHES to CloudFront/
+  // ALB/Route 53 rather than sitting in the data flow. The security floor REQUIRES edge
+  // protection, so it's present in most designs; models wire it INCONSISTENTLY (some draw
+  // client→WAF→CloudFront, some leave the ACL as a bare association node), which made the
+  // gate false-fail honest designs. Edgeless here is legitimate, like the audit-log sinks.
+  "waf", "shield",
+  // Passive EGRESS INFRA — a NAT gateway gives private-subnet resources outbound egress;
+  // it is not a data-flow endpoint (the cost engine already models it as a synthetic line,
+  // not a graph hop), so a drawn-but-unwired NAT node is not an orphan bug. Multi-word key
+  // so the bare token "nat" can't collide with words like "coordinate"/"designate".
+  "nat gateway",
 ] as const;
 
-function isPrimaryDatastore(awsService: string, role: string): boolean {
+function isOrphanExempt(awsService: string, role: string): boolean {
   const s = `${awsService} ${role}`.toLowerCase();
-  return PRIMARY_DATASTORE_KEYWORDS.some((kw) => s.includes(kw));
+  if (ORPHAN_EXEMPT_KEYWORDS.some((kw) => s.includes(kw))) return true;
+  // A CloudWatch Dashboard is a passive metric-viz surface (edgeless like a log
+  // group), whichever word holds "dashboard" — service "CloudWatch Dashboard" OR
+  // service "CloudWatch" + role "...dashboard". Require BOTH tokens so a bare
+  // user-facing "dashboard" (a UI_NODE that SHOULD be wired) is never exempted.
+  if (s.includes("cloudwatch") && s.includes("dashboard")) return true;
+  return false;
 }
 
-/** Every edge endpoint must be a real node `id` in that tier (or the literal
- *  "client"). A dangling edge is always a bug — and the canonical failure mode of a
- *  bad tier-delta (an addEdge referencing a node id that was renamed or removed). */
-export const graphHasNoDanglingEdges: Property = (result) => {
-  const offenders: string[] = [];
-  for (const tier of result.tiers) {
-    const ids = new Set(tier.nodes.map((n) => n.id));
-    ids.add("client");
-    tier.edges.forEach((e, i) => {
-      if (!ids.has(e.from)) offenders.push(`${tier.name}:edge[${i}] from unknown '${e.from}'`);
-      if (!ids.has(e.to)) offenders.push(`${tier.name}:edge[${i}] to unknown '${e.to}'`);
-    });
-  }
-  return {
-    name: "graphHasNoDanglingEdges",
-    ok: offenders.length === 0,
-    reason: offenders.length === 0 ? "every edge references a real node" : offenders.join("; "),
-  };
-};
-
-/** A primary datastore (DynamoDB/RDS/Aurora/cache/search) must be touched by at
- *  least one edge — an unwired primary store is an incomplete design. */
-export const primaryDatastoreReachable: Property = (result) => {
+/** Every node must participate in at least one edge — an unwired active node is
+ *  the canonical failure mode of a tier-delta that ADDS a node but never wires it.
+ *  Passive asset/audit-log sinks (S3, CloudWatch Logs, CloudTrail) are exempt: they
+ *  are legitimately edgeless in the graph, same exclusion primaryDatastoreReachable
+ *  makes for S3. */
+export const graphHasNoOrphanNodes: Property = (result) => {
   const offenders: string[] = [];
   for (const tier of result.tiers) {
     const wired = new Set<string>();
@@ -573,15 +648,99 @@ export const primaryDatastoreReachable: Property = (result) => {
       wired.add(e.to);
     }
     for (const n of tier.nodes) {
-      if (isPrimaryDatastore(n.awsService, n.role) && !wired.has(n.id)) {
-        offenders.push(`${tier.name}: datastore '${n.id}' (${n.awsService}) has no edge`);
+      if (!wired.has(n.id) && !isOrphanExempt(n.awsService, n.role)) {
+        offenders.push(`${tier.name}: node '${n.id}' (${n.awsService}) has no edge`);
       }
     }
   }
   return {
-    name: "primaryDatastoreReachable",
+    name: "graphHasNoOrphanNodes",
     ok: offenders.length === 0,
-    reason: offenders.length === 0 ? "every primary datastore is wired into the graph" : offenders.join("; "),
+    reason: offenders.length === 0 ? "every active node is wired into the graph" : offenders.join("; "),
+  };
+};
+
+// A UI-implying node means the design serves user-facing reads, so a primary
+// datastore must be REACHABLE from the client through compute — data the page shows
+// can't be floating off an edge the client can't traverse. Detection is from the
+// GRAPH (the result carries no description): a CDN / static-site / dashboard / web
+// front-end node implies a UI.
+const UI_NODE_KEYWORDS = [
+  "cloudfront", "cdn", "dashboard", "frontend", "front-end", "front end",
+  "static site", "static website", "web app", "spa", "amplify",
+] as const;
+
+const COMPUTE_NODE_KEYWORDS = [
+  "lambda", "ec2", "fargate", "ecs", "eks", "api gateway", "appsync",
+  "app runner", "elastic beanstalk",
+] as const;
+
+function matchesAny(awsService: string, role: string, kws: readonly string[]): boolean {
+  const s = `${awsService} ${role}`.toLowerCase();
+  return kws.some((kw) => s.includes(kw));
+}
+
+/** WARN-ONLY (not yet in ALL_PROPERTIES): when a tier has both a UI-implying node
+ *  and a primary datastore, there should be a read path client → compute → datastore
+ *  so the front-end can actually fetch what it displays. Lenient by design — it only
+ *  fires when a datastore exists with NO compute neighbor at all (the clear
+ *  "unreadable store behind a UI" case), to avoid false-fails on indirect paths
+ *  while we validate it against the golden set before promoting it to a hard gate. */
+export const readPathWhenUiImplied: Property = (result) => {
+  const offenders: string[] = [];
+  for (const tier of result.tiers) {
+    const hasUi = tier.nodes.some((n) => matchesAny(n.awsService, n.role, UI_NODE_KEYWORDS));
+    if (!hasUi) continue;
+
+    const computeIds = new Set(
+      tier.nodes.filter((n) => matchesAny(n.awsService, n.role, COMPUTE_NODE_KEYWORDS)).map((n) => n.id),
+    );
+    const neighbors = new Map<string, Set<string>>();
+    for (const e of tier.edges) {
+      (neighbors.get(e.from) ?? neighbors.set(e.from, new Set()).get(e.from)!).add(e.to);
+      (neighbors.get(e.to) ?? neighbors.set(e.to, new Set()).get(e.to)!).add(e.from);
+    }
+    for (const n of tier.nodes) {
+      if (!isPrimaryDatastore(n.awsService, n.role)) continue;
+      const touchesCompute = [...(neighbors.get(n.id) ?? [])].some((id) => computeIds.has(id));
+      if (!touchesCompute) {
+        offenders.push(`${tier.name}: datastore '${n.id}' has no compute neighbor but the tier serves a UI`);
+      }
+    }
+  }
+  return {
+    name: "readPathWhenUiImplied",
+    ok: offenders.length === 0,
+    reason: offenders.length === 0 ? "UI-facing tiers reach their datastore through compute" : offenders.join("; "),
+  };
+};
+
+// --- Cost-honest Budget (docs/plans/2026-06-29-003) -------------------------
+//
+// Budget = cheapest CORRECT, so its IDLE FLOOR (what it bills at zero traffic) must
+// be lean: serverless-first (~$0), or a single justified store / one box. The
+// failure mode we measured: Budget reaching for the always-on managed quartet
+// (NAT + ALB + Fargate + RDS, sometimes +ElastiCache) and quoting a cost-conscious
+// user $100+/mo idle — which the structural gate happily certifies. Calibrated on
+// real designs: serverless ones floor at $0 / 0 always-on services; bloated ones at
+// $100+ / 4–5. A single PostGIS store (~$12 / 1 service) or one box (1) sits far
+// below. So: flag ≥3 stacked always-on services OR a >$50/mo floor.
+//
+// WARN-ONLY for now (not in ALL_PROPERTIES): the fix is the generation POSTURE
+// (serverless-first prompt/KB); this gate MEASURES it and guards against regression.
+// Promote to a hard gate once the posture change lands and the golden set is green.
+const BUDGET_FLOOR_MAX_USD = 50;
+const BUDGET_MAX_ALWAYS_ON_SERVICES = 2;
+
+export const budgetTierIsCostHonest: Property = (result) => {
+  const floor = budgetIdleFloor(result);
+  const bloated = floor.services.length > BUDGET_MAX_ALWAYS_ON_SERVICES || floor.usd > BUDGET_FLOOR_MAX_USD;
+  return {
+    name: "budgetTierIsCostHonest",
+    ok: !bloated,
+    reason: bloated
+      ? `budget idle floor $${floor.usd}/mo across ${floor.services.length} always-on services [${floor.services.join(", ")}] — Budget should be serverless-first or a single box; the managed split belongs in Balanced+`
+      : `budget idle floor $${floor.usd}/mo (${floor.services.length} always-on service(s)) — cost-honest`,
   };
 };
 
@@ -598,6 +757,12 @@ export const ALL_PROPERTIES: readonly Property[] = [
   datastoreMatchesDecision,
   graphHasNoDanglingEdges,
   primaryDatastoreReachable,
+  graphHasNoOrphanNodes,
+  // readPathWhenUiImplied and budgetTierIsCostHonest are intentionally NOT in the gate
+  // yet — they ship warn-only (exported + tested) until validated against the 30-prompt
+  // golden set, so a false-fail can't block a launch-blocking gate on day one.
+  // budgetTierIsCostHonest in particular waits on the serverless-first posture change
+  // (docs/plans/2026-06-29-003): today most tiers would fail it, by design.
 ];
 
 export interface AggregateResult {

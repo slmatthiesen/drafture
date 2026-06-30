@@ -20,8 +20,15 @@ export interface TelemetryRecord {
   latencyMs: number;
   /** USD debited to the spend ledger for this request (0 on cache hit). */
   costUsd: number;
-  /** Optional outcome marker: "ok" | "clarify" | "refused" | "error". */
+  /** Optional outcome marker: "ok" | "clarify" | "refused" | "error" | "library". */
   outcome: string;
+  /** Generation model id (e.g. claude-sonnet-4-6). Omitted on routes with no model. */
+  model?: string;
+  /** True when the learning network served/grounded this request (instant or exemplars). */
+  retrievalHit?: boolean;
+  /** True when the generated design passed the structural-completeness checks.
+   *  Only set on a real generation; undefined on cache/library/clarify lines. */
+  completenessOk?: boolean;
 }
 
 export type TelemetrySink = (line: string) => void;

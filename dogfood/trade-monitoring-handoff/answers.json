@@ -1,0 +1,5 @@
+[
+  "Downtime tolerance: best-effort — a few minutes of outage on the ingest endpoint is acceptable.",
+  "Data sensitivity: none — trade signals are not PII or regulated data.",
+  "Expected traffic: under 1,000 requests per month."
+]

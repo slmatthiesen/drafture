@@ -10,6 +10,7 @@ import {
   badArchitecture,
   incoherentComputeArchitecture,
   incoherentDatastoreArchitecture,
+  tierLadderDatastoreArchitecture,
   alertOnlySnsArchitecture,
   fakeProvider,
 } from "./fixtures.js";
@@ -27,6 +28,9 @@ import {
   datastoreMatchesDecision,
   graphHasNoDanglingEdges,
   primaryDatastoreReachable,
+  graphHasNoOrphanNodes,
+  readPathWhenUiImplied,
+  budgetTierIsCostHonest,
 } from "./properties.js";
 
 const PASS_RATE_FLOOR = 0.9;
@@ -54,16 +58,20 @@ describe("property checkers on the known-good result", () => {
       datastoreMatchesDecision,
       graphHasNoDanglingEdges,
       primaryDatastoreReachable,
+      graphHasNoOrphanNodes,
+      readPathWhenUiImplied,
     ]) {
       const r = property(good);
       expect(r.ok, `${r.name}: ${r.reason}`).toBe(true);
     }
   });
 
-  it("the aggregator reports ok with all twelve properties green", () => {
+  it("the aggregator reports ok with all thirteen gated properties green", () => {
     const agg = runAllProperties(good);
     expect(agg.ok).toBe(true);
-    expect(agg.results).toHaveLength(12);
+    // readPathWhenUiImplied is warn-only (not in ALL_PROPERTIES yet), so the gate
+    // holds thirteen, not the fourteen exported checkers.
+    expect(agg.results).toHaveLength(13);
     expect(agg.results.every((r) => r.ok)).toBe(true);
   });
 });
@@ -81,6 +89,71 @@ describe("completeness critic flips to FAIL on a structurally-broken graph", () 
     broken.tiers[0]!.nodes.push({ id: "orphan_db", awsService: "DynamoDB", role: "unwired store", security: ["KMS at rest"] });
     expect(primaryDatastoreReachable(broken).ok).toBe(false);
     expect(primaryDatastoreReachable(goodArchitecture()).ok).toBe(true);
+  });
+
+  it("graphHasNoOrphanNodes fails on an unwired active node but exempts an S3 asset sink", () => {
+    const broken = structuredClone(goodArchitecture());
+    // An always-on compute node the delta forgot to wire — a real orphan.
+    broken.tiers[0]!.nodes.push({ id: "orphan_fn", awsService: "Lambda", role: "stray worker", security: ["least-priv role"] });
+    expect(graphHasNoOrphanNodes(broken).ok).toBe(false);
+    expect(graphHasNoOrphanNodes(goodArchitecture()).ok).toBe(true);
+
+    // A passive S3 sink with no edge is NOT an orphan (asset/audit destination).
+    const withSink = structuredClone(goodArchitecture());
+    withSink.tiers[0]!.nodes.push({ id: "audit", awsService: "S3", role: "access-log sink", security: ["block public access"] });
+    expect(graphHasNoOrphanNodes(withSink).ok).toBe(true);
+  });
+
+  it("exempts edgeless protection/egress-infra nodes (WAF, Shield, NAT) but still catches a real orphan", () => {
+    // Protection layers (a web ACL, a Shield subscription) ATTACH to CloudFront/ALB and a
+    // NAT gateway is passive egress infra — none are data-flow hops, and models wire them
+    // inconsistently. An edgeless one must NOT be flagged (was false-failing honest designs).
+    const withProtection = structuredClone(goodArchitecture());
+    withProtection.tiers[0]!.nodes.push(
+      { id: "waf", awsService: "AWS WAF", role: "rate-limit + managed rules", security: ["edge protection"] },
+      { id: "shield", awsService: "AWS Shield Advanced", role: "DDoS protection", security: ["edge protection"] },
+      { id: "nat", awsService: "NAT Gateway", role: "private-subnet egress", security: [] },
+    );
+    expect(graphHasNoOrphanNodes(withProtection).ok, graphHasNoOrphanNodes(withProtection).reason).toBe(true);
+
+    // But a genuinely-active sink (an unwired dead-letter QUEUE) is still a real orphan —
+    // a DLQ RECEIVES messages, so leaving it unwired is the delta-forgot-to-wire bug.
+    const withDlq = structuredClone(goodArchitecture());
+    withDlq.tiers[0]!.nodes.push({ id: "sqs_dlq", awsService: "SQS", role: "dead-letter queue", security: ["KMS at rest"] });
+    expect(graphHasNoOrphanNodes(withDlq).ok).toBe(false);
+  });
+
+  it("isolates the defect: only graphHasNoOrphanNodes fails on an orphaned active node", () => {
+    const broken = structuredClone(goodArchitecture());
+    broken.tiers[0]!.nodes.push({ id: "orphan_fn", awsService: "Lambda", role: "stray worker", security: ["least-priv role"] });
+    const failing = runAllProperties(broken).results.filter((r) => !r.ok).map((r) => r.name);
+    expect(failing).toEqual(["graphHasNoOrphanNodes"]);
+  });
+
+  it("readPathWhenUiImplied (warn-only) fails when a UI tier's datastore has no compute neighbor", () => {
+    const broken = structuredClone(goodArchitecture());
+    // Drop the fn→db edge so the DynamoDB store is wired only to nothing-compute.
+    const t = broken.tiers[0]!;
+    t.edges = t.edges.filter((e) => !(e.from === "fn" && e.to === "db"));
+    // Wire db to a non-compute node so it isn't ALSO a primaryDatastoreReachable failure.
+    t.edges.push({ from: "db", to: "assets", payload: "export", protocol: "HTTPS" });
+    expect(readPathWhenUiImplied(broken).ok).toBe(false);
+    expect(readPathWhenUiImplied(goodArchitecture()).ok).toBe(true);
+  });
+
+  it("budgetTierIsCostHonest (warn-only) passes serverless, fails the always-on managed stack", () => {
+    // The serverless good fixture floors at $0 — cost-honest.
+    expect(budgetTierIsCostHonest(goodArchitecture()).ok).toBe(true);
+    // Stack the always-on managed quartet onto the budget tier → bloat.
+    const bloated = structuredClone(goodArchitecture());
+    bloated.tiers[0]!.costDrivers.push(
+      { service: "NAT Gateway", unit: "$/hr", estimateRange: "$32.85–$65.70/mo", note: "" },
+      { service: "Application Load Balancer", unit: "$/hr", estimateRange: "$16.43–$32.85/mo", note: "" },
+      { service: "RDS PostgreSQL", unit: "$/hr", estimateRange: "$11.68–$23.36/mo", note: "" },
+    );
+    const r = budgetTierIsCostHonest(bloated);
+    expect(r.ok).toBe(false);
+    expect(r.reason).toContain("managed split belongs in Balanced");
   });
 });
 
@@ -117,6 +190,35 @@ describe("queuesAreResilient does not mis-flag an SNS alarm-notifier as a work q
 
   it("the whole aggregate is clean for the alert-only serverless design", () => {
     expect(runAllProperties(alertOnly).ok).toBe(true);
+  });
+
+  it("does not mis-flag a DynamoDB 'message store' as a work queue needing DLQ/idempotency", () => {
+    // The bare "message" queue keyword matched a DATASTORE whose role mentions messages
+    // (DynamoDB "message + session store"), demanding a DLQ it has no use for. A primary
+    // datastore is never a work queue, however its role is phrased.
+    const withMessageStore = structuredClone(goodArchitecture());
+    withMessageStore.tiers.forEach((t) => {
+      t.nodes = t.nodes.map((n) =>
+        n.id === "db" ? { ...n, awsService: "DynamoDB", role: "message + session store" } : n,
+      );
+    });
+    expect(queuesAreResilient(withMessageStore).ok, queuesAreResilient(withMessageStore).reason).toBe(true);
+  });
+});
+
+describe("primaryDatastoreReachable does not mis-classify a CloudWatch Dashboard as a datastore", () => {
+  it("an edgeless 'CloudWatch Dashboards' node is not flagged (the 'rds' in 'dashboaRDS' substring bug)", () => {
+    // `isPrimaryDatastore` matched "rds" inside "dashboards", flagging a passive metric
+    // dashboard as an unreachable primary datastore. Word-boundary matching rejects it.
+    const withDashboard = structuredClone(goodArchitecture());
+    withDashboard.tiers[0]!.nodes.push({
+      id: "cw_dashboard",
+      awsService: "CloudWatch Dashboards",
+      role: "golden-signal dashboard",
+      security: ["least-priv read role"],
+    });
+    expect(primaryDatastoreReachable(withDashboard).ok, primaryDatastoreReachable(withDashboard).reason).toBe(true);
+    expect(runAllProperties(withDashboard).ok).toBe(true);
   });
 });
 
@@ -157,6 +259,37 @@ describe("datastoreMatchesDecision detects the serverless-decision / VPC-bound-s
   it("isolates the defect: only datastoreMatchesDecision fails on the incoherent fixture", () => {
     const failing = runAllProperties(incoherent).results.filter((r) => !r.ok).map((r) => r.name);
     expect(failing).toEqual(["datastoreMatchesDecision"]);
+  });
+});
+
+describe("datastoreMatchesDecision does NOT false-fail an honest tier-ladder datastore decision (gap A)", () => {
+  const tierLadder = tierLadderDatastoreArchitecture();
+
+  it("passes: a 'RDS at balanced; Aurora at resilient' decision where budget defers the managed store", () => {
+    const r = datastoreMatchesDecision(tierLadder);
+    expect(r.ok, r.reason).toBe(true);
+  });
+
+  it("the whole aggregate stays green — deferring the managed store at budget is legitimate", () => {
+    expect(runAllProperties(tierLadder).ok).toBe(true);
+  });
+
+  it("still FAILS a vpcbound decision whose store is absent from EVERY tier (no over-relaxation)", () => {
+    // Strip the managed store from balanced+resilient too → the decision now names a
+    // VPC-bound engine no tier draws, which is a real contradiction the design-wide
+    // check must still catch.
+    const absent = {
+      ...tierLadder,
+      tiers: tierLadder.tiers.map((t) => ({
+        ...t,
+        nodes: t.nodes.map((n) =>
+          n.id === "db" ? { ...n, awsService: "DynamoDB", role: "primary datastore" } : n,
+        ),
+      })),
+    };
+    const r = datastoreMatchesDecision(absent);
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(/no tier draws/i);
   });
 });
 
