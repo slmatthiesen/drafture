@@ -15,7 +15,7 @@
  * deterministic name the emitters use, the IAM can't drift from the graph.
  */
 import type { ArchitectureNode } from "../../schema/architecture.js";
-import { colocatedHost, ref, type EmitCtx } from "./context.js";
+import { colocatedHost, lambdaNeedsVpc, ref, type EmitCtx } from "./context.js";
 import { type HclBlock, type Jsonish, jsonencode, policyDoc, raw } from "./hcl.js";
 import { COMPUTE_KEYS } from "./serviceKey.js";
 
@@ -27,9 +27,13 @@ const MANAGED_POLICY: Record<string, string> = {
   ec2: "arn:${local.partition}:iam::aws:policy/AmazonSSMManagedInstanceCore",
   lambda: "arn:${local.partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole",
 };
+// A VPC-attached Lambda needs ENI management on top of basic logging.
+const LAMBDA_VPC_POLICY = "arn:${local.partition}:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole";
 
-/** Build the inline least-priv statements for one compute node from its edges. */
-function inlineStatements(node: ArchitectureNode, ctx: EmitCtx): Jsonish[] {
+/** Build the inline least-priv statements for one compute node from its edges.
+ *  Exported so the Fargate emitter (which manages its own roles) reuses the SAME
+ *  edge-derivation as EC2/Lambda — IAM stays sourced from the graph, one place. */
+export function edgeIamStatements(node: ArchitectureNode, ctx: EmitCtx): Jsonish[] {
   const key = ctx.keyOf(node);
   const statements: Jsonish[] = [];
   let needsKmsMain = false;
@@ -80,6 +84,22 @@ function inlineStatements(node: ArchitectureNode, ctx: EmitCtx): Jsonish[] {
           Effect: "Allow",
           Action: ["xray:PutTraceSegments", "xray:PutTelemetryRecords", "xray:GetSamplingRules", "xray:GetSamplingTargets"],
           Resource: "*",
+        });
+        break;
+      case "eventbridge-bus":
+        statements.push({
+          Sid: `PutEvents_${ttf}`,
+          Effect: "Allow",
+          Action: "events:PutEvents",
+          Resource: raw(`aws_cloudwatch_event_bus.${ttf}.arn`),
+        });
+        break;
+      case "sqs":
+        statements.push({
+          Sid: `SendMessage_${ttf}`,
+          Effect: "Allow",
+          Action: ["sqs:SendMessage", "sqs:GetQueueAttributes", "sqs:GetQueueUrl"],
+          Resource: raw(`aws_sqs_queue.${ttf}.arn`),
         });
         break;
       case "postgres-selfmanaged": {
@@ -135,8 +155,8 @@ function inlineStatements(node: ArchitectureNode, ctx: EmitCtx): Jsonish[] {
       Resource: raw("aws_kms_key.main.arn"),
     });
   }
-  if (key === "ec2") {
-    // The CloudWatch agent ships app/access logs — scope to the tier's log-group tree.
+  if (key === "ec2" || key === "fargate") {
+    // The CloudWatch agent / awslogs driver ships logs — scope to the tier's log-group tree.
     statements.push({
       Sid: "CloudWatchLogsWrite",
       Effect: "Allow",
@@ -185,11 +205,11 @@ export function emitGlue(ctx: EmitCtx): HclBlock[] {
       ``,
       `resource "aws_iam_role_policy_attachment" "${tf}_managed" {`,
       `  role       = aws_iam_role.${tf}.name`,
-      `  policy_arn = "${MANAGED_POLICY[key]}"`,
+      `  policy_arn = "${key === "lambda" && lambdaNeedsVpc(ctx, node) ? LAMBDA_VPC_POLICY : MANAGED_POLICY[key]}"`,
       `}`,
     ];
 
-    const statements = inlineStatements(node, ctx);
+    const statements = edgeIamStatements(node, ctx);
     if (statements.length > 0) {
       lines.push(
         ``,

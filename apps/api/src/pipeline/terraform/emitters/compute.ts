@@ -6,7 +6,7 @@
  * emitters reference those addresses by deterministic name and never invent wiring.
  */
 import type { ArchitectureNode } from "../../../schema/architecture.js";
-import { colocatedHost, ref, type EmitCtx } from "../context.js";
+import { colocatedHost, lambdaNeedsVpc, ref, type EmitCtx } from "../context.js";
 import type { HclBlock } from "../hcl.js";
 
 const tag = (node: ArchitectureNode, kw: string): boolean =>
@@ -22,55 +22,16 @@ export function emitEc2(node: ArchitectureNode, ctx: EmitCtx): HclBlock[] {
   const tf = ctx.tf(node.id);
   const blocks: HclBlock[] = [];
 
-  // Minimal network — one public subnet (budget single-box posture). Shared by all
-  // EC2 nodes in the tier, so it's emitted once (dedupeKey).
-  blocks.push({
-    section: "Networking",
-    dedupeKey: "vpc",
-    hcl: [
-      `resource "aws_vpc" "main" {`,
-      `  cidr_block           = "10.0.0.0/16"`,
-      `  enable_dns_support   = true`,
-      `  enable_dns_hostnames = true`,
-      `  tags                 = { Name = "${ctx.prefix}-vpc" }`,
-      `}`,
-      ``,
-      `resource "aws_subnet" "public" {`,
-      `  vpc_id                  = aws_vpc.main.id`,
-      `  cidr_block              = "10.0.1.0/24"`,
-      `  availability_zone       = "${ctx.region}a"`,
-      `  map_public_ip_on_launch = true`,
-      `  tags                    = { Name = "${ctx.prefix}-public" }`,
-      `}`,
-      ``,
-      `resource "aws_internet_gateway" "main" {`,
-      `  vpc_id = aws_vpc.main.id`,
-      `  tags   = { Name = "${ctx.prefix}-igw" }`,
-      `}`,
-      ``,
-      `resource "aws_route_table" "public" {`,
-      `  vpc_id = aws_vpc.main.id`,
-      `  route {`,
-      `    cidr_block = "0.0.0.0/0"`,
-      `    gateway_id = aws_internet_gateway.main.id`,
-      `  }`,
-      `  tags = { Name = "${ctx.prefix}-public-rt" }`,
-      `}`,
-      ``,
-      `resource "aws_route_table_association" "public" {`,
-      `  subnet_id      = aws_subnet.public.id`,
-      `  route_table_id = aws_route_table.public.id`,
-      `}`,
-    ].join("\n"),
-  });
-
+  // The VPC + public subnet are emitted by networking.ts (it owns the VPC shape so a
+  // tier that ALSO has private workloads gets the multi-AZ layout). The box lands in
+  // the first public subnet.
   blocks.push({
     section: `EC2 — ${node.role}`,
     hcl: [
       `resource "aws_instance" "${tf}" {`,
       `  ami                    = var.ami_id`,
       `  instance_type          = "${instanceType(node)}"`,
-      `  subnet_id              = aws_subnet.public.id`,
+      `  subnet_id              = aws_subnet.public_a.id`,
       `  vpc_security_group_ids = [aws_security_group.${tf}.id]`,
       `  iam_instance_profile   = aws_iam_instance_profile.${tf}.name`,
       ``,
@@ -142,8 +103,9 @@ export function emitLambda(node: ArchitectureNode, ctx: EmitCtx): HclBlock[] {
     return to && ctx.keyOf(to) === "xray";
   }) || tag(node, "x-ray") || tag(node, "trace");
   const reserved = tag(node, "reserved concurrency");
+  const inVpc = lambdaNeedsVpc(ctx, node);
 
-  return [
+  const blocks: HclBlock[] = [
     {
       section: `Lambda — ${node.role}`,
       hcl: [
@@ -158,9 +120,21 @@ export function emitLambda(node: ArchitectureNode, ctx: EmitCtx): HclBlock[] {
         `  memory_size   = ${memory}`,
         `  timeout       = 300`,
         ...(reserved ? [`  reserved_concurrent_executions = 10`] : []),
-        ...(tracesXray ? [``, `  tracing_config { mode = "Active" }`] : []),
-        `  # No vpc_config — a non-VPC Lambda reaches public AWS endpoints directly`,
-        `  # (Secrets Manager, S3) with no NAT, the cost-honest budget default.`,
+        ...(tracesXray ? [``, `  tracing_config {`, `    mode = "Active"`, `  }`] : []),
+        ...(inVpc
+          ? [
+              ``,
+              `  # VPC-attached — it reaches a VPC-bound store (RDS/ElastiCache), so it runs`,
+              `  # in the private subnets and egresses through NAT.`,
+              `  vpc_config {`,
+              `    subnet_ids         = [aws_subnet.private_a.id, aws_subnet.private_b.id]`,
+              `    security_group_ids = [aws_security_group.${tf}.id]`,
+              `  }`,
+            ]
+          : [
+              `  # No vpc_config — a non-VPC Lambda reaches public AWS endpoints directly`,
+              `  # (Secrets Manager, S3) with no NAT, the cost-honest default.`,
+            ]),
         `}`,
         ``,
         `resource "aws_cloudwatch_log_group" "${tf}" {`,
@@ -171,4 +145,27 @@ export function emitLambda(node: ArchitectureNode, ctx: EmitCtx): HclBlock[] {
       ].join("\n"),
     },
   ];
+
+  if (inVpc) {
+    blocks.push({
+      section: `Lambda — ${node.role}`,
+      hcl: [
+        `resource "aws_security_group" "${tf}" {`,
+        `  name        = "${ctx.prefix}-${tf.replace(/_/g, "-")}-sg"`,
+        `  description = "Egress for VPC-attached Lambda ${node.role}"`,
+        `  vpc_id      = aws_vpc.main.id`,
+        `  egress {`,
+        `    description = "All outbound (NAT + VPC services)"`,
+        `    from_port   = 0`,
+        `    to_port     = 0`,
+        `    protocol    = "-1"`,
+        `    cidr_blocks = ["0.0.0.0/0"]`,
+        `  }`,
+        `  tags = { Name = "${ctx.prefix}-${tf.replace(/_/g, "-")}-sg" }`,
+        `}`,
+      ].join("\n"),
+    });
+  }
+
+  return blocks;
 }

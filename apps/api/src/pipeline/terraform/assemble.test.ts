@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+
 import { describe, it, expect } from "vitest";
 
 import { detectWireupGaps } from "../../routes/config.js";
@@ -151,14 +153,31 @@ describe("deterministic Terraform — IAM from edges AND security tags", () => {
   });
 });
 
+describe("deterministic Terraform — full dogfood coverage (budget + managed tiers)", () => {
+  // The real happy-hour design exercises the whole catalog: CloudFront/WAF/ACM, the
+  // budget single box, and the balanced/resilient managed stack (ALB, Fargate, RDS,
+  // ElastiCache, NAT, SQS+DLQ, EventBridge). Every tier must template fully with no gaps.
+  const design = JSON.parse(
+    readFileSync(new URL("../../../../../dogfood/happyhourfriends/design.json", import.meta.url), "utf8"),
+  ) as { tiers: Tier[] };
+  for (const tier of design.tiers) {
+    it(`${tier.name}: 100% coverage, zero wire-up gaps`, () => {
+      const { coverage, gaps } = assembleTier(tier, { region: "us-east-1" });
+      expect(coverage.unsupported).toEqual([]);
+      expect(coverage.ratio).toBe(1);
+      expect(gaps).toEqual([]);
+    });
+  }
+});
+
 describe("deterministic Terraform — hybrid fallback for unsupported services", () => {
   it("routes an unknown service to a TODO, lowers coverage, and STILL emits zero gaps", () => {
     const tier = budgetVocabularyTier(
-      [n("alb", "Application Load Balancer", "ingress", ["TLS"])],
-      [e("alb", "box")],
+      [n("stream", "Amazon Kinesis Data Streams", "event firehose", ["KMS at rest"])],
+      [e("box", "stream")],
     );
     const { code, coverage, gaps } = assembleTier(tier, { region: "us-east-1" });
-    expect(coverage.unsupported).toContain("alb");
+    expect(coverage.unsupported).toContain("stream");
     expect(coverage.ratio).toBeLessThan(1);
     expect(code).toContain("# TODO: unsupported service");
     expect(gaps).toEqual([]);

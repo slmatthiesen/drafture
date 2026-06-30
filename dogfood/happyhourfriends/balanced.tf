@@ -7,7 +7,7 @@
 ##############################################################################
 
 # =============================================================================
-# REFERENCE-ONLY Terraform for the BUDGET tier — generated
+# REFERENCE-ONLY Terraform for the BALANCED tier — generated
 # DETERMINISTICALLY from the design graph. Human review + hardening required.
 # =============================================================================
 
@@ -40,11 +40,6 @@ variable "aws_region" {
   default = "us-east-1"
 }
 
-variable "ami_id" {
-  type        = string
-  description = "Machine image for the application box (Amazon Linux 2023 recommended)."
-}
-
 variable "domain_name" {
   type        = string
   description = "Primary domain served by CloudFront, e.g. example.com."
@@ -56,11 +51,17 @@ variable "route53_zone_id" {
 }
 
 # A CloudFront https-only origin must present a trusted-CA cert for its hostname.
-# NEVER an EC2 instance public DNS name (no cert, churns on replace) — supply an
-# ALB or Elastic-IP + custom domain with an ACM cert. (rule: cloudfront-origin-tls)
-variable "ec2_origin_domain" {
+# NEVER an EC2 instance public DNS / raw ALB DNS name (no cert, churns on replace)
+# — supply a custom domain (ALB or EIP + Route53) with an ACM cert. (rule:
+# cloudfront-origin-tls)
+variable "origin_domain" {
   type        = string
-  description = "Custom domain (ALB / EIP + Route53) for the EC2 origin — MUST have a TLS cert."
+  description = "Custom domain (ALB / EIP + Route53) for the dynamic origin — MUST have a TLS cert."
+}
+
+variable "alb_certificate_arn" {
+  type        = string
+  description = "Regional ACM certificate ARN for the ALB HTTPS listener (origin_domain)."
 }
 
 variable "ops_email" {
@@ -83,7 +84,7 @@ locals {
 
 # General-purpose CMK — S3 buckets, EBS volumes, Secrets Manager.
 resource "aws_kms_key" "main" {
-  description             = "budget main CMK — S3, EBS, Secrets Manager"
+  description             = "balanced main CMK — S3, EBS, Secrets Manager"
   enable_key_rotation     = true
   deletion_window_in_days = 30
 
@@ -118,14 +119,14 @@ resource "aws_kms_key" "main" {
 }
 
 resource "aws_kms_alias" "main" {
-  name          = "alias/budget-main"
+  name          = "alias/balanced-main"
   target_key_id = aws_kms_key.main.key_id
 }
 
 # CloudWatch Logs CMK — the Logs service principal MUST be granted, keyed off
 # the LITERAL region (not ${local.region}), or PutLogEvents fails at runtime.
 resource "aws_kms_key" "cw_logs" {
-  description             = "budget CloudWatch Logs CMK"
+  description             = "balanced CloudWatch Logs CMK"
   enable_key_rotation     = true
   deletion_window_in_days = 30
 
@@ -166,14 +167,14 @@ resource "aws_kms_key" "cw_logs" {
 }
 
 resource "aws_kms_alias" "cw_logs" {
-  name          = "alias/budget-cw-logs"
+  name          = "alias/balanced-cw-logs"
   target_key_id = aws_kms_key.cw_logs.key_id
 }
 
 # SNS CMK — a CloudWatch alarm publishing to an encrypted topic needs BOTH the
 # cloudwatch and sns service principals, or alarm publish fails at runtime.
 resource "aws_kms_key" "sns" {
-  description             = "budget SNS ops-alert CMK"
+  description             = "balanced SNS ops-alert CMK"
   enable_key_rotation     = true
   deletion_window_in_days = 30
 
@@ -218,7 +219,7 @@ resource "aws_kms_key" "sns" {
 }
 
 resource "aws_kms_alias" "sns" {
-  name          = "alias/budget-sns"
+  name          = "alias/balanced-sns"
   target_key_id = aws_kms_key.sns.key_id
 }
 
@@ -230,20 +231,20 @@ resource "aws_vpc" "main" {
   cidr_block           = "10.0.0.0/16"
   enable_dns_support   = true
   enable_dns_hostnames = true
-  tags                 = { Name = "budget-vpc" }
-}
-
-resource "aws_subnet" "public" {
-  vpc_id                  = aws_vpc.main.id
-  cidr_block              = "10.0.1.0/24"
-  availability_zone       = "us-east-1a"
-  map_public_ip_on_launch = true
-  tags                    = { Name = "budget-public" }
+  tags                 = { Name = "balanced-vpc" }
 }
 
 resource "aws_internet_gateway" "main" {
   vpc_id = aws_vpc.main.id
-  tags   = { Name = "budget-igw" }
+  tags   = { Name = "balanced-igw" }
+}
+
+resource "aws_subnet" "public_a" {
+  vpc_id                  = aws_vpc.main.id
+  cidr_block              = "10.0.0.0/24"
+  availability_zone       = "us-east-1a"
+  map_public_ip_on_launch = true
+  tags                    = { Name = "balanced-public-a" }
 }
 
 resource "aws_route_table" "public" {
@@ -252,31 +253,82 @@ resource "aws_route_table" "public" {
     cidr_block = "0.0.0.0/0"
     gateway_id = aws_internet_gateway.main.id
   }
-  tags = { Name = "budget-public-rt" }
+  tags = { Name = "balanced-public-rt" }
 }
 
-resource "aws_route_table_association" "public" {
-  subnet_id      = aws_subnet.public.id
+resource "aws_route_table_association" "public_a" {
+  subnet_id      = aws_subnet.public_a.id
   route_table_id = aws_route_table.public.id
+}
+
+resource "aws_subnet" "public_b" {
+  vpc_id                  = aws_vpc.main.id
+  cidr_block              = "10.0.1.0/24"
+  availability_zone       = "us-east-1b"
+  map_public_ip_on_launch = true
+  tags                    = { Name = "balanced-public-b" }
+}
+
+resource "aws_route_table_association" "public_b" {
+  subnet_id      = aws_subnet.public_b.id
+  route_table_id = aws_route_table.public.id
+}
+
+resource "aws_subnet" "private_a" {
+  vpc_id            = aws_vpc.main.id
+  cidr_block        = "10.0.10.0/24"
+  availability_zone = "us-east-1a"
+  tags              = { Name = "balanced-private-a" }
+}
+
+resource "aws_subnet" "private_b" {
+  vpc_id            = aws_vpc.main.id
+  cidr_block        = "10.0.11.0/24"
+  availability_zone = "us-east-1b"
+  tags              = { Name = "balanced-private-b" }
+}
+
+resource "aws_eip" "nat_a" {
+  domain = "vpc"
+  tags   = { Name = "balanced-nat-a" }
+}
+
+resource "aws_nat_gateway" "a" {
+  allocation_id = aws_eip.nat_a.id
+  subnet_id     = aws_subnet.public_a.id
+  tags          = { Name = "balanced-nat-a" }
+  depends_on    = [aws_internet_gateway.main]
+}
+
+resource "aws_route_table" "private_a" {
+  vpc_id = aws_vpc.main.id
+  route {
+    cidr_block     = "0.0.0.0/0"
+    nat_gateway_id = aws_nat_gateway.a.id
+  }
+  tags = { Name = "balanced-private-a-rt" }
+}
+
+resource "aws_route_table_association" "private_a" {
+  subnet_id      = aws_subnet.private_a.id
+  route_table_id = aws_route_table.private_a.id
+}
+
+resource "aws_route_table_association" "private_b" {
+  subnet_id      = aws_subnet.private_b.id
+  route_table_id = aws_route_table.private_a.id
 }
 
 data "aws_ec2_managed_prefix_list" "cloudfront" {
   name = "com.amazonaws.global.cloudfront.origin-facing"
 }
 
+# NAT gateway 'nat_gw' (private subnet egress) is emitted in the NETWORKING section
+# (aws_nat_gateway) — it's part of the VPC egress layout, not a standalone node.
+
 # =============================================================================
 # IAM
 # =============================================================================
-
-data "aws_iam_policy_document" "ec2_assume" {
-  statement {
-    actions = ["sts:AssumeRole"]
-    principals {
-      type        = "Service"
-      identifiers = ["ec2.amazonaws.com"]
-    }
-  }
-}
 
 data "aws_iam_policy_document" "lambda_assume" {
   statement {
@@ -293,34 +345,21 @@ data "aws_iam_policy_document" "lambda_assume" {
 # =============================================================================
 
 resource "aws_iam_role" "cron_lambda" {
-  name               = "budget-cron-lambda-role"
+  name               = "balanced-cron-lambda-role"
   assume_role_policy = data.aws_iam_policy_document.lambda_assume.json
 }
 
 resource "aws_iam_role_policy_attachment" "cron_lambda_managed" {
   role       = aws_iam_role.cron_lambda.name
-  policy_arn = "arn:${local.partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+  policy_arn = "arn:${local.partition}:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole"
 }
 
 resource "aws_iam_role_policy" "cron_lambda_inline" {
-  name = "budget-cron-lambda-inline"
+  name = "balanced-cron-lambda-inline"
   role = aws_iam_role.cron_lambda.id
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
-      {
-        Sid = "SSMPortForward"
-        Effect = "Allow"
-        Action = [
-          "ssm:StartSession",
-          "ssm:TerminateSession",
-          "ssm:DescribeSessions"
-        ]
-        Resource = [
-          aws_instance.ec2_box.arn,
-          "arn:${local.partition}:ssm:${local.region}:${local.account_id}:document/AWS-StartPortForwardingSession"
-        ]
-      },
       {
         Sid = "Secret_secrets"
         Effect = "Allow"
@@ -345,7 +384,7 @@ resource "aws_iam_role_policy" "cron_lambda_inline" {
 # =============================================================================
 
 resource "aws_iam_role" "render_lambda" {
-  name               = "budget-render-lambda-role"
+  name               = "balanced-render-lambda-role"
   assume_role_policy = data.aws_iam_policy_document.lambda_assume.json
 }
 
@@ -355,7 +394,7 @@ resource "aws_iam_role_policy_attachment" "render_lambda_managed" {
 }
 
 resource "aws_iam_role_policy" "render_lambda_inline" {
-  name = "budget-render-lambda-inline"
+  name = "balanced-render-lambda-inline"
   role = aws_iam_role.render_lambda.id
   policy = jsonencode({
     Version = "2012-10-17"
@@ -403,7 +442,7 @@ resource "aws_iam_role_policy" "render_lambda_inline" {
 # =============================================================================
 
 resource "aws_iam_role" "backup_lambda" {
-  name               = "budget-backup-lambda-role"
+  name               = "balanced-backup-lambda-role"
   assume_role_policy = data.aws_iam_policy_document.lambda_assume.json
 }
 
@@ -413,24 +452,11 @@ resource "aws_iam_role_policy_attachment" "backup_lambda_managed" {
 }
 
 resource "aws_iam_role_policy" "backup_lambda_inline" {
-  name = "budget-backup-lambda-inline"
+  name = "balanced-backup-lambda-inline"
   role = aws_iam_role.backup_lambda.id
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
-      {
-        Sid = "SSMPortForward"
-        Effect = "Allow"
-        Action = [
-          "ssm:StartSession",
-          "ssm:TerminateSession",
-          "ssm:DescribeSessions"
-        ]
-        Resource = [
-          aws_instance.ec2_box.arn,
-          "arn:${local.partition}:ssm:${local.region}:${local.account_id}:document/AWS-StartPortForwardingSession"
-        ]
-      },
       {
         Sid = "S3_s3_backups"
         Effect = "Allow"
@@ -465,182 +491,11 @@ resource "aws_iam_role_policy" "backup_lambda_inline" {
 }
 
 # =============================================================================
-# IAM — WEB + ORCHESTRATOR HOST
-# =============================================================================
-
-resource "aws_iam_role" "ec2_box" {
-  name               = "budget-ec2-box-role"
-  assume_role_policy = data.aws_iam_policy_document.ec2_assume.json
-}
-
-resource "aws_iam_role_policy_attachment" "ec2_box_managed" {
-  role       = aws_iam_role.ec2_box.name
-  policy_arn = "arn:${local.partition}:iam::aws:policy/AmazonSSMManagedInstanceCore"
-}
-
-resource "aws_iam_role_policy" "ec2_box_inline" {
-  name = "budget-ec2-box-inline"
-  role = aws_iam_role.ec2_box.id
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Sid = "S3_s3_assets"
-        Effect = "Allow"
-        Action = [
-          "s3:GetObject",
-          "s3:PutObject",
-          "s3:DeleteObject",
-          "s3:ListBucket"
-        ]
-        Resource = [
-          aws_s3_bucket.s3_assets.arn,
-          "${aws_s3_bucket.s3_assets.arn}/*"
-        ]
-      },
-      {
-        Sid = "Invoke_render_lambda"
-        Effect = "Allow"
-        Action = "lambda:InvokeFunction"
-        Resource = aws_lambda_function.render_lambda.arn
-      },
-      {
-        Sid = "Secret_secrets"
-        Effect = "Allow"
-        Action = "secretsmanager:GetSecretValue"
-        Resource = aws_secretsmanager_secret.secrets.arn
-      },
-      {
-        Sid = "XRayWrite"
-        Effect = "Allow"
-        Action = [
-          "xray:PutTraceSegments",
-          "xray:PutTelemetryRecords",
-          "xray:GetSamplingRules",
-          "xray:GetSamplingTargets"
-        ]
-        Resource = "*"
-      },
-      {
-        Sid = "KMSDecryptMain"
-        Effect = "Allow"
-        Action = [
-          "kms:Decrypt",
-          "kms:GenerateDataKey*"
-        ]
-        Resource = aws_kms_key.main.arn
-      },
-      {
-        Sid = "CloudWatchLogsWrite"
-        Effect = "Allow"
-        Action = [
-          "logs:CreateLogGroup",
-          "logs:CreateLogStream",
-          "logs:PutLogEvents",
-          "logs:DescribeLogStreams"
-        ]
-        Resource = "arn:${local.partition}:logs:${local.region}:${local.account_id}:log-group:/budget/*"
-      }
-    ]
-  })
-}
-
-resource "aws_iam_instance_profile" "ec2_box" {
-  name = "budget-ec2-box-profile"
-  role = aws_iam_role.ec2_box.name
-}
-
-# =============================================================================
-# SECURITY GROUP — WEB + ORCHESTRATOR HOST
-# =============================================================================
-
-resource "aws_security_group" "ec2_box" {
-  name        = "budget-ec2-box-sg"
-  description = "Ingress for web + orchestrator host; egress to AWS services"
-  vpc_id      = aws_vpc.main.id
-
-  ingress {
-    description     = "HTTPS from CloudFront only"
-    from_port       = 443
-    to_port         = 443
-    protocol        = "tcp"
-    prefix_list_ids = [data.aws_ec2_managed_prefix_list.cloudfront.id]
-  }
-
-  ingress {
-    description     = "HTTP from CloudFront only (redirect)"
-    from_port       = 80
-    to_port         = 80
-    protocol        = "tcp"
-    prefix_list_ids = [data.aws_ec2_managed_prefix_list.cloudfront.id]
-  }
-
-  egress {
-    description = "All outbound"
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  tags = { Name = "budget-ec2-box-sg" }
-}
-
-# =============================================================================
-# EC2 — WEB + ORCHESTRATOR HOST
-# =============================================================================
-
-resource "aws_instance" "ec2_box" {
-  ami                    = var.ami_id
-  instance_type          = "t4g.medium"
-  subnet_id              = aws_subnet.public.id
-  vpc_security_group_ids = [aws_security_group.ec2_box.id]
-  iam_instance_profile   = aws_iam_instance_profile.ec2_box.name
-
-  # IMDSv2 required (no v1 fallback).
-  metadata_options {
-    http_endpoint               = "enabled"
-    http_tokens                 = "required"
-    http_put_response_hop_limit = 1
-  }
-
-  root_block_device {
-    volume_type = "gp3"
-    volume_size = 20
-    encrypted   = true
-    kms_key_id  = aws_kms_key.main.arn
-  }
-
-  tags = { Name = "budget-ec2-box" }
-}
-
-# =============================================================================
-# SELF-MANAGED POSTGRESQL — PRIMARY DB (LOCALHOST)
-# =============================================================================
-
-# Self-managed Postgres rides on the EC2 box (localhost-bound, not network-
-# exposed). Its data lives on a dedicated KMS-encrypted gp3 EBS volume.
-resource "aws_ebs_volume" "postgres" {
-  availability_zone = "us-east-1a"
-  size              = 50
-  type              = "gp3"
-  encrypted         = true
-  kms_key_id        = aws_kms_key.main.arn
-  tags              = { Name = "budget-postgres" }
-}
-
-resource "aws_volume_attachment" "postgres" {
-  device_name = "/dev/sdf"
-  volume_id   = aws_ebs_volume.postgres.id
-  instance_id = aws_instance.ec2_box.id
-}
-
-# =============================================================================
 # S3 — DB BACKUP STORE
 # =============================================================================
 
 resource "aws_s3_bucket" "s3_backups" {
-  bucket_prefix = "budget-s3-backups-"
+  bucket_prefix = "balanced-s3-backups-"
   force_destroy = false
 }
 
@@ -697,7 +552,7 @@ resource "aws_s3_bucket_policy" "s3_backups" {
 # =============================================================================
 
 resource "aws_s3_bucket" "s3_assets" {
-  bucket_prefix = "budget-s3-assets-"
+  bucket_prefix = "balanced-s3-assets-"
   force_destroy = false
 }
 
@@ -768,7 +623,7 @@ resource "aws_s3_bucket_policy" "s3_assets" {
 # =============================================================================
 
 resource "aws_s3_bucket" "s3_renders" {
-  bucket_prefix = "budget-s3-renders-"
+  bucket_prefix = "balanced-s3-renders-"
   force_destroy = false
 }
 
@@ -822,7 +677,7 @@ resource "aws_s3_bucket_policy" "s3_renders" {
 # No rotation Lambda is provided, so the rotation resource is intentionally
 # OMITTED — a null rotation_lambda_arn is invalid (rule: secretsmanager-rotation-lambda).
 resource "aws_secretsmanager_secret" "secrets" {
-  name       = "budget/secrets"
+  name       = "balanced/secrets"
   kms_key_id = aws_kms_key.main.arn
 }
 
@@ -839,7 +694,7 @@ resource "aws_secretsmanager_secret_version" "secrets" {
 # =============================================================================
 
 resource "aws_lambda_function" "cron_lambda" {
-  function_name = "budget-cron-lambda"
+  function_name = "balanced-cron-lambda"
   role          = aws_iam_role.cron_lambda.arn
   # Placeholder package — replace with your real deployment artifact.
   filename      = "cron_lambda_placeholder.zip"
@@ -848,14 +703,33 @@ resource "aws_lambda_function" "cron_lambda" {
   architectures = ["arm64"]
   memory_size   = 512
   timeout       = 300
-  # No vpc_config — a non-VPC Lambda reaches public AWS endpoints directly
-  # (Secrets Manager, S3) with no NAT, the cost-honest budget default.
+
+  # VPC-attached — it reaches a VPC-bound store (RDS/ElastiCache), so it runs
+  # in the private subnets and egresses through NAT.
+  vpc_config {
+    subnet_ids         = [aws_subnet.private_a.id, aws_subnet.private_b.id]
+    security_group_ids = [aws_security_group.cron_lambda.id]
+  }
 }
 
 resource "aws_cloudwatch_log_group" "cron_lambda" {
-  name              = "/aws/lambda/budget-cron-lambda"
+  name              = "/aws/lambda/balanced-cron-lambda"
   retention_in_days = 30
   kms_key_id        = aws_kms_key.cw_logs.arn
+}
+
+resource "aws_security_group" "cron_lambda" {
+  name        = "balanced-cron-lambda-sg"
+  description = "Egress for VPC-attached Lambda data reconciliation cron"
+  vpc_id      = aws_vpc.main.id
+  egress {
+    description = "All outbound (NAT + VPC services)"
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+  tags = { Name = "balanced-cron-lambda-sg" }
 }
 
 # =============================================================================
@@ -863,7 +737,7 @@ resource "aws_cloudwatch_log_group" "cron_lambda" {
 # =============================================================================
 
 resource "aws_lambda_function" "render_lambda" {
-  function_name = "budget-render-lambda"
+  function_name = "balanced-render-lambda"
   role          = aws_iam_role.render_lambda.arn
   # Placeholder package — replace with your real deployment artifact.
   filename      = "render_lambda_placeholder.zip"
@@ -874,13 +748,15 @@ resource "aws_lambda_function" "render_lambda" {
   timeout       = 300
   reserved_concurrent_executions = 10
 
-  tracing_config { mode = "Active" }
+  tracing_config {
+    mode = "Active"
+  }
   # No vpc_config — a non-VPC Lambda reaches public AWS endpoints directly
-  # (Secrets Manager, S3) with no NAT, the cost-honest budget default.
+  # (Secrets Manager, S3) with no NAT, the cost-honest default.
 }
 
 resource "aws_cloudwatch_log_group" "render_lambda" {
-  name              = "/aws/lambda/budget-render-lambda"
+  name              = "/aws/lambda/balanced-render-lambda"
   retention_in_days = 30
   kms_key_id        = aws_kms_key.cw_logs.arn
 }
@@ -890,7 +766,7 @@ resource "aws_cloudwatch_log_group" "render_lambda" {
 # =============================================================================
 
 resource "aws_lambda_function" "backup_lambda" {
-  function_name = "budget-backup-lambda"
+  function_name = "balanced-backup-lambda"
   role          = aws_iam_role.backup_lambda.arn
   # Placeholder package — replace with your real deployment artifact.
   filename      = "backup_lambda_placeholder.zip"
@@ -900,11 +776,11 @@ resource "aws_lambda_function" "backup_lambda" {
   memory_size   = 512
   timeout       = 300
   # No vpc_config — a non-VPC Lambda reaches public AWS endpoints directly
-  # (Secrets Manager, S3) with no NAT, the cost-honest budget default.
+  # (Secrets Manager, S3) with no NAT, the cost-honest default.
 }
 
 resource "aws_cloudwatch_log_group" "backup_lambda" {
-  name              = "/aws/lambda/budget-backup-lambda"
+  name              = "/aws/lambda/balanced-backup-lambda"
   retention_in_days = 30
   kms_key_id        = aws_kms_key.cw_logs.arn
 }
@@ -924,12 +800,12 @@ data "aws_iam_policy_document" "scheduler_assume" {
 }
 
 resource "aws_iam_role" "scheduler" {
-  name               = "budget-scheduler"
+  name               = "balanced-scheduler"
   assume_role_policy = data.aws_iam_policy_document.scheduler_assume.json
 }
 
 resource "aws_iam_role_policy" "scheduler_invoke" {
-  name = "budget-scheduler-invoke"
+  name = "balanced-scheduler-invoke"
   role = aws_iam_role.scheduler.id
   policy = jsonencode({
     Version = "2012-10-17"
@@ -948,7 +824,7 @@ resource "aws_iam_role_policy" "scheduler_invoke" {
 }
 
 resource "aws_scheduler_schedule" "scheduler_backup_lambda" {
-  name       = "budget-scheduler-backup-lambda"
+  name       = "balanced-scheduler-backup-lambda"
   group_name = "default"
   flexible_time_window { mode = "OFF" }
   schedule_expression = "cron(0 2 * * ? *)"
@@ -967,7 +843,7 @@ resource "aws_lambda_permission" "scheduler_backup_lambda" {
 }
 
 resource "aws_scheduler_schedule" "scheduler_cron_lambda" {
-  name       = "budget-scheduler-cron-lambda"
+  name       = "balanced-scheduler-cron-lambda"
   group_name = "default"
   flexible_time_window { mode = "OFF" }
   schedule_expression = "cron(0 3 * * ? *)"
@@ -990,7 +866,7 @@ resource "aws_lambda_permission" "scheduler_cron_lambda" {
 # =============================================================================
 
 resource "aws_sns_topic" "sns_alerts" {
-  name              = "budget-sns-alerts"
+  name              = "balanced-sns-alerts"
   kms_master_key_id = aws_kms_key.sns.arn
 }
 
@@ -1049,7 +925,7 @@ resource "aws_sns_topic_subscription" "sns_alerts_email" {
 # =============================================================================
 
 resource "aws_cloudwatch_log_group" "cw_logs" {
-  name              = "/budget/app"
+  name              = "/balanced/app"
   retention_in_days = 30
   kms_key_id        = aws_kms_key.cw_logs.arn
 }
@@ -1058,22 +934,8 @@ resource "aws_cloudwatch_log_group" "cw_logs" {
 # CLOUDWATCH ALARMS
 # =============================================================================
 
-resource "aws_cloudwatch_metric_alarm" "ec2_box_cpu_high" {
-  alarm_name          = "budget-ec2-box-cpu-high"
-  comparison_operator = "GreaterThanThreshold"
-  evaluation_periods  = 3
-  metric_name         = "CPUUtilization"
-  namespace           = "AWS/EC2"
-  period              = 60
-  statistic           = "Average"
-  threshold           = 80
-  alarm_actions       = [aws_sns_topic.sns_alerts.arn]
-  ok_actions          = [aws_sns_topic.sns_alerts.arn]
-  dimensions          = { InstanceId = aws_instance.ec2_box.id }
-}
-
 resource "aws_cloudwatch_metric_alarm" "render_lambda_errors" {
-  alarm_name          = "budget-render-lambda-errors"
+  alarm_name          = "balanced-render-lambda-errors"
   comparison_operator = "GreaterThanThreshold"
   evaluation_periods  = 1
   metric_name         = "Errors"
@@ -1086,7 +948,7 @@ resource "aws_cloudwatch_metric_alarm" "render_lambda_errors" {
 }
 
 resource "aws_cloudwatch_metric_alarm" "backup_lambda_errors" {
-  alarm_name          = "budget-backup-lambda-errors"
+  alarm_name          = "balanced-backup-lambda-errors"
   comparison_operator = "GreaterThanThreshold"
   evaluation_periods  = 1
   metric_name         = "Errors"
@@ -1099,7 +961,7 @@ resource "aws_cloudwatch_metric_alarm" "backup_lambda_errors" {
 }
 
 resource "aws_cloudwatch_metric_alarm" "cron_lambda_errors" {
-  alarm_name          = "budget-cron-lambda-errors"
+  alarm_name          = "balanced-cron-lambda-errors"
   comparison_operator = "GreaterThanThreshold"
   evaluation_periods  = 1
   metric_name         = "Errors"
@@ -1117,14 +979,18 @@ resource "aws_cloudwatch_metric_alarm" "cron_lambda_errors" {
 
 resource "aws_wafv2_web_acl" "cf" {
   provider    = aws.us_east_1
-  name        = "budget-cf-waf"
+  name        = "balanced-cf-waf"
   scope       = "CLOUDFRONT"
-  default_action { allow {} }
+  default_action {
+    allow {}
+  }
 
   rule {
     name     = "AWSManagedRulesCommonRuleSet"
     priority = 1
-    override_action { none {} }
+    override_action {
+      none {}
+    }
     statement {
       managed_rule_group_statement {
         name        = "AWSManagedRulesCommonRuleSet"
@@ -1141,7 +1007,9 @@ resource "aws_wafv2_web_acl" "cf" {
   rule {
     name     = "AWSManagedRulesKnownBadInputsRuleSet"
     priority = 2
-    override_action { none {} }
+    override_action {
+      none {}
+    }
     statement {
       managed_rule_group_statement {
         name        = "AWSManagedRulesKnownBadInputsRuleSet"
@@ -1158,7 +1026,9 @@ resource "aws_wafv2_web_acl" "cf" {
   rule {
     name     = "RateLimit"
     priority = 3
-    action { block {} }
+    action {
+      block {}
+    }
     statement {
       rate_based_statement {
         limit              = 2000
@@ -1174,7 +1044,7 @@ resource "aws_wafv2_web_acl" "cf" {
 
   visibility_config {
     cloudwatch_metrics_enabled = true
-    metric_name                = "budget-cf-waf"
+    metric_name                = "balanced-cf-waf"
     sampled_requests_enabled   = true
   }
 }
@@ -1213,7 +1083,7 @@ data "aws_canonical_user_id" "current" {}
 data "aws_cloudfront_log_delivery_canonical_user_id" "current" {}
 
 resource "aws_s3_bucket" "cf_logs" {
-  bucket_prefix = "budget-cf-logs-"
+  bucket_prefix = "balanced-cf-logs-"
   force_destroy = false
 }
 
@@ -1255,7 +1125,7 @@ resource "aws_s3_bucket_acl" "cf_logs" {
 }
 
 resource "aws_cloudfront_origin_access_control" "s3_assets" {
-  name                              = "budget-s3-assets-oac"
+  name                              = "balanced-s3-assets-oac"
   origin_access_control_origin_type = "s3"
   signing_behavior                  = "always"
   signing_protocol                  = "sigv4"
@@ -1275,10 +1145,10 @@ resource "aws_cloudfront_distribution" "cf" {
     origin_id                = "s3-s3_assets"
     origin_access_control_id = aws_cloudfront_origin_access_control.s3_assets.id
   }
-  # EC2 origin via a custom domain with a TLS cert (NOT the instance public DNS — rule cloudfront-origin-tls).
+  # ALB origin over a custom domain with a TLS cert (NOT a raw AWS DNS name — rule cloudfront-origin-tls).
   origin {
-    domain_name = var.ec2_origin_domain
-    origin_id   = "ec2-ec2_box"
+    domain_name = var.origin_domain
+    origin_id   = "origin-alb"
     custom_origin_config {
       http_port              = 80
       https_port             = 443
@@ -1288,7 +1158,7 @@ resource "aws_cloudfront_distribution" "cf" {
   }
 
   default_cache_behavior {
-    target_origin_id       = "ec2-ec2_box"
+    target_origin_id       = "origin-alb"
     viewer_protocol_policy = "redirect-to-https"
     allowed_methods        = ["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"]
     cached_methods         = ["GET", "HEAD"]
@@ -1350,7 +1220,7 @@ resource "aws_route53_record" "cf_alias" {
 # =============================================================================
 
 resource "aws_s3_bucket" "cloudtrail_logs" {
-  bucket_prefix = "budget-cloudtrail-"
+  bucket_prefix = "balanced-cloudtrail-"
   force_destroy = false
 }
 
@@ -1395,7 +1265,7 @@ resource "aws_s3_bucket_policy" "cloudtrail_logs" {
 }
 
 resource "aws_cloudwatch_log_group" "cloudtrail" {
-  name              = "/aws/cloudtrail/budget"
+  name              = "/aws/cloudtrail/balanced"
   retention_in_days = 90
   kms_key_id        = aws_kms_key.cw_logs.arn
 }
@@ -1411,7 +1281,7 @@ data "aws_iam_policy_document" "cloudtrail_assume" {
 }
 
 resource "aws_iam_role" "cloudtrail_cw" {
-  name               = "budget-cloudtrail-cw"
+  name               = "balanced-cloudtrail-cw"
   assume_role_policy = data.aws_iam_policy_document.cloudtrail_assume.json
 }
 
@@ -1434,7 +1304,7 @@ resource "aws_iam_role_policy" "cloudtrail_cw" {
 }
 
 resource "aws_cloudtrail" "cloudtrail" {
-  name                          = "budget-trail"
+  name                          = "balanced-trail"
   s3_bucket_name                = aws_s3_bucket.cloudtrail_logs.bucket
   is_multi_region_trail         = true
   enable_log_file_validation    = true
@@ -1451,3 +1321,465 @@ resource "aws_cloudtrail" "cloudtrail" {
 # X-Ray needs no infrastructure resource — tracing is enabled per-function
 # (tracing_config) and per-instance, and the xray:Put* IAM grants on each
 # compute role (derived from the trace edges) cover it. (xray)
+
+# =============================================================================
+# APPLICATION LOAD BALANCER — HTTPS INGRESS (WEB + ADMIN)
+# =============================================================================
+
+resource "aws_security_group" "alb" {
+  name        = "balanced-alb-sg"
+  description = "ALB ingress for HTTPS ingress (web + admin)"
+  vpc_id      = aws_vpc.main.id
+  ingress {
+    description     = "HTTPS from CloudFront only"
+    from_port       = 443
+    to_port         = 443
+    protocol        = "tcp"
+    prefix_list_ids = [data.aws_ec2_managed_prefix_list.cloudfront.id]
+  }
+  egress {
+    description = "To the application targets"
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+  tags = { Name = "balanced-alb-sg" }
+}
+
+resource "aws_lb" "alb" {
+  name               = "balanced-alb"
+  load_balancer_type = "application"
+  security_groups    = [aws_security_group.alb.id]
+  subnets            = [aws_subnet.public_a.id, aws_subnet.public_b.id]
+}
+
+resource "aws_lb_target_group" "fargate_web" {
+  name        = "balanced-fargate-web"
+  port        = 3000
+  protocol    = "HTTP"
+  target_type = "ip"
+  vpc_id      = aws_vpc.main.id
+  health_check {
+    path                = "/"
+    matcher             = "200-399"
+    healthy_threshold   = 2
+    unhealthy_threshold = 3
+  }
+}
+
+resource "aws_lb_listener" "alb_https" {
+  load_balancer_arn = aws_lb.alb.arn
+  port              = 443
+  protocol          = "HTTPS"
+  ssl_policy        = "ELBSecurityPolicy-TLS13-1-2-2021-06"
+  certificate_arn   = var.alb_certificate_arn
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.fargate_web.arn
+  }
+}
+
+# =============================================================================
+# CLOUDWATCH DASHBOARD
+# =============================================================================
+
+resource "aws_cloudwatch_dashboard" "cw_dashboard" {
+  dashboard_name = "balanced-cw-dashboard"
+  dashboard_body = jsonencode({
+    widgets = [
+      {
+        type = "text"
+        x = 0
+        y = 0
+        width = 24
+        height = 2
+        properties = {
+          markdown = "# balanced — golden signals (golden-signal dashboard)"
+        }
+      }
+    ]
+  })
+}
+
+# =============================================================================
+# ECS CLUSTER
+# =============================================================================
+
+resource "aws_ecs_cluster" "main" {
+  name = "balanced-cluster"
+  setting {
+    name  = "containerInsights"
+    value = "enabled"
+  }
+}
+
+data "aws_iam_policy_document" "ecs_tasks_assume" {
+  statement {
+    actions = ["sts:AssumeRole"]
+    principals {
+      type        = "Service"
+      identifiers = ["ecs-tasks.amazonaws.com"]
+    }
+  }
+}
+
+resource "aws_iam_role" "fargate_exec" {
+  name               = "balanced-fargate-exec"
+  assume_role_policy = data.aws_iam_policy_document.ecs_tasks_assume.json
+}
+
+resource "aws_iam_role_policy_attachment" "fargate_exec" {
+  role       = aws_iam_role.fargate_exec.name
+  policy_arn = "arn:${local.partition}:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+}
+
+# =============================================================================
+# ELASTICACHE — ISR + SESSION CACHE
+# =============================================================================
+
+resource "aws_elasticache_subnet_group" "elasticache" {
+  name       = "balanced-elasticache"
+  subnet_ids = [aws_subnet.private_a.id, aws_subnet.private_b.id]
+}
+
+resource "aws_security_group" "elasticache" {
+  name        = "balanced-elasticache-sg"
+  description = "ElastiCache ISR + session cache — ingress only from in-VPC callers"
+  vpc_id      = aws_vpc.main.id
+  ingress {
+    description     = "Redis from Next.js web service (2 tasks)"
+    from_port       = 6379
+    to_port         = 6379
+    protocol        = "tcp"
+    security_groups = [aws_security_group.fargate_web.id]
+  }
+}
+
+resource "aws_elasticache_replication_group" "elasticache" {
+  replication_group_id       = "balanced-elasticache"
+  description                = "ISR + session cache"
+  engine                     = "redis"
+  node_type                  = "cache.t4g.micro"
+  num_cache_clusters         = 1
+  automatic_failover_enabled = false
+  multi_az_enabled           = false
+  at_rest_encryption_enabled = true
+  transit_encryption_enabled = true
+  subnet_group_name          = aws_elasticache_subnet_group.elasticache.name
+  security_group_ids         = [aws_security_group.elasticache.id]
+  port                       = 6379
+}
+
+# =============================================================================
+# FARGATE — NEXT.JS WEB SERVICE (2 TASKS)
+# =============================================================================
+
+resource "aws_cloudwatch_log_group" "fargate_web" {
+  name              = "/ecs/balanced/fargate-web"
+  retention_in_days = 30
+  kms_key_id        = aws_kms_key.cw_logs.arn
+}
+
+resource "aws_iam_role" "fargate_web" {
+  name               = "balanced-fargate-web-task"
+  assume_role_policy = data.aws_iam_policy_document.ecs_tasks_assume.json
+}
+
+resource "aws_iam_role_policy" "fargate_web_task" {
+  name   = "balanced-fargate-web-task"
+  role   = aws_iam_role.fargate_web.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid = "S3_s3_assets"
+        Effect = "Allow"
+        Action = [
+          "s3:GetObject",
+          "s3:PutObject",
+          "s3:DeleteObject",
+          "s3:ListBucket"
+        ]
+        Resource = [
+          aws_s3_bucket.s3_assets.arn,
+          "${aws_s3_bucket.s3_assets.arn}/*"
+        ]
+      },
+      {
+        Sid = "Invoke_render_lambda"
+        Effect = "Allow"
+        Action = "lambda:InvokeFunction"
+        Resource = aws_lambda_function.render_lambda.arn
+      },
+      {
+        Sid = "Secret_secrets"
+        Effect = "Allow"
+        Action = "secretsmanager:GetSecretValue"
+        Resource = aws_secretsmanager_secret.secrets.arn
+      },
+      {
+        Sid = "KMSDecryptMain"
+        Effect = "Allow"
+        Action = [
+          "kms:Decrypt",
+          "kms:GenerateDataKey*"
+        ]
+        Resource = aws_kms_key.main.arn
+      },
+      {
+        Sid = "CloudWatchLogsWrite"
+        Effect = "Allow"
+        Action = [
+          "logs:CreateLogGroup",
+          "logs:CreateLogStream",
+          "logs:PutLogEvents",
+          "logs:DescribeLogStreams"
+        ]
+        Resource = "arn:${local.partition}:logs:${local.region}:${local.account_id}:log-group:/balanced/*"
+      }
+    ]
+  })
+}
+
+resource "aws_security_group" "fargate_web" {
+  name        = "balanced-fargate-web-sg"
+  description = "Fargate service Next.js web service (2 tasks)"
+  vpc_id      = aws_vpc.main.id
+  ingress {
+    description     = "From the ALB on the container port"
+    from_port       = 3000
+    to_port         = 3000
+    protocol        = "tcp"
+    security_groups = [aws_security_group.alb.id]
+  }
+  egress {
+    description = "All outbound (NAT + VPC services)"
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+  tags = { Name = "balanced-fargate-web-sg" }
+}
+
+resource "aws_ecs_task_definition" "fargate_web" {
+  family                   = "balanced-fargate-web"
+  requires_compatibilities = ["FARGATE"]
+  network_mode             = "awsvpc"
+  cpu                      = "512"
+  memory                   = "1024"
+  execution_role_arn       = aws_iam_role.fargate_exec.arn
+  task_role_arn            = aws_iam_role.fargate_web.arn
+  container_definitions    = jsonencode([
+    {
+      name = "fargate-web"
+      image = "PLACEHOLDER_ECR_IMAGE_URI"
+      essential = true
+      portMappings = [
+        {
+          containerPort = 3000
+          protocol = "tcp"
+        }
+      ]
+      logConfiguration = {
+        logDriver = "awslogs"
+        options = {
+          "awslogs-group" = aws_cloudwatch_log_group.fargate_web.name
+          "awslogs-region" = local.region
+          "awslogs-stream-prefix" = "fargate-web"
+        }
+      }
+    }
+  ])
+}
+
+resource "aws_ecs_service" "fargate_web" {
+  name            = "balanced-fargate-web"
+  cluster         = aws_ecs_cluster.main.id
+  task_definition = aws_ecs_task_definition.fargate_web.arn
+  desired_count   = 2
+  launch_type     = "FARGATE"
+  network_configuration {
+    subnets          = [aws_subnet.private_a.id, aws_subnet.private_b.id]
+    security_groups  = [aws_security_group.fargate_web.id]
+    assign_public_ip = false
+  }
+  load_balancer {
+    target_group_arn = aws_lb_target_group.fargate_web.arn
+    container_name   = "fargate-web"
+    container_port   = 3000
+  }
+  depends_on = [aws_lb_listener.alb_https]
+}
+
+# =============================================================================
+# FARGATE — ORCHESTRATOR SERVICE (1–2 TASKS)
+# =============================================================================
+
+resource "aws_cloudwatch_log_group" "fargate_orch" {
+  name              = "/ecs/balanced/fargate-orch"
+  retention_in_days = 30
+  kms_key_id        = aws_kms_key.cw_logs.arn
+}
+
+resource "aws_iam_role" "fargate_orch" {
+  name               = "balanced-fargate-orch-task"
+  assume_role_policy = data.aws_iam_policy_document.ecs_tasks_assume.json
+}
+
+resource "aws_iam_role_policy" "fargate_orch_task" {
+  name   = "balanced-fargate-orch-task"
+  role   = aws_iam_role.fargate_orch.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid = "Invoke_render_lambda"
+        Effect = "Allow"
+        Action = "lambda:InvokeFunction"
+        Resource = aws_lambda_function.render_lambda.arn
+      },
+      {
+        Sid = "Secret_secrets"
+        Effect = "Allow"
+        Action = "secretsmanager:GetSecretValue"
+        Resource = aws_secretsmanager_secret.secrets.arn
+      },
+      {
+        Sid = "KMSDecryptMain"
+        Effect = "Allow"
+        Action = [
+          "kms:Decrypt",
+          "kms:GenerateDataKey*"
+        ]
+        Resource = aws_kms_key.main.arn
+      },
+      {
+        Sid = "CloudWatchLogsWrite"
+        Effect = "Allow"
+        Action = [
+          "logs:CreateLogGroup",
+          "logs:CreateLogStream",
+          "logs:PutLogEvents",
+          "logs:DescribeLogStreams"
+        ]
+        Resource = "arn:${local.partition}:logs:${local.region}:${local.account_id}:log-group:/balanced/*"
+      }
+    ]
+  })
+}
+
+resource "aws_security_group" "fargate_orch" {
+  name        = "balanced-fargate-orch-sg"
+  description = "Fargate service orchestrator service (1–2 tasks)"
+  vpc_id      = aws_vpc.main.id
+  egress {
+    description = "All outbound (NAT + VPC services)"
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+  tags = { Name = "balanced-fargate-orch-sg" }
+}
+
+resource "aws_ecs_task_definition" "fargate_orch" {
+  family                   = "balanced-fargate-orch"
+  requires_compatibilities = ["FARGATE"]
+  network_mode             = "awsvpc"
+  cpu                      = "512"
+  memory                   = "1024"
+  execution_role_arn       = aws_iam_role.fargate_exec.arn
+  task_role_arn            = aws_iam_role.fargate_orch.arn
+  container_definitions    = jsonencode([
+    {
+      name = "fargate-orch"
+      image = "PLACEHOLDER_ECR_IMAGE_URI"
+      essential = true
+      portMappings = [
+        {
+          containerPort = 3000
+          protocol = "tcp"
+        }
+      ]
+      logConfiguration = {
+        logDriver = "awslogs"
+        options = {
+          "awslogs-group" = aws_cloudwatch_log_group.fargate_orch.name
+          "awslogs-region" = local.region
+          "awslogs-stream-prefix" = "fargate-orch"
+        }
+      }
+    }
+  ])
+}
+
+resource "aws_ecs_service" "fargate_orch" {
+  name            = "balanced-fargate-orch"
+  cluster         = aws_ecs_cluster.main.id
+  task_definition = aws_ecs_task_definition.fargate_orch.arn
+  desired_count   = 2
+  launch_type     = "FARGATE"
+  network_configuration {
+    subnets          = [aws_subnet.private_a.id, aws_subnet.private_b.id]
+    security_groups  = [aws_security_group.fargate_orch.id]
+    assign_public_ip = false
+  }
+}
+
+# =============================================================================
+# RDS — MANAGED POSTGRES + POSTGIS
+# =============================================================================
+
+resource "aws_db_subnet_group" "rds_pg" {
+  name       = "balanced-rds-pg"
+  subnet_ids = [aws_subnet.private_a.id, aws_subnet.private_b.id]
+}
+
+resource "aws_security_group" "rds_pg" {
+  name        = "balanced-rds-pg-sg"
+  description = "RDS managed Postgres + PostGIS — ingress only from in-VPC callers"
+  vpc_id      = aws_vpc.main.id
+  ingress {
+    description     = "PostgreSQL from Next.js web service (2 tasks)"
+    from_port       = 5432
+    to_port         = 5432
+    protocol        = "tcp"
+    security_groups = [aws_security_group.fargate_web.id]
+  }
+  ingress {
+    description     = "PostgreSQL from orchestrator service (1–2 tasks)"
+    from_port       = 5432
+    to_port         = 5432
+    protocol        = "tcp"
+    security_groups = [aws_security_group.fargate_orch.id]
+  }
+  ingress {
+    description     = "PostgreSQL from data reconciliation cron"
+    from_port       = 5432
+    to_port         = 5432
+    protocol        = "tcp"
+    security_groups = [aws_security_group.cron_lambda.id]
+  }
+}
+
+resource "aws_db_instance" "rds_pg" {
+  identifier                  = "balanced-rds-pg"
+  engine                      = "postgres"
+  instance_class              = "db.t4g.medium"
+  allocated_storage           = 20
+  max_allocated_storage       = 100
+  storage_type                = "gp3"
+  storage_encrypted           = true
+  kms_key_id                  = aws_kms_key.main.arn
+  db_subnet_group_name        = aws_db_subnet_group.rds_pg.name
+  vpc_security_group_ids      = [aws_security_group.rds_pg.id]
+  db_name                     = "appdb"
+  username                    = "appuser"
+  manage_master_user_password = true
+  multi_az                    = false
+  backup_retention_period     = 7
+  deletion_protection         = false
+  skip_final_snapshot         = true
+}

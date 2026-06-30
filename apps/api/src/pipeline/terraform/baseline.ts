@@ -76,18 +76,28 @@ export function emitBaseline(ctx: EmitCtx): HclBlock[] {
       `  description = "Route53 hosted-zone id for domain_name (ACM DNS validation + alias records)."`,
       `}`,
     );
-    if (ctx.has("ec2")) {
+    if (ctx.has("ec2") || ctx.has("alb")) {
       vars.push(
         ``,
         `# A CloudFront https-only origin must present a trusted-CA cert for its hostname.`,
-        `# NEVER an EC2 instance public DNS name (no cert, churns on replace) — supply an`,
-        `# ALB or Elastic-IP + custom domain with an ACM cert. (rule: cloudfront-origin-tls)`,
-        `variable "ec2_origin_domain" {`,
+        `# NEVER an EC2 instance public DNS / raw ALB DNS name (no cert, churns on replace)`,
+        `# — supply a custom domain (ALB or EIP + Route53) with an ACM cert. (rule:`,
+        `# cloudfront-origin-tls)`,
+        `variable "origin_domain" {`,
         `  type        = string`,
-        `  description = "Custom domain (ALB / EIP + Route53) for the EC2 origin — MUST have a TLS cert."`,
+        `  description = "Custom domain (ALB / EIP + Route53) for the dynamic origin — MUST have a TLS cert."`,
         `}`,
       );
     }
+  }
+  if (ctx.has("alb")) {
+    vars.push(
+      ``,
+      `variable "alb_certificate_arn" {`,
+      `  type        = string`,
+      `  description = "Regional ACM certificate ARN for the ALB HTTPS listener (origin_domain)."`,
+      `}`,
+    );
   }
   if (ctx.has("sns")) {
     vars.push(

@@ -25,12 +25,21 @@ export type ServiceKey =
   | "postgres-selfmanaged"
   | "lambda"
   | "eventbridge-scheduler"
+  | "eventbridge-bus"
   | "secrets-manager"
   | "cloudwatch-logs"
   | "cloudwatch-alarms"
+  | "cloudwatch-dashboard"
+  | "cloudwatch-anomaly"
   | "sns"
+  | "sqs"
   | "xray"
   | "cloudtrail"
+  | "alb"
+  | "fargate"
+  | "rds"
+  | "elasticache"
+  | "nat"
   | "unsupported";
 
 interface Rule {
@@ -46,13 +55,24 @@ interface Rule {
 // managed "RDS PostgreSQL" out (it has no emitter — routes to the LLM fallback).
 const RULES: Rule[] = [
   { key: "postgres-selfmanaged", all: ["postgres"], any: ["self-managed", "self managed"] },
+  { key: "rds", any: ["rds", "aurora"] },
+  { key: "elasticache", any: ["elasticache"] },
+  // Scheduler (a clock) is more specific than the bus and must be checked first;
+  // both share the "eventbridge" token.
   { key: "eventbridge-scheduler", any: ["eventbridge scheduler", "scheduler"] },
+  { key: "eventbridge-bus", any: ["eventbridge", "event bus"] },
+  { key: "cloudwatch-anomaly", any: ["anomaly"] },
   { key: "cloudwatch-alarms", any: ["cloudwatch alarm", "metric alarm", "alarms"] },
+  { key: "cloudwatch-dashboard", any: ["dashboard"] },
   { key: "cloudwatch-logs", any: ["cloudwatch logs", "cloudwatch log", "log group"] },
   { key: "cloudtrail", any: ["cloudtrail"] },
   { key: "secrets-manager", any: ["secrets manager", "secretsmanager"] },
   { key: "xray", any: ["x-ray", "xray"] },
   { key: "sns", any: ["sns", "simple notification"] },
+  { key: "sqs", any: ["sqs", "simple queue", "dead-letter queue"] },
+  { key: "alb", any: ["application load balancer", "alb", "elastic load balancing"] },
+  { key: "fargate", any: ["fargate", "ecs", "elastic container service"] },
+  { key: "nat", any: ["nat gateway"] },
   { key: "cloudfront", any: ["cloudfront", "cdn"] },
   { key: "lambda", any: ["lambda"] },
   { key: "s3", any: ["s3", "simple storage"] },

@@ -13,6 +13,7 @@ import { emitS3, emitSecrets } from "./emitters/storage.js";
 import { emitEc2, emitLambda, emitPostgres } from "./emitters/compute.js";
 import { emitCloudfront } from "./emitters/cloudfront.js";
 import { emitScheduler } from "./emitters/scheduler.js";
+import { emitAlb, emitElasticache, emitFargate, emitRds } from "./emitters/managed.js";
 import {
   emitCloudtrail,
   emitCloudwatchAlarms,
@@ -20,6 +21,13 @@ import {
   emitSns,
   emitXray,
 } from "./emitters/observability.js";
+import {
+  emitCloudwatchAnomaly,
+  emitCloudwatchDashboard,
+  emitEventbridgeBus,
+  emitNat,
+  emitSqs,
+} from "./emitters/misc.js";
 
 export type ServiceEmitter = (node: ArchitectureNode, ctx: EmitCtx) => HclBlock[];
 
@@ -36,4 +44,13 @@ export const REGISTRY: ReadonlyMap<ServiceKey, ServiceEmitter> = new Map<Service
   ["cloudwatch-alarms", emitCloudwatchAlarms],
   ["xray", emitXray],
   ["cloudtrail", emitCloudtrail],
+  ["alb", emitAlb],
+  ["fargate", emitFargate],
+  ["rds", emitRds],
+  ["elasticache", emitElasticache],
+  ["nat", emitNat],
+  ["cloudwatch-dashboard", emitCloudwatchDashboard],
+  ["cloudwatch-anomaly", emitCloudwatchAnomaly],
+  ["sqs", emitSqs],
+  ["eventbridge-bus", emitEventbridgeBus],
 ]);

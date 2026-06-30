@@ -29,6 +29,7 @@ import type { Tier } from "../../schema/architecture.js";
 
 import { buildCtx } from "./context.js";
 import { emitBaseline } from "./baseline.js";
+import { emitNetwork } from "./networking.js";
 import { emitGlue } from "./glue.js";
 import type { HclBlock } from "./hcl.js";
 import { REGISTRY } from "./registry.js";
@@ -93,7 +94,7 @@ const sectionHeading = (section: string): string =>
 export function assembleTier(tier: Tier, opts: { region: string }): AssembledTerraform {
   const ctx = buildCtx(tier, opts.region);
 
-  const blocks: HclBlock[] = [...emitBaseline(ctx)];
+  const blocks: HclBlock[] = [...emitBaseline(ctx), ...emitNetwork(ctx)];
   const unsupported: string[] = [];
   let templated = 0;
 

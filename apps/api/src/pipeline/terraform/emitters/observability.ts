@@ -85,6 +85,30 @@ export function emitCloudwatchAlarms(_node: ArchitectureNode, ctx: EmitCtx): Hcl
 export function emitSns(node: ArchitectureNode, ctx: EmitCtx): HclBlock[] {
   const tf = ctx.tf(node.id);
   const arn = ref.snsArn(ctx, node.id);
+  // An ops topic delivers to email (var.ops_email); a PagerDuty/Slack/webhook
+  // escalation topic delivers to an HTTPS endpoint (its own variable, since several
+  // SNS topics can coexist and each needs a distinct destination).
+  const isWebhook = /pagerduty|slack|webhook|incident|opsgenie/i.test(node.role);
+  const subscription = isWebhook
+    ? [
+        `variable "${tf}_endpoint" {`,
+        `  type        = string`,
+        `  description = "HTTPS endpoint for ${node.role} (e.g. a PagerDuty/Slack integration URL)."`,
+        `}`,
+        ``,
+        `resource "aws_sns_topic_subscription" "${tf}_sub" {`,
+        `  topic_arn = ${arn}`,
+        `  protocol  = "https"`,
+        `  endpoint  = var.${tf}_endpoint`,
+        `}`,
+      ]
+    : [
+        `resource "aws_sns_topic_subscription" "${tf}_email" {`,
+        `  topic_arn = ${arn}`,
+        `  protocol  = "email"`,
+        `  endpoint  = var.ops_email`,
+        `}`,
+      ];
   return [
     {
       section: `SNS — ${node.role}`,
@@ -127,11 +151,7 @@ export function emitSns(node: ArchitectureNode, ctx: EmitCtx): HclBlock[] {
         )}`,
         `}`,
         ``,
-        `resource "aws_sns_topic_subscription" "${tf}_email" {`,
-        `  topic_arn = ${arn}`,
-        `  protocol  = "email"`,
-        `  endpoint  = var.ops_email`,
-        `}`,
+        ...subscription,
       ].join("\n"),
     },
   ];

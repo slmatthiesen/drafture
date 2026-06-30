@@ -23,10 +23,12 @@ export function emitCloudfront(node: ArchitectureNode, ctx: EmitCtx): HclBlock[]
     .out(node.id)
     .map((e) => ctx.byId(e.to))
     .filter((n): n is ArchitectureNode => !!n && ctx.keyOf(n) === "s3");
-  const ec2Origins = ctx
+  // A dynamic origin (EC2 box or ALB) is reached over a CUSTOM domain with a real
+  // TLS cert (var.origin_domain), never the instance public DNS / raw ALB DNS name.
+  const dynamicOrigins = ctx
     .out(node.id)
     .map((e) => ctx.byId(e.to))
-    .filter((n): n is ArchitectureNode => !!n && ctx.keyOf(n) === "ec2");
+    .filter((n): n is ArchitectureNode => !!n && (ctx.keyOf(n) === "ec2" || ctx.keyOf(n) === "alb"));
 
   // --- WAF (managed common + known-bad rule sets + IP rate limit) ---
   blocks.push({
@@ -36,13 +38,17 @@ export function emitCloudfront(node: ArchitectureNode, ctx: EmitCtx): HclBlock[]
       `  provider    = aws.us_east_1`,
       `  name        = "${ctx.prefix}-cf-waf"`,
       `  scope       = "CLOUDFRONT"`,
-      `  default_action { allow {} }`,
+      `  default_action {`,
+      `    allow {}`,
+      `  }`,
       ``,
       ...["AWSManagedRulesCommonRuleSet", "AWSManagedRulesKnownBadInputsRuleSet"].flatMap((rule, i) => [
         `  rule {`,
         `    name     = "${rule}"`,
         `    priority = ${i + 1}`,
-        `    override_action { none {} }`,
+        `    override_action {`,
+        `      none {}`,
+        `    }`,
         `    statement {`,
         `      managed_rule_group_statement {`,
         `        name        = "${rule}"`,
@@ -60,7 +66,9 @@ export function emitCloudfront(node: ArchitectureNode, ctx: EmitCtx): HclBlock[]
       `  rule {`,
       `    name     = "RateLimit"`,
       `    priority = 3`,
-      `    action { block {} }`,
+      `    action {`,
+      `      block {}`,
+      `    }`,
       `    statement {`,
       `      rate_based_statement {`,
       `        limit              = 2000`,
@@ -187,7 +195,11 @@ export function emitCloudfront(node: ArchitectureNode, ctx: EmitCtx): HclBlock[]
   }
 
   // --- Distribution ---
-  const primaryOriginId = ec2Origins[0] ? `ec2-${ctx.tf(ec2Origins[0].id)}` : s3Origins[0] ? `s3-${ctx.tf(s3Origins[0].id)}` : "s3-origin";
+  const primaryOriginId = dynamicOrigins[0]
+    ? `origin-${ctx.tf(dynamicOrigins[0].id)}`
+    : s3Origins[0]
+      ? `s3-${ctx.tf(s3Origins[0].id)}`
+      : "s3-origin";
   const originBlocks: string[] = [];
   for (const s3 of s3Origins) {
     const stf = ctx.tf(s3.id);
@@ -199,13 +211,13 @@ export function emitCloudfront(node: ArchitectureNode, ctx: EmitCtx): HclBlock[]
       `  }`,
     );
   }
-  for (const ec2 of ec2Origins) {
-    const etf = ctx.tf(ec2.id);
+  for (const dyn of dynamicOrigins) {
+    const dtf = ctx.tf(dyn.id);
     originBlocks.push(
-      `  # EC2 origin via a custom domain with a TLS cert (NOT the instance public DNS — rule cloudfront-origin-tls).`,
+      `  # ${ctx.keyOf(dyn) === "alb" ? "ALB" : "EC2"} origin over a custom domain with a TLS cert (NOT a raw AWS DNS name — rule cloudfront-origin-tls).`,
       `  origin {`,
-      `    domain_name = var.ec2_origin_domain`,
-      `    origin_id   = "ec2-${etf}"`,
+      `    domain_name = var.origin_domain`,
+      `    origin_id   = "origin-${dtf}"`,
       `    custom_origin_config {`,
       `      http_port              = 80`,
       `      https_port             = 443`,
@@ -215,9 +227,9 @@ export function emitCloudfront(node: ArchitectureNode, ctx: EmitCtx): HclBlock[]
       `  }`,
     );
   }
-  // An ordered behavior to the first S3 origin when a dynamic EC2 origin is the default.
+  // An ordered behavior to the first S3 origin when a dynamic origin is the default.
   const staticBehavior =
-    ec2Origins[0] && s3Origins[0]
+    dynamicOrigins[0] && s3Origins[0]
       ? [
           `  ordered_cache_behavior {`,
           `    path_pattern           = "/static/*"`,
