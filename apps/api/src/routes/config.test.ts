@@ -184,6 +184,28 @@ function balancedTier(): Tier {
   };
 }
 
+// A FULLY-TEMPLATED tier (every service has a deterministic emitter) — used to
+// exercise the $0/instant deterministic path. API Gateway + DynamoDB (balancedTier)
+// have no emitters yet, so that tier still routes to the LLM fallback.
+function templatedTier(): Tier {
+  return {
+    name: "budget",
+    summary: "templated single-box-ish",
+    nodes: [
+      { id: "store", awsService: "S3", role: "asset store", security: ["SSE-KMS", "block public access"] },
+      { id: "fn", awsService: "Lambda", role: "api worker", security: ["least-priv role"] },
+      { id: "secrets", awsService: "AWS Secrets Manager", role: "credentials store", security: ["KMS-encrypted"] },
+    ],
+    edges: [
+      { from: "fn", to: "store", payload: "object read/write", protocol: "HTTPS" },
+      { from: "fn", to: "secrets", payload: "db creds", protocol: "HTTPS" },
+    ],
+    costDrivers: [],
+    delta: ["baseline"],
+    tradeoffs: ["cheapest correct"],
+  };
+}
+
 // --- Fake provider (no network) ---------------------------------------------
 
 interface FakeOpts {
@@ -342,6 +364,54 @@ describe("POST /api/config", () => {
     expect(res.json().error).toBe("config_generation_failed");
     expect(ctx.stores.spendLedger.spentTodayUsd()).toBeCloseTo(0);
     expect(lastTelemetry(lines).outcome).toBe("error");
+
+    await app.close();
+  });
+});
+
+describe("POST /api/config — deterministic Terraform (TERRAFORM_DETERMINISTIC)", () => {
+  it("renders a fully-templated tier with NO LLM call, $0 spend, and the deterministic banner", async () => {
+    const fake = makeFake();
+    const { app, ctx, lines } = await buildHarness(fake);
+
+    const res = await app.inject({ method: "POST", url: "/api/config", payload: { tier: templatedTier() } });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.format).toBe("terraform");
+    // The deterministic banner identifies the path; the reference warning still leads.
+    expect(body.code).toContain("DETERMINISTICALLY");
+    expect(body.code).toMatch(/^#+\n# ⚠ {2}REFERENCE ONLY/);
+    // The typed graph was rendered directly — the provider was never called.
+    expect(fake.calls.generateConfig).toBe(0);
+    // And no spend was reserved/consumed (it's a $0 path).
+    expect(ctx.stores.spendLedger.spentTodayUsd()).toBeCloseTo(0);
+
+    const rec = lastTelemetry(lines);
+    expect(rec.outcome).toBe("ok");
+    expect(rec.cacheHit).toBe(false);
+    expect(rec.costUsd).toBe(0);
+
+    await app.close();
+  });
+
+  it("forcing TERRAFORM_DETERMINISTIC=false routes the same templated tier to the LLM path", async () => {
+    const fake = makeFake();
+    const { app } = await buildHarness(fake, { TERRAFORM_DETERMINISTIC: "false" });
+
+    const res = await app.inject({ method: "POST", url: "/api/config", payload: { tier: templatedTier() } });
+    expect(res.statusCode).toBe(200);
+    expect(fake.calls.generateConfig).toBe(1);
+
+    await app.close();
+  });
+
+  it("a tier with an unsupported service (API Gateway + DynamoDB) falls back to the LLM long tail", async () => {
+    const fake = makeFake();
+    const { app } = await buildHarness(fake);
+
+    const res = await app.inject({ method: "POST", url: "/api/config", payload: { tier: balancedTier() } });
+    expect(res.statusCode).toBe(200);
+    expect(fake.calls.generateConfig).toBe(1);
 
     await app.close();
   });
