@@ -28,7 +28,11 @@ const PRIMARY_DATASTORE_KEYWORDS = [
 
 export function isPrimaryDatastore(awsService: string, role: string): boolean {
   const s = `${awsService} ${role}`.toLowerCase();
-  return PRIMARY_DATASTORE_KEYWORDS.some((kw) => s.includes(kw));
+  // Word-boundary match, not a bare substring: `includes("rds")` mis-fires on
+  // "CloudWatch Dashboa-RDS" / "reco-RDS" / "standa-RDS", flagging a passive dashboard
+  // node as an unreachable primary datastore. `\bkw\b` requires the store to appear as
+  // its own token ("rds", "aurora", "redis"…) — same fix the cost engine uses.
+  return PRIMARY_DATASTORE_KEYWORDS.some((kw) => new RegExp(`\\b${kw}\\b`).test(s));
 }
 
 /** Every edge endpoint must be a real node `id` in that tier (or the literal

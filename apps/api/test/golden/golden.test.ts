@@ -191,6 +191,35 @@ describe("queuesAreResilient does not mis-flag an SNS alarm-notifier as a work q
   it("the whole aggregate is clean for the alert-only serverless design", () => {
     expect(runAllProperties(alertOnly).ok).toBe(true);
   });
+
+  it("does not mis-flag a DynamoDB 'message store' as a work queue needing DLQ/idempotency", () => {
+    // The bare "message" queue keyword matched a DATASTORE whose role mentions messages
+    // (DynamoDB "message + session store"), demanding a DLQ it has no use for. A primary
+    // datastore is never a work queue, however its role is phrased.
+    const withMessageStore = structuredClone(goodArchitecture());
+    withMessageStore.tiers.forEach((t) => {
+      t.nodes = t.nodes.map((n) =>
+        n.id === "db" ? { ...n, awsService: "DynamoDB", role: "message + session store" } : n,
+      );
+    });
+    expect(queuesAreResilient(withMessageStore).ok, queuesAreResilient(withMessageStore).reason).toBe(true);
+  });
+});
+
+describe("primaryDatastoreReachable does not mis-classify a CloudWatch Dashboard as a datastore", () => {
+  it("an edgeless 'CloudWatch Dashboards' node is not flagged (the 'rds' in 'dashboaRDS' substring bug)", () => {
+    // `isPrimaryDatastore` matched "rds" inside "dashboards", flagging a passive metric
+    // dashboard as an unreachable primary datastore. Word-boundary matching rejects it.
+    const withDashboard = structuredClone(goodArchitecture());
+    withDashboard.tiers[0]!.nodes.push({
+      id: "cw_dashboard",
+      awsService: "CloudWatch Dashboards",
+      role: "golden-signal dashboard",
+      security: ["least-priv read role"],
+    });
+    expect(primaryDatastoreReachable(withDashboard).ok, primaryDatastoreReachable(withDashboard).reason).toBe(true);
+    expect(runAllProperties(withDashboard).ok).toBe(true);
+  });
 });
 
 describe("computeMatchesDecision detects the serverless-decision / always-on-nodes contradiction", () => {

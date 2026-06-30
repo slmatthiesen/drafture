@@ -282,16 +282,22 @@ const ALERT_SINK_ROLE_KEYWORDS = [
 
 /**
  * True when a node matches a queue keyword but is NOT a work queue that needs
- * DLQ + idempotency. Two non-queue uses of these keywords:
+ * DLQ + idempotency. Three non-queue uses of these keywords:
  *   1. Alert sink — an SNS/notification node whose role is an alarm/on-call path
  *      (CloudWatch alarm → SNS → human); no business payload.
  *   2. Scheduler — EventBridge *Scheduler* / a cron trigger fires a job on a timer;
  *      it's a clock, not an at-least-once work queue (the JOB it triggers may need a
  *      DLQ, and that job's own SQS node would still be checked).
+ *   3. Primary datastore — a store whose ROLE mentions "message" (DynamoDB "message +
+ *      session store", a "message" table) is a datastore, not a work queue. The bare
+ *      "message" keyword matched it and demanded a DLQ/idempotency it has no use for.
  */
 function isNonQueueNode(awsService: string, role: string): boolean {
   const svc = awsService.toLowerCase();
   const r = role.toLowerCase();
+  // A primary datastore is never a work queue, however its role is phrased — a
+  // "message store" persists messages, it doesn't deliver them at-least-once.
+  if (isPrimaryDatastore(awsService, role)) return true;
   const isPubSubNotifier = svc.includes("sns") || svc.includes("notification");
   // An SNS *subscription* node is a delivery endpoint (email/Slack/HTTP), never a
   // work queue — regardless of how its role is phrased.
