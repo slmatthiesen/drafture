@@ -1,171 +1,140 @@
 {
   "assumptions": [
-    "Traffic: very low today (<1k concurrent dynamic requests); all three tiers share this load — tiers differ in robustness, not traffic level.",
-    "Single AWS region (us-east-1 or us-west-2); no multi-region requirement.",
-    "No regulated data (no PCI/HIPAA); standard security floor applies.",
-    "PostGIS extension required — RDS for PostgreSQL is the only managed option that supports it; Aurora Serverless v2 supports PostGIS and is used for budget tier as the cheapest managed Postgres-compatible option.",
-    "Headless Chromium render service uses Lambda with a Chromium layer (e.g., @sparticuz/chromium); rendered output >6 MB written to S3 and returned by reference.",
-    "ISR revalidation is on-demand (Next.js revalidateTag/revalidatePath) — the Node container holds the ISR in-memory/disk cache; CloudFront is the CDN layer.",
-    "Background AI pipeline orchestrator uses pg-boss or similar Postgres-backed job queue — it is a lightweight coordinator, not a heavy compute node.",
-    "Nightly backup via RDS automated snapshots with 14-day retention; data-reconciliation cron via EventBridge Scheduler invoking Lambda.",
-    "Observability: CloudWatch Logs + alarms + SNS email for budget; dashboards + X-Ray tracing added at balanced; PagerDuty escalation at resilient.",
-    "No ElastiCache in budget tier (traffic too low to justify); introduced at balanced for read offload.",
-    "Budget tier uses single public subnet (no NAT) for the container — but the data tier (RDS) goes in a private subnet per the security floor for VPC-bound stores. One NAT gateway is therefore unavoidable in all tiers where RDS is present.",
-    "Fargate is chosen over EC2 for the web/orchestrator containers — no instance management, right-sized per service.",
-    "Lambda render function timeout set to 5 min (max), with reserved concurrency to cap downstream RDS/S3 burst.",
+    "Traffic ~<1k–5k concurrent sessions/mo today; sized accordingly. Growth axis is pipeline throughput + cached content volume, not concurrent dynamic requests.",
+    "Single US region throughout; multi-region DR deferred to resilient tier.",
+    "No PCI/HIPAA/regulated data — standard baseline security floor applied.",
+    "ISR cache is in-process (Next.js file-system / memory) on the Node container; no external cache store required at budget tier.",
+    "Orchestrator job queue uses pg-boss or similar Postgres-backed queue library — Postgres already present, no separate queue service at budget.",
+    "Headless Chromium render function requires >512 MB RAM; sized at 2048 MB Lambda. Output >6 MB written to S3 and returned by reference per brief.",
+    "Nightly backup = pg_dump via EventBridge-scheduled Lambda → S3 (Glacier IR). Reconciliation cron = separate scheduled Lambda.",
+    "Schema migrations run as a CodeBuild/ECS one-off task triggered at deploy; not a standing service.",
+    "Balanced tier introduces private subnet + NAT gateway for RDS; cost delta noted.",
+    "Resilient tier adds multi-AZ RDS, ALB, Fargate multi-task, and cross-region S3 replication for DR-grade availability.",
+    "Instance sizing: budget single-box t4g.small (2 vCPU / 2 GB) is tight for Node + Postgres + orchestrator; t4g.medium (2 vCPU / 4 GB) matches current host footprint and is used instead.",
     "Cost estimates are on-demand list prices for us-east-1, presented as ranges over assumed monthly volumes. They exclude the AWS Free Tier, Savings Plans, Reserved Instances, and negotiated discounts.",
     "Assumed traffic ~100k–1M requests/month, applied equally to all three tiers (tiers differ by robustness, not traffic). Set \"expected monthly visitors\" in intake to change it."
   ],
   "clarificationsUsed": [
-    "Cost-optimized: single-AZ acceptable for budget tier.",
-    "No strict SLA; relaxed RPO/RTO.",
-    "Very low traffic today; growth in cached content + pipeline throughput, not concurrent dynamic load.",
-    "PostGIS is load-bearing — must use a managed Postgres that supports it.",
-    "Render output can exceed 6 MB — must write to S3 and return by reference.",
-    "Background pipeline must be decoupled from the web request path.",
-    "Headless Chromium is spiky/idle — scale-to-zero Lambda is the right fit.",
-    "Single US region."
+    "Cost-optimized / single-AZ acceptable → budget tier is a single EC2 box (Docker Compose: web + orchestrator + Postgres/PostGIS) with render Lambda split out.",
+    "Render output can exceed 6 MB → Lambda writes large output to S3 and returns presigned URL.",
+    "Orchestrator is Postgres-backed job queue → reuses existing Postgres instance; no SQS/separate broker at budget.",
+    "Traffic very low today → t4g.medium single box covers current 2 vCPU/4 GB footprint; no ALB or NAT at budget.",
+    "PostGIS required → self-managed Postgres + PostGIS extension on budget box; RDS for PostgreSQL with PostGIS at balanced+.",
+    "Nightly backup + 14-day retention → pg_dump Lambda → S3 lifecycle (Standard → Glacier IR at day 1, expire day 14)."
   ],
   "tiers": [
     {
       "name": "budget",
-      "summary": "Single-AZ, cost-optimized. One Fargate task each for the Next.js web tier and the orchestrator. RDS PostgreSQL (db.t4g.micro) in a private subnet. Lambda for the render service (scale-to-zero). CloudFront + WAF at the edge. SQS decouples the web tier from the pipeline. One NAT gateway (unavoidable — private RDS). No ElastiCache (traffic too low).",
+      "summary": "Single EC2 t4g.medium (Docker Compose: Next.js web + orchestrator + self-managed Postgres/PostGIS) behind CloudFront+WAF. Render Lambda split out per brief. Nightly pg_dump and cron jobs via scheduled Lambda. ~$0 idle on Lambda; ~$30/mo floor for EC2 + S3.",
       "nodes": [
         {
           "id": "cf",
           "awsService": "CloudFront",
-          "role": "CDN + ISR edge cache",
+          "role": "CDN + WAF edge",
           "security": [
-            "TLS",
             "WAF managed rules",
-            "WAF rate-based rule",
-            "Shield Standard",
-            "access logging",
-            "OAC for S3"
-          ]
-        },
-        {
-          "id": "waf",
-          "awsService": "AWS WAF",
-          "role": "edge rule enforcement",
-          "security": [
-            "managed rule groups",
             "rate-based rule",
-            "geo-block optional"
+            "TLS only",
+            "access logging → S3",
+            "Shield Standard"
           ]
         },
         {
-          "id": "alb",
-          "awsService": "Application Load Balancer",
-          "role": "web tier ingress",
-          "security": [
-            "TLS termination",
-            "HTTPS only",
-            "access logging",
-            "security group: web-sg"
-          ]
-        },
-        {
-          "id": "web",
-          "awsService": "AWS Fargate",
-          "role": "Next.js SSR/ISR server (0.5 vCPU/1 GB)",
-          "security": [
-            "private subnet",
-            "least-priv role",
-            "Secrets Manager for env",
-            "read-only root FS",
-            "security group: web-sg"
-          ]
-        },
-        {
-          "id": "orch",
-          "awsService": "AWS Fargate",
-          "role": "job orchestrator (0.25 vCPU/0.5 GB)",
-          "security": [
-            "private subnet",
-            "least-priv role",
-            "Secrets Manager for DB URL",
-            "security group: orch-sg"
-          ]
-        },
-        {
-          "id": "render_fn",
-          "awsService": "AWS Lambda",
-          "role": "headless Chromium renderer",
-          "security": [
-            "least-priv role",
-            "reserved concurrency 5",
-            "Secrets Manager",
-            "VPC-free",
-            "KMS encrypted env"
-          ]
-        },
-        {
-          "id": "job_queue",
-          "awsService": "Amazon SQS",
-          "role": "pipeline job buffer",
-          "security": [
-            "SSE-KMS",
-            "DLQ",
-            "visibility timeout 5 min"
-          ]
-        },
-        {
-          "id": "job_dlq",
-          "awsService": "Amazon SQS",
-          "role": "pipeline dead-letter queue",
-          "security": [
-            "SSE-KMS",
-            "CloudWatch alarm on depth"
-          ]
-        },
-        {
-          "id": "render_bucket",
-          "awsService": "Amazon S3",
-          "role": "render output + media store",
+          "id": "s3_assets",
+          "awsService": "S3",
+          "role": "ISR assets + media store",
           "security": [
             "SSE-KMS",
             "block public access",
-            "OAC",
-            "versioning",
-            "lifecycle: 7-day render TTL"
+            "bucket policy: aws:SecureTransport",
+            "least-priv role",
+            "versioning enabled"
           ]
         },
         {
-          "id": "rds",
-          "awsService": "Amazon RDS for PostgreSQL",
-          "role": "primary DB w/ PostGIS (db.t4g.micro)",
+          "id": "ec2_box",
+          "awsService": "EC2 (t4g.medium)",
+          "role": "web + orchestrator host",
           "security": [
-            "private subnet",
-            "KMS at rest",
-            "security group: db-sg",
-            "automated backups 14d",
-            "no public access"
+            "public subnet",
+            "restrictive SG (443/80 from CF only, no direct public DB port)",
+            "IMDSv2 enforced",
+            "EBS gp3 encrypted (KMS)",
+            "least-priv instance role",
+            "SSM Session Manager (no SSH)"
           ]
         },
         {
-          "id": "nat",
-          "awsService": "AWS NAT Gateway",
-          "role": "private-subnet egress",
+          "id": "postgres",
+          "awsService": "Self-managed PostgreSQL + PostGIS",
+          "role": "primary DB (localhost)",
           "security": [
-            "single-AZ",
-            "Elastic IP"
+            "localhost-bound (not network-exposed)",
+            "KMS-encrypted EBS volume",
+            "pg_hba: local only",
+            "nightly pg_dump → S3"
           ]
         },
         {
-          "id": "igw",
-          "awsService": "Internet Gateway",
-          "role": "VPC internet egress/ingress",
-          "security": []
+          "id": "render_lambda",
+          "awsService": "Lambda (arm64, 2048 MB)",
+          "role": "headless Chromium renderer",
+          "security": [
+            "least-priv role",
+            "reserved concurrency cap",
+            "TLS",
+            "no VPC (managed egress)",
+            "idempotent — S3 key = job hash"
+          ]
         },
         {
-          "id": "ecr",
-          "awsService": "Amazon ECR",
-          "role": "container image registry",
+          "id": "s3_renders",
+          "awsService": "S3",
+          "role": "render output store",
           "security": [
-            "image scanning",
-            "KMS encrypted",
-            "least-priv pull role"
+            "SSE-KMS",
+            "block public access",
+            "presigned URL access (15 min TTL)",
+            "lifecycle: expire 7 days"
+          ]
+        },
+        {
+          "id": "backup_lambda",
+          "awsService": "Lambda",
+          "role": "nightly pg_dump scheduler",
+          "security": [
+            "least-priv role",
+            "Secrets Manager DB creds",
+            "TLS"
+          ]
+        },
+        {
+          "id": "cron_lambda",
+          "awsService": "Lambda",
+          "role": "data reconciliation cron",
+          "security": [
+            "least-priv role",
+            "Secrets Manager creds",
+            "TLS"
+          ]
+        },
+        {
+          "id": "scheduler",
+          "awsService": "EventBridge Scheduler",
+          "role": "cron trigger",
+          "security": [
+            "least-priv role"
+          ]
+        },
+        {
+          "id": "s3_backups",
+          "awsService": "S3",
+          "role": "DB backup store",
+          "security": [
+            "SSE-KMS",
+            "block public access",
+            "lifecycle: Glacier IR day 1, expire day 14",
+            "versioning enabled"
           ]
         },
         {
@@ -173,54 +142,53 @@
           "awsService": "AWS Secrets Manager",
           "role": "credentials store",
           "security": [
-            "KMS encrypted",
-            "least-priv read",
+            "KMS-encrypted",
+            "least-priv access",
             "rotation enabled"
           ]
         },
         {
-          "id": "cron",
-          "awsService": "Amazon EventBridge Scheduler",
-          "role": "nightly backup + reconciliation cron",
-          "security": [
-            "least-priv role",
-            "TLS"
-          ]
-        },
-        {
           "id": "cw_logs",
-          "awsService": "Amazon CloudWatch Logs",
-          "role": "centralized structured logs",
+          "awsService": "CloudWatch Logs",
+          "role": "centralized log sink",
           "security": [
-            "retention 30d",
+            "retention 30 days",
             "KMS encrypted"
           ]
         },
         {
           "id": "cw_alarms",
-          "awsService": "Amazon CloudWatch",
+          "awsService": "CloudWatch Alarms",
           "role": "golden-signal alarms",
           "security": [
             "least-priv role"
           ]
         },
         {
-          "id": "sns_ops",
-          "awsService": "Amazon SNS",
-          "role": "ops alert notification topic",
+          "id": "sns_alerts",
+          "awsService": "SNS",
+          "role": "ops alert topic",
           "security": [
-            "SSE-KMS",
-            "HTTPS delivery only"
+            "TLS",
+            "least-priv publish policy"
+          ]
+        },
+        {
+          "id": "xray",
+          "awsService": "AWS X-Ray",
+          "role": "distributed tracing",
+          "security": [
+            "least-priv role"
           ]
         },
         {
           "id": "cloudtrail",
-          "awsService": "AWS CloudTrail",
-          "role": "audit trail (mgmt + data events)",
+          "awsService": "CloudTrail",
+          "role": "audit trail",
           "security": [
-            "S3 log bucket",
-            "log file validation",
-            "KMS encrypted"
+            "multi-region trail",
+            "S3 log bucket: MFA delete",
+            "CloudWatch Logs integration"
           ]
         }
       ],
@@ -228,163 +196,151 @@
         {
           "from": "client",
           "to": "cf",
-          "payload": "HTTPS page/asset request",
+          "payload": "HTTPS page/asset requests",
           "protocol": "HTTPS"
         },
         {
           "from": "cf",
-          "to": "waf",
-          "payload": "filtered HTTP request",
+          "to": "s3_assets",
+          "payload": "ISR static asset fetch (cache miss)",
           "protocol": "HTTPS"
-        },
-        {
-          "from": "waf",
-          "to": "alb",
-          "payload": "inspected HTTP request",
-          "protocol": "HTTPS"
-        },
-        {
-          "from": "alb",
-          "to": "web",
-          "payload": "HTTP request (SSR/ISR/admin)",
-          "protocol": "HTTP (internal)"
-        },
-        {
-          "from": "web",
-          "to": "rds",
-          "payload": "SQL + PostGIS queries",
-          "protocol": "TLS/TCP 5432"
-        },
-        {
-          "from": "web",
-          "to": "job_queue",
-          "payload": "pipeline job message (JSON)",
-          "protocol": "HTTPS/SQS API"
-        },
-        {
-          "from": "web",
-          "to": "render_bucket",
-          "payload": "media upload (PUT)",
-          "protocol": "HTTPS/S3 API"
         },
         {
           "from": "cf",
-          "to": "render_bucket",
-          "payload": "CDN-served media/render output",
-          "protocol": "HTTPS (OAC)"
-        },
-        {
-          "from": "job_queue",
-          "to": "orch",
-          "payload": "job message (JSON, at-least-once)",
-          "protocol": "HTTPS/SQS long-poll"
-        },
-        {
-          "from": "job_queue",
-          "to": "job_dlq",
-          "payload": "poison job message (after maxReceiveCount)",
-          "protocol": "SQS redrive"
-        },
-        {
-          "from": "orch",
-          "to": "render_fn",
-          "payload": "render request (URL, options)",
-          "protocol": "HTTPS/Lambda invoke"
-        },
-        {
-          "from": "render_fn",
-          "to": "render_bucket",
-          "payload": "rendered HTML/screenshot (>6 MB via S3 PUT)",
-          "protocol": "HTTPS/S3 API"
-        },
-        {
-          "from": "render_fn",
-          "to": "orch",
-          "payload": "S3 pre-signed URL (render reference)",
-          "protocol": "HTTPS/Lambda response"
-        },
-        {
-          "from": "orch",
-          "to": "rds",
-          "payload": "job state read/write (SQL)",
-          "protocol": "TLS/TCP 5432"
-        },
-        {
-          "from": "orch",
-          "to": "nat",
-          "payload": "outbound egress (AI API calls)",
+          "to": "ec2_box",
+          "payload": "SSR/ISR dynamic page request",
           "protocol": "HTTPS"
         },
         {
-          "from": "nat",
-          "to": "igw",
-          "payload": "NATed egress to internet",
-          "protocol": "TCP"
+          "from": "ec2_box",
+          "to": "postgres",
+          "payload": "SQL queries + PostGIS spatial queries",
+          "protocol": "TCP (localhost)"
         },
         {
-          "from": "cron",
-          "to": "orch",
-          "payload": "scheduled trigger (reconciliation)",
-          "protocol": "HTTPS/Lambda or ECS RunTask"
+          "from": "ec2_box",
+          "to": "s3_assets",
+          "payload": "ISR HTML/JSON write on revalidation",
+          "protocol": "HTTPS (AWS SDK)"
         },
         {
-          "from": "web",
+          "from": "ec2_box",
+          "to": "render_lambda",
+          "payload": "Render job request (URL + params)",
+          "protocol": "HTTPS (Lambda invoke)"
+        },
+        {
+          "from": "ec2_box",
+          "to": "secrets",
+          "payload": "DB credentials fetch",
+          "protocol": "HTTPS (AWS SDK)"
+        },
+        {
+          "from": "render_lambda",
+          "to": "s3_renders",
+          "payload": "Rendered HTML/screenshot (>6 MB offloaded)",
+          "protocol": "HTTPS (AWS SDK)"
+        },
+        {
+          "from": "render_lambda",
+          "to": "ec2_box",
+          "payload": "S3 presigned URL reference",
+          "protocol": "HTTPS (Lambda response)"
+        },
+        {
+          "from": "scheduler",
+          "to": "backup_lambda",
+          "payload": "Nightly backup trigger event",
+          "protocol": "EventBridge"
+        },
+        {
+          "from": "scheduler",
+          "to": "cron_lambda",
+          "payload": "Reconciliation schedule trigger",
+          "protocol": "EventBridge"
+        },
+        {
+          "from": "backup_lambda",
+          "to": "postgres",
+          "payload": "pg_dump via psql (localhost SSH tunnel)",
+          "protocol": "TCP (localhost)"
+        },
+        {
+          "from": "backup_lambda",
+          "to": "s3_backups",
+          "payload": "Compressed SQL dump",
+          "protocol": "HTTPS (AWS SDK)"
+        },
+        {
+          "from": "cron_lambda",
+          "to": "postgres",
+          "payload": "Reconciliation SQL writes",
+          "protocol": "TCP (localhost via SSM port-forward)"
+        },
+        {
+          "from": "ec2_box",
           "to": "cw_logs",
-          "payload": "structured app logs (JSON)",
-          "protocol": "CloudWatch API"
+          "payload": "Structured app + access logs",
+          "protocol": "CloudWatch agent / HTTPS"
         },
         {
-          "from": "orch",
+          "from": "render_lambda",
           "to": "cw_logs",
-          "payload": "job orchestrator logs (JSON)",
-          "protocol": "CloudWatch API"
+          "payload": "Lambda execution logs",
+          "protocol": "CloudWatch Logs"
         },
         {
-          "from": "render_fn",
+          "from": "backup_lambda",
           "to": "cw_logs",
-          "payload": "render function logs + duration",
-          "protocol": "CloudWatch API"
-        },
-        {
-          "from": "rds",
-          "to": "cw_logs",
-          "payload": "slow query + error logs",
-          "protocol": "CloudWatch API"
+          "payload": "Backup job logs",
+          "protocol": "CloudWatch Logs"
         },
         {
           "from": "cw_logs",
           "to": "cw_alarms",
-          "payload": "metric filters (error rate, latency, DLQ depth)",
+          "payload": "Metric filters (error rate, latency)",
           "protocol": "CloudWatch"
         },
         {
           "from": "cw_alarms",
-          "to": "sns_ops",
-          "payload": "alarm state change notification",
-          "protocol": "HTTPS/SNS"
+          "to": "sns_alerts",
+          "payload": "Alarm state-change notification",
+          "protocol": "CloudWatch → SNS"
         },
         {
-          "from": "sns_ops",
+          "from": "sns_alerts",
           "to": "client",
-          "payload": "ops email alert",
-          "protocol": "HTTPS/email"
+          "payload": "Email/Slack alert",
+          "protocol": "SNS subscription (email)"
+        },
+        {
+          "from": "ec2_box",
+          "to": "xray",
+          "payload": "Trace segments",
+          "protocol": "UDP/HTTPS (X-Ray SDK)"
+        },
+        {
+          "from": "render_lambda",
+          "to": "xray",
+          "payload": "Trace segments",
+          "protocol": "UDP/HTTPS (X-Ray SDK)"
         }
       ],
       "delta": [
-        "Baseline: single-AZ, single Fargate task per service, db.t4g.micro RDS w/ PostGIS.",
-        "CloudFront + WAF at edge; in-process ISR cache on the single web task.",
-        "Lambda render service: scale-to-zero, reserved concurrency=5, S3 output for >6 MB payloads.",
-        "SQS + DLQ decouples web → orchestrator pipeline; orch polls at its own rate.",
-        "One NAT gateway (unavoidable: private-subnet RDS requires it for app-tier egress).",
-        "Observability: CloudWatch Logs (30d), golden-signal alarms → SNS → email.",
-        "No ElastiCache, no read replicas, no multi-AZ: cost floor, not hardened."
+        "Baseline: single EC2 t4g.medium (Docker Compose) — web + orchestrator + self-managed Postgres/PostGIS co-located, ~$30/mo floor",
+        "Render Lambda split out immediately per brief (scale-to-zero, pay-per-render)",
+        "No ALB, no NAT gateway, no RDS — public subnet with tight SG; self-managed Postgres on encrypted EBS (localhost-only)",
+        "Postgres-backed job queue (pg-boss) reuses existing DB; no SQS/broker",
+        "ISR cache: in-process Next.js file-system on container ephemeral storage; S3 as revalidation write-through",
+        "Burst handling: render Lambda reserved concurrency cap; CloudFront caches ISR pages; API Gateway throttling not applicable (direct CF→EC2)",
+        "Observability: CloudWatch Logs + key alarms (5xx rate, Lambda errors, EC2 CPU) → SNS email; X-Ray tracing on web + render paths"
       ],
       "tradeoffs": [
-        "Single-AZ: RDS or Fargate AZ loss = downtime (RPO/RTO relaxed, acceptable at current scale).",
-        "No ElastiCache: hot reads hit RDS directly; fine at low traffic, bottleneck at scale.",
-        "Single NAT gateway: AZ failure loses all private-subnet egress.",
-        "In-process ISR cache: lost on Fargate task recycle; CloudFront masks most of it.",
-        "db.t4g.micro: minimal compute; vertical resize needed before high pipeline throughput."
+        "Single-AZ: any EC2/EBS failure = downtime until instance recovery (RPO/RTO relaxed per brief)",
+        "Self-managed Postgres: no automated failover, no read replicas, manual patching",
+        "Co-located services: noisy-neighbor risk between web, orchestrator, and DB on one box",
+        "No connection pooler (PgBouncer) — add if Lambda/cron connection churn becomes an issue",
+        "Lambda cold starts for render function (mitigated by arm64 + Layer caching)"
       ],
       "costDrivers": [
         {
@@ -400,54 +356,6 @@
           "note": "HTTPS requests ($0.0075 per 10,000). North America/Europe."
         },
         {
-          "service": "WAF",
-          "unit": "$/web-ACL-month",
-          "estimateRange": "$5.00–$5.00/mo",
-          "note": "Per web ACL/month. Add ~$1.00 per rule/month and ~$0.60 per 1M requests inspected."
-        },
-        {
-          "service": "ALB",
-          "unit": "$/hr",
-          "estimateRange": "$16.43–$32.85/mo",
-          "note": "Application Load Balancer per-hour charge (always-on)."
-        },
-        {
-          "service": "ALB",
-          "unit": "$/LCU-hr",
-          "estimateRange": "$5.84–$11.68/mo",
-          "note": "Assumed-throughput estimate: per Load Balancer Capacity Unit-hour; LCUs scale with connections, requests, and bandwidth."
-        },
-        {
-          "service": "Fargate",
-          "unit": "$/GB-hr",
-          "estimateRange": "$6.49–$12.98/mo",
-          "note": "Assumed-throughput estimate: per GB memory-hour (Linux/x86). Total = memoryGB x hours."
-        },
-        {
-          "service": "Fargate",
-          "unit": "$/vCPU-hr",
-          "estimateRange": "$29.55–$59.10/mo",
-          "note": "Assumed-throughput estimate: per vCPU-hour (Linux/x86). Total = vCPU x hours."
-        },
-        {
-          "service": "Lambda",
-          "unit": "$/GB-second",
-          "estimateRange": "$0.167–$1.67/mo",
-          "note": "Compute duration: $0.0000166667 per GB-second (x86). Multiply by memoryGB x durationSeconds per invocation."
-        },
-        {
-          "service": "Lambda",
-          "unit": "per 1k requests",
-          "estimateRange": "$0.020–$0.200/mo",
-          "note": "On-demand list price ($0.20 per 1M requests). Excludes Free Tier."
-        },
-        {
-          "service": "SQS",
-          "unit": "per 1k requests",
-          "estimateRange": "$0.040–$0.400/mo",
-          "note": "Standard queue requests ($0.40 per 1M). First 1M/month free. FIFO is $0.50 per 1M."
-        },
-        {
           "service": "S3",
           "unit": "$/GB-month",
           "estimateRange": "$0.230–$2.30/mo",
@@ -460,23 +368,23 @@
           "note": "PUT/COPY/POST/LIST requests per 1,000. GET/SELECT requests are ~$0.0004 per 1,000."
         },
         {
-          "service": "RDS",
+          "service": "EC2",
           "unit": "$/hr",
-          "estimateRange": "$11.68–$23.36/mo",
-          "note": "Assumed-throughput estimate: db.t4g.micro on-demand (us-east-1). Cost = instance count × running hours; storage/IO billed separately, multi-AZ via the tier multiplier.",
-          "instanceType": "db.t4g.micro"
+          "estimateRange": "$24.53–$49.06/mo",
+          "note": "Assumed-throughput estimate: t4g.medium on-demand (us-east-1). Cost = instance count × running hours; storage/IO billed separately, multi-AZ via the tier multiplier.",
+          "instanceType": "t4g.medium"
         },
         {
-          "service": "NAT Gateway",
-          "unit": "$/GB processed",
-          "estimateRange": "$0.022–$0.225/mo",
-          "note": "Per GB processed. Forced by the private-subnet data-tier default (security baseline no-public-data-tier); the most common budget surprise."
+          "service": "Lambda",
+          "unit": "$/GB-second",
+          "estimateRange": "$0.167–$1.67/mo",
+          "note": "Compute duration: $0.0000166667 per GB-second (x86). Multiply by memoryGB x durationSeconds per invocation."
         },
         {
-          "service": "NAT Gateway",
-          "unit": "$/hr",
-          "estimateRange": "$32.85–$65.70/mo",
-          "note": "Per NAT gateway-hour (always-on, ~$32.40/month per AZ before data processing)."
+          "service": "Lambda",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.020–$0.200/mo",
+          "note": "On-demand list price ($0.20 per 1M requests). Excludes Free Tier."
         },
         {
           "service": "EventBridge",
@@ -497,159 +405,101 @@
           "note": "Standard topic API requests ($0.50 per 1M). Delivery (HTTP/SMS/email) priced separately."
         },
         {
-          "service": "Data Transfer",
-          "unit": "$/GB cross-AZ",
-          "estimateRange": "$0.0050–$0.050/mo",
-          "note": "Required by the private-subnet security default (no public data tier) — the most common budget surprise. Inter-AZ data transfer, charged $0.01/GB in each direction."
-        },
-        {
-          "service": "Data Transfer",
-          "unit": "$/GB internet egress",
-          "estimateRange": "$0.045–$0.450/mo",
-          "note": "Required by the private-subnet security default (no public data tier) — the most common budget surprise. Data transfer out to internet, first 10TB/month tier. First 100GB/month is free."
+          "service": "X-Ray",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.500–$5.00/mo",
+          "note": "X-Ray traces: $5.00 per 1M traces recorded (first 100k/mo free)."
         }
       ]
     },
     {
       "name": "balanced",
-      "summary": "Multi-AZ within one region. ALB spans two AZs, Fargate services scale horizontally, RDS upgrades to db.t4g.small Multi-AZ, ElastiCache (cache.t4g.micro) added for read offload and ISR shared cache, two NAT gateways (one per AZ). Lambda render service unchanged.",
+      "summary": "Promote to managed split: Fargate (web + orchestrator as separate services) + RDS for PostgreSQL with PostGIS + private subnets + NAT Gateway + ALB. S3-backed ISR write-through. ElastiCache Redis for ISR/session cache. Render Lambda unchanged. Multi-AZ optional (not default — single-AZ RDS at this tier).",
       "nodes": [
         {
           "id": "cf",
           "awsService": "CloudFront",
-          "role": "CDN + ISR edge cache",
+          "role": "CDN + WAF edge",
           "security": [
-            "TLS",
             "WAF managed rules",
-            "WAF rate-based rule",
-            "Shield Standard",
-            "access logging",
-            "OAC for S3"
-          ]
-        },
-        {
-          "id": "waf",
-          "awsService": "AWS WAF",
-          "role": "edge rule enforcement",
-          "security": [
-            "managed rule groups",
             "rate-based rule",
-            "geo-block optional"
+            "TLS only",
+            "access logging → S3",
+            "Shield Standard"
           ]
         },
         {
-          "id": "alb",
-          "awsService": "Application Load Balancer",
-          "role": "web tier ingress",
-          "security": [
-            "TLS termination",
-            "HTTPS only",
-            "access logging",
-            "security group: web-sg"
-          ]
-        },
-        {
-          "id": "web",
-          "awsService": "AWS Fargate",
-          "role": "Next.js SSR/ISR server (0.5 vCPU/1 GB)",
-          "security": [
-            "private subnet",
-            "least-priv role",
-            "Secrets Manager for env",
-            "read-only root FS",
-            "security group: web-sg"
-          ]
-        },
-        {
-          "id": "orch",
-          "awsService": "AWS Fargate",
-          "role": "job orchestrator (0.25 vCPU/0.5 GB)",
-          "security": [
-            "private subnet",
-            "least-priv role",
-            "Secrets Manager for DB URL",
-            "security group: orch-sg"
-          ]
-        },
-        {
-          "id": "render_fn",
-          "awsService": "AWS Lambda",
-          "role": "headless Chromium renderer",
-          "security": [
-            "least-priv role",
-            "reserved concurrency 5",
-            "Secrets Manager",
-            "VPC-free",
-            "KMS encrypted env"
-          ]
-        },
-        {
-          "id": "job_queue",
-          "awsService": "Amazon SQS",
-          "role": "pipeline job buffer",
-          "security": [
-            "SSE-KMS",
-            "DLQ",
-            "visibility timeout 5 min"
-          ]
-        },
-        {
-          "id": "job_dlq",
-          "awsService": "Amazon SQS",
-          "role": "pipeline dead-letter queue",
-          "security": [
-            "SSE-KMS",
-            "CloudWatch alarm on depth"
-          ]
-        },
-        {
-          "id": "render_bucket",
-          "awsService": "Amazon S3",
-          "role": "render output + media store",
+          "id": "s3_assets",
+          "awsService": "S3",
+          "role": "ISR assets + media store",
           "security": [
             "SSE-KMS",
             "block public access",
-            "OAC",
-            "versioning",
-            "lifecycle: 7-day render TTL"
+            "bucket policy: aws:SecureTransport",
+            "least-priv role",
+            "versioning enabled"
           ]
         },
         {
-          "id": "rds",
-          "awsService": "Amazon RDS for PostgreSQL",
-          "role": "Multi-AZ primary w/ PostGIS (db.t4g.small)",
+          "id": "render_lambda",
+          "awsService": "Lambda (arm64, 2048 MB)",
+          "role": "headless Chromium renderer",
           "security": [
-            "private subnet",
-            "KMS at rest",
-            "security group: db-sg",
-            "automated backups 14d",
-            "no public access",
-            "Multi-AZ standby"
+            "least-priv role",
+            "reserved concurrency cap",
+            "TLS",
+            "no VPC (managed egress)",
+            "idempotent — S3 key = job hash"
           ]
         },
         {
-          "id": "nat",
-          "awsService": "AWS NAT Gateway",
-          "role": "private-subnet egress",
+          "id": "s3_renders",
+          "awsService": "S3",
+          "role": "render output store",
           "security": [
-            "single-AZ",
-            "Elastic IP"
+            "SSE-KMS",
+            "block public access",
+            "presigned URL access (15 min TTL)",
+            "lifecycle: expire 7 days"
           ]
         },
         {
-          "id": "igw",
-          "awsService": "Internet Gateway",
-          "role": "VPC internet egress/ingress",
-          "security": []
+          "id": "backup_lambda",
+          "awsService": "Lambda",
+          "role": "nightly pg_dump scheduler",
+          "security": [
+            "least-priv role",
+            "Secrets Manager DB creds",
+            "TLS"
+          ]
         },
         {
-          "id": "ecr",
-          "awsService": "Amazon ECR",
-          "role": "container image registry",
+          "id": "cron_lambda",
+          "awsService": "Lambda",
+          "role": "data reconciliation cron",
           "security": [
-            "image scanning",
-            "KMS encrypted",
-            "least-priv pull role"
+            "least-priv role",
+            "Secrets Manager creds",
+            "TLS"
+          ]
+        },
+        {
+          "id": "scheduler",
+          "awsService": "EventBridge Scheduler",
+          "role": "cron trigger",
+          "security": [
+            "least-priv role"
+          ]
+        },
+        {
+          "id": "s3_backups",
+          "awsService": "S3",
+          "role": "DB backup store",
+          "security": [
+            "SSE-KMS",
+            "block public access",
+            "lifecycle: Glacier IR day 1, expire day 14",
+            "versioning enabled"
           ]
         },
         {
@@ -657,83 +507,35 @@
           "awsService": "AWS Secrets Manager",
           "role": "credentials store",
           "security": [
-            "KMS encrypted",
-            "least-priv read",
+            "KMS-encrypted",
+            "least-priv access",
             "rotation enabled"
           ]
         },
         {
-          "id": "cron",
-          "awsService": "Amazon EventBridge Scheduler",
-          "role": "nightly backup + reconciliation cron",
-          "security": [
-            "least-priv role",
-            "TLS"
-          ]
-        },
-        {
           "id": "cw_logs",
-          "awsService": "Amazon CloudWatch Logs",
-          "role": "centralized structured logs",
+          "awsService": "CloudWatch Logs",
+          "role": "centralized log sink",
           "security": [
-            "retention 30d",
+            "retention 30 days",
             "KMS encrypted"
           ]
         },
         {
           "id": "cw_alarms",
-          "awsService": "Amazon CloudWatch",
+          "awsService": "CloudWatch Alarms",
           "role": "golden-signal alarms",
           "security": [
             "least-priv role"
           ]
         },
         {
-          "id": "sns_ops",
-          "awsService": "Amazon SNS",
-          "role": "ops alert notification topic",
+          "id": "sns_alerts",
+          "awsService": "SNS",
+          "role": "ops alert topic",
           "security": [
-            "SSE-KMS",
-            "HTTPS delivery only"
-          ]
-        },
-        {
-          "id": "cloudtrail",
-          "awsService": "AWS CloudTrail",
-          "role": "audit trail (mgmt + data events)",
-          "security": [
-            "S3 log bucket",
-            "log file validation",
-            "KMS encrypted"
-          ]
-        },
-        {
-          "id": "elasticache",
-          "awsService": "Amazon ElastiCache for Redis",
-          "role": "read cache + ISR shared store (cache.t4g.micro)",
-          "security": [
-            "private subnet",
-            "KMS at rest",
-            "auth token",
-            "security group: cache-sg",
-            "in-transit TLS"
-          ]
-        },
-        {
-          "id": "nat_b",
-          "awsService": "AWS NAT Gateway",
-          "role": "AZ-b private-subnet egress",
-          "security": [
-            "Elastic IP",
-            "AZ-b"
-          ]
-        },
-        {
-          "id": "cw_dashboard",
-          "awsService": "Amazon CloudWatch",
-          "role": "ops dashboard (golden signals)",
-          "security": [
-            "least-priv read"
+            "TLS",
+            "least-priv publish policy"
           ]
         },
         {
@@ -741,8 +543,94 @@
           "awsService": "AWS X-Ray",
           "role": "distributed tracing",
           "security": [
-            "least-priv role",
-            "sampling rules"
+            "least-priv role"
+          ]
+        },
+        {
+          "id": "cloudtrail",
+          "awsService": "CloudTrail",
+          "role": "audit trail",
+          "security": [
+            "multi-region trail",
+            "S3 log bucket: MFA delete",
+            "CloudWatch Logs integration"
+          ]
+        },
+        {
+          "id": "alb",
+          "awsService": "Application Load Balancer",
+          "role": "HTTPS ingress (web + admin)",
+          "security": [
+            "TLS termination",
+            "SG: 443 from CF only",
+            "access logging → S3",
+            "deletion protection"
+          ]
+        },
+        {
+          "id": "fargate_web",
+          "awsService": "AWS Fargate (ECS)",
+          "role": "Next.js web service (2 tasks)",
+          "security": [
+            "private subnet",
+            "SG: 8080 from ALB only",
+            "least-priv task role",
+            "no public IP",
+            "Secrets Manager env inject"
+          ]
+        },
+        {
+          "id": "fargate_orch",
+          "awsService": "AWS Fargate (ECS)",
+          "role": "orchestrator service (1–2 tasks)",
+          "security": [
+            "private subnet",
+            "SG: internal only",
+            "least-priv task role",
+            "no public IP",
+            "Secrets Manager env inject"
+          ]
+        },
+        {
+          "id": "rds_pg",
+          "awsService": "Amazon RDS for PostgreSQL (db.t4g.medium)",
+          "role": "managed Postgres + PostGIS",
+          "security": [
+            "private subnet",
+            "SG: 5432 from Fargate SGs only",
+            "KMS at rest",
+            "TLS enforced (rds.force_ssl)",
+            "automated backups 14d",
+            "deletion protection"
+          ]
+        },
+        {
+          "id": "elasticache",
+          "awsService": "ElastiCache Redis (cache.t4g.micro)",
+          "role": "ISR + session cache",
+          "security": [
+            "private subnet",
+            "SG: 6379 from Fargate only",
+            "TLS in-transit",
+            "at-rest encryption",
+            "no public access"
+          ]
+        },
+        {
+          "id": "nat_gw",
+          "awsService": "NAT Gateway",
+          "role": "private subnet egress",
+          "security": [
+            "single-AZ (one NAT)",
+            "Elastic IP"
+          ]
+        },
+        {
+          "id": "cw_dashboard",
+          "awsService": "CloudWatch Dashboard",
+          "role": "golden-signal dashboard",
+          "security": [
+            "read-only IAM"
           ]
         }
       ],
@@ -750,191 +638,188 @@
         {
           "from": "client",
           "to": "cf",
-          "payload": "HTTPS page/asset request",
+          "payload": "HTTPS page/asset requests",
           "protocol": "HTTPS"
         },
         {
           "from": "cf",
-          "to": "waf",
-          "payload": "filtered HTTP request",
+          "to": "s3_assets",
+          "payload": "ISR static asset fetch (cache miss)",
           "protocol": "HTTPS"
         },
         {
-          "from": "waf",
-          "to": "alb",
-          "payload": "inspected HTTP request",
-          "protocol": "HTTPS"
+          "from": "render_lambda",
+          "to": "s3_renders",
+          "payload": "Rendered HTML/screenshot (>6 MB offloaded)",
+          "protocol": "HTTPS (AWS SDK)"
         },
         {
-          "from": "alb",
-          "to": "web",
-          "payload": "HTTP request (SSR/ISR/admin)",
-          "protocol": "HTTP (internal)"
+          "from": "scheduler",
+          "to": "backup_lambda",
+          "payload": "Nightly backup trigger event",
+          "protocol": "EventBridge"
         },
         {
-          "from": "web",
-          "to": "rds",
-          "payload": "SQL + PostGIS queries",
-          "protocol": "TLS/TCP 5432"
+          "from": "scheduler",
+          "to": "cron_lambda",
+          "payload": "Reconciliation schedule trigger",
+          "protocol": "EventBridge"
         },
         {
-          "from": "web",
-          "to": "job_queue",
-          "payload": "pipeline job message (JSON)",
-          "protocol": "HTTPS/SQS API"
+          "from": "backup_lambda",
+          "to": "s3_backups",
+          "payload": "Compressed SQL dump",
+          "protocol": "HTTPS (AWS SDK)"
         },
         {
-          "from": "web",
-          "to": "render_bucket",
-          "payload": "media upload (PUT)",
-          "protocol": "HTTPS/S3 API"
-        },
-        {
-          "from": "cf",
-          "to": "render_bucket",
-          "payload": "CDN-served media/render output",
-          "protocol": "HTTPS (OAC)"
-        },
-        {
-          "from": "job_queue",
-          "to": "orch",
-          "payload": "job message (JSON, at-least-once)",
-          "protocol": "HTTPS/SQS long-poll"
-        },
-        {
-          "from": "job_queue",
-          "to": "job_dlq",
-          "payload": "poison job message (after maxReceiveCount)",
-          "protocol": "SQS redrive"
-        },
-        {
-          "from": "orch",
-          "to": "render_fn",
-          "payload": "render request (URL, options)",
-          "protocol": "HTTPS/Lambda invoke"
-        },
-        {
-          "from": "render_fn",
-          "to": "render_bucket",
-          "payload": "rendered HTML/screenshot (>6 MB via S3 PUT)",
-          "protocol": "HTTPS/S3 API"
-        },
-        {
-          "from": "render_fn",
-          "to": "orch",
-          "payload": "S3 pre-signed URL (render reference)",
-          "protocol": "HTTPS/Lambda response"
-        },
-        {
-          "from": "orch",
-          "to": "rds",
-          "payload": "job state read/write (SQL)",
-          "protocol": "TLS/TCP 5432"
-        },
-        {
-          "from": "orch",
-          "to": "nat",
-          "payload": "outbound egress (AI API calls)",
-          "protocol": "HTTPS"
-        },
-        {
-          "from": "nat",
-          "to": "igw",
-          "payload": "NATed egress to internet",
-          "protocol": "TCP"
-        },
-        {
-          "from": "cron",
-          "to": "orch",
-          "payload": "scheduled trigger (reconciliation)",
-          "protocol": "HTTPS/Lambda or ECS RunTask"
-        },
-        {
-          "from": "web",
+          "from": "render_lambda",
           "to": "cw_logs",
-          "payload": "structured app logs (JSON)",
-          "protocol": "CloudWatch API"
+          "payload": "Lambda execution logs",
+          "protocol": "CloudWatch Logs"
         },
         {
-          "from": "orch",
+          "from": "backup_lambda",
           "to": "cw_logs",
-          "payload": "job orchestrator logs (JSON)",
-          "protocol": "CloudWatch API"
-        },
-        {
-          "from": "render_fn",
-          "to": "cw_logs",
-          "payload": "render function logs + duration",
-          "protocol": "CloudWatch API"
-        },
-        {
-          "from": "rds",
-          "to": "cw_logs",
-          "payload": "slow query + error logs",
-          "protocol": "CloudWatch API"
+          "payload": "Backup job logs",
+          "protocol": "CloudWatch Logs"
         },
         {
           "from": "cw_logs",
           "to": "cw_alarms",
-          "payload": "metric filters (error rate, latency, DLQ depth)",
+          "payload": "Metric filters (error rate, latency)",
           "protocol": "CloudWatch"
         },
         {
           "from": "cw_alarms",
-          "to": "sns_ops",
-          "payload": "alarm state change notification",
-          "protocol": "HTTPS/SNS"
+          "to": "sns_alerts",
+          "payload": "Alarm state-change notification",
+          "protocol": "CloudWatch → SNS"
         },
         {
-          "from": "sns_ops",
+          "from": "sns_alerts",
           "to": "client",
-          "payload": "ops email alert",
-          "protocol": "HTTPS/email"
+          "payload": "Email/Slack alert",
+          "protocol": "SNS subscription (email)"
         },
         {
-          "from": "web",
+          "from": "render_lambda",
+          "to": "xray",
+          "payload": "Trace segments",
+          "protocol": "UDP/HTTPS (X-Ray SDK)"
+        },
+        {
+          "from": "cf",
+          "to": "alb",
+          "payload": "SSR/ISR dynamic page request",
+          "protocol": "HTTPS"
+        },
+        {
+          "from": "alb",
+          "to": "fargate_web",
+          "payload": "HTTP/1.1 page request (path-routed)",
+          "protocol": "HTTP"
+        },
+        {
+          "from": "fargate_web",
+          "to": "rds_pg",
+          "payload": "SQL + PostGIS spatial queries",
+          "protocol": "TCP/TLS (5432)"
+        },
+        {
+          "from": "fargate_web",
           "to": "elasticache",
-          "payload": "ISR cache read/write (Redis GET/SET)",
-          "protocol": "TLS/Redis 6380"
+          "payload": "ISR cache reads/writes",
+          "protocol": "Redis TLS (6379)"
         },
         {
-          "from": "orch",
-          "to": "elasticache",
-          "payload": "job result cache read/write",
-          "protocol": "TLS/Redis 6380"
+          "from": "fargate_web",
+          "to": "s3_assets",
+          "payload": "ISR HTML/JSON write-through",
+          "protocol": "HTTPS (AWS SDK)"
         },
         {
-          "from": "web",
-          "to": "xray",
-          "payload": "trace segments (SSR latency)",
-          "protocol": "UDP/X-Ray daemon"
+          "from": "fargate_web",
+          "to": "render_lambda",
+          "payload": "Render job request (URL + params)",
+          "protocol": "HTTPS (Lambda invoke)"
         },
         {
-          "from": "orch",
-          "to": "xray",
-          "payload": "trace segments (job execution)",
-          "protocol": "UDP/X-Ray daemon"
+          "from": "fargate_web",
+          "to": "secrets",
+          "payload": "DB + Redis credentials fetch",
+          "protocol": "HTTPS (AWS SDK)"
         },
         {
-          "from": "render_fn",
-          "to": "xray",
-          "payload": "trace segments (render duration)",
-          "protocol": "UDP/X-Ray daemon"
+          "from": "fargate_orch",
+          "to": "rds_pg",
+          "payload": "Job queue reads/writes (pg-boss)",
+          "protocol": "TCP/TLS (5432)"
+        },
+        {
+          "from": "fargate_orch",
+          "to": "render_lambda",
+          "payload": "Render job dispatch",
+          "protocol": "HTTPS (Lambda invoke)"
+        },
+        {
+          "from": "fargate_orch",
+          "to": "secrets",
+          "payload": "Credentials fetch",
+          "protocol": "HTTPS (AWS SDK)"
+        },
+        {
+          "from": "fargate_web",
+          "to": "nat_gw",
+          "payload": "Outbound AWS API / AI calls",
+          "protocol": "HTTPS"
+        },
+        {
+          "from": "fargate_orch",
+          "to": "nat_gw",
+          "payload": "Outbound AI API calls",
+          "protocol": "HTTPS"
+        },
+        {
+          "from": "fargate_web",
+          "to": "cw_logs",
+          "payload": "Structured app logs",
+          "protocol": "CloudWatch (awslogs driver)"
+        },
+        {
+          "from": "fargate_orch",
+          "to": "cw_logs",
+          "payload": "Orchestrator + job logs",
+          "protocol": "CloudWatch (awslogs driver)"
+        },
+        {
+          "from": "cw_logs",
+          "to": "cw_dashboard",
+          "payload": "Metric + log data",
+          "protocol": "CloudWatch"
+        },
+        {
+          "from": "cron_lambda",
+          "to": "rds_pg",
+          "payload": "Reconciliation SQL writes (via VPC Lambda)",
+          "protocol": "TCP/TLS (5432)"
         }
       ],
       "delta": [
-        "RDS → Multi-AZ standby (db.t4g.small): automatic failover ~60s, no data loss.",
-        "ElastiCache Redis (cache.t4g.micro) added: shared ISR cache across web tasks + hot-read offload.",
-        "Fargate web + orch services: min 2 tasks across 2 AZs; ALB health-check-driven failover.",
-        "Two NAT gateways (one per AZ): eliminates single-AZ NAT as an egress SPOF.",
-        "X-Ray tracing added across web → orch → render path.",
-        "CloudWatch dashboard added for golden-signal visibility."
+        "EC2 single-box → Fargate: web and orchestrator become independent ECS services (scale independently per brief)",
+        "Self-managed Postgres → RDS for PostgreSQL (db.t4g.medium) with PostGIS extension; automated backups + 14d retention",
+        "Private subnets introduced for Fargate tasks + RDS + ElastiCache → NAT Gateway required for outbound egress (~$33/mo always-on)",
+        "ALB added as HTTPS ingress in front of Fargate tasks",
+        "ElastiCache Redis (cache.t4g.micro) for shared ISR + session cache across tasks",
+        "S3-backed ISR write-through replaces ephemeral in-process cache (consistent across tasks)",
+        "CloudWatch Dashboard added for golden-signal visibility",
+        "Render Lambda: unchanged — still scale-to-zero",
+        "Burst handling: Fargate service auto-scaling (CPU/request-count); ElastiCache absorbs hot-read bursts; CloudFront ISR caching unchanged"
       ],
       "tradeoffs": [
-        "Two NAT gateways and Multi-AZ RDS add significant always-on cost vs budget.",
-        "ElastiCache is a new always-on node (~$15/mo); overkill if concurrent web tasks stay at 1.",
-        "RDS Multi-AZ standby is passive (no reads); read replicas needed for read scale-out.",
-        "Still single-region: a region outage takes the whole stack down."
+        "~$100–130/mo always-on floor (NAT + ALB + RDS + ElastiCache) vs. ~$30/mo budget",
+        "Still single-AZ RDS and single NAT — AZ failure = DB downtime; multi-AZ promoted to resilient",
+        "NAT Gateway egress cost scales with AI API call volume — monitor outbound data transfer",
+        "Fargate cold-start latency on scale-out events (mitigated by minimum task count of 1 per service)"
       ],
       "costDrivers": [
         {
@@ -950,10 +835,52 @@
           "note": "HTTPS requests ($0.0075 per 10,000). North America/Europe."
         },
         {
-          "service": "WAF",
-          "unit": "$/web-ACL-month",
-          "estimateRange": "$10.00–$10.00/mo",
-          "note": "Per web ACL/month. Add ~$1.00 per rule/month and ~$0.60 per 1M requests inspected."
+          "service": "S3",
+          "unit": "$/GB-month",
+          "estimateRange": "$0.230–$2.30/mo",
+          "note": "S3 Standard storage, first 50TB/month tier."
+        },
+        {
+          "service": "S3",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.500–$5.00/mo",
+          "note": "PUT/COPY/POST/LIST requests per 1,000. GET/SELECT requests are ~$0.0004 per 1,000."
+        },
+        {
+          "service": "Lambda",
+          "unit": "$/GB-second",
+          "estimateRange": "$0.167–$1.67/mo",
+          "note": "Compute duration: $0.0000166667 per GB-second (x86). Multiply by memoryGB x durationSeconds per invocation."
+        },
+        {
+          "service": "Lambda",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.020–$0.200/mo",
+          "note": "On-demand list price ($0.20 per 1M requests). Excludes Free Tier."
+        },
+        {
+          "service": "EventBridge",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.100–$1.00/mo",
+          "note": "Custom event-bus events: $1.00 per 1M events published. Pipes/schema registry priced separately."
+        },
+        {
+          "service": "CloudWatch Logs",
+          "unit": "$/GB ingested",
+          "estimateRange": "$0.010–$0.100/mo",
+          "note": "CloudWatch Logs ingestion $0.50/GB (first 10GB/mo free in some accounts). Archival storage is cheaper; Insights queries extra."
+        },
+        {
+          "service": "SNS",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.050–$0.500/mo",
+          "note": "Standard topic API requests ($0.50 per 1M). Delivery (HTTP/SMS/email) priced separately."
+        },
+        {
+          "service": "X-Ray",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.500–$5.00/mo",
+          "note": "X-Ray traces: $5.00 per 1M traces recorded (first 100k/mo free)."
         },
         {
           "service": "ALB",
@@ -980,22 +907,575 @@
           "note": "Assumed-throughput estimate: per vCPU-hour (Linux/x86). Total = vCPU x hours."
         },
         {
-          "service": "Lambda",
-          "unit": "$/GB-second",
-          "estimateRange": "$0.167–$1.67/mo",
-          "note": "Compute duration: $0.0000166667 per GB-second (x86). Multiply by memoryGB x durationSeconds per invocation."
+          "service": "RDS",
+          "unit": "$/hr",
+          "estimateRange": "$94.90–$189.80/mo",
+          "note": "Assumed-throughput estimate: db.t4g.medium on-demand (us-east-1). Cost = instance count × running hours; storage/IO billed separately, multi-AZ via the tier multiplier.",
+          "instanceType": "db.t4g.medium"
         },
         {
-          "service": "Lambda",
-          "unit": "per 1k requests",
-          "estimateRange": "$0.020–$0.200/mo",
-          "note": "On-demand list price ($0.20 per 1M requests). Excludes Free Tier."
+          "service": "ElastiCache",
+          "unit": "$/hr",
+          "estimateRange": "$23.36–$46.72/mo",
+          "note": "Assumed-throughput estimate: cache.t4g.micro on-demand (us-east-1). Cost = instance count × running hours; storage/IO billed separately, multi-AZ via the tier multiplier.",
+          "instanceType": "cache.t4g.micro"
         },
         {
-          "service": "SQS",
+          "service": "NAT Gateway",
+          "unit": "$/GB processed",
+          "estimateRange": "$0.022–$0.225/mo",
+          "note": "Per GB processed. Forced by the private-subnet data-tier default (security baseline no-public-data-tier); the most common budget surprise."
+        },
+        {
+          "service": "NAT Gateway",
+          "unit": "$/hr",
+          "estimateRange": "$65.70–$131.40/mo",
+          "note": "Per NAT gateway-hour (always-on, ~$32.40/month per AZ before data processing)."
+        },
+        {
+          "service": "Data Transfer",
+          "unit": "$/GB cross-AZ",
+          "estimateRange": "$0.0050–$0.050/mo",
+          "note": "Required by the private-subnet security default (no public data tier) — the most common budget surprise. Inter-AZ data transfer, charged $0.01/GB in each direction."
+        },
+        {
+          "service": "Data Transfer",
+          "unit": "$/GB internet egress",
+          "estimateRange": "$0.045–$0.450/mo",
+          "note": "Required by the private-subnet security default (no public data tier) — the most common budget surprise. Data transfer out to internet, first 10TB/month tier. First 100GB/month is free."
+        }
+      ]
+    },
+    {
+      "name": "resilient",
+      "summary": "Multi-AZ everywhere: RDS Multi-AZ standby, ALB + Fargate across 2 AZs, NAT per AZ, ElastiCache Multi-AZ. EventBridge + SQS fan-out replaces direct Lambda invoke for orchestrator. CloudFront + S3 cross-region replication for DR. SLO alarms + PagerDuty escalation.",
+      "nodes": [
+        {
+          "id": "cf",
+          "awsService": "CloudFront",
+          "role": "CDN + WAF edge",
+          "security": [
+            "WAF managed rules",
+            "rate-based rule",
+            "TLS only",
+            "access logging → S3",
+            "Shield Standard"
+          ]
+        },
+        {
+          "id": "s3_assets",
+          "awsService": "S3",
+          "role": "ISR assets + media store",
+          "security": [
+            "SSE-KMS",
+            "block public access",
+            "bucket policy: aws:SecureTransport",
+            "least-priv role",
+            "versioning enabled"
+          ]
+        },
+        {
+          "id": "render_lambda",
+          "awsService": "Lambda (arm64, 2048 MB)",
+          "role": "headless Chromium renderer",
+          "security": [
+            "least-priv role",
+            "reserved concurrency cap",
+            "TLS",
+            "no VPC",
+            "idempotent consumer (S3 key = job hash)",
+            "DLQ (→ sqs_render_dlq)"
+          ]
+        },
+        {
+          "id": "s3_renders",
+          "awsService": "S3",
+          "role": "render output store",
+          "security": [
+            "SSE-KMS",
+            "block public access",
+            "presigned URL access (15 min TTL)",
+            "lifecycle: expire 7 days"
+          ]
+        },
+        {
+          "id": "backup_lambda",
+          "awsService": "Lambda",
+          "role": "nightly pg_dump scheduler",
+          "security": [
+            "least-priv role",
+            "Secrets Manager DB creds",
+            "TLS"
+          ]
+        },
+        {
+          "id": "cron_lambda",
+          "awsService": "Lambda",
+          "role": "data reconciliation cron",
+          "security": [
+            "least-priv role",
+            "Secrets Manager creds",
+            "TLS"
+          ]
+        },
+        {
+          "id": "scheduler",
+          "awsService": "EventBridge Scheduler",
+          "role": "cron trigger",
+          "security": [
+            "least-priv role"
+          ]
+        },
+        {
+          "id": "s3_backups",
+          "awsService": "S3",
+          "role": "DB backup store",
+          "security": [
+            "SSE-KMS",
+            "block public access",
+            "lifecycle: Glacier IR day 1, expire day 14",
+            "versioning enabled"
+          ]
+        },
+        {
+          "id": "secrets",
+          "awsService": "AWS Secrets Manager",
+          "role": "credentials store",
+          "security": [
+            "KMS-encrypted",
+            "least-priv access",
+            "rotation enabled"
+          ]
+        },
+        {
+          "id": "cw_logs",
+          "awsService": "CloudWatch Logs",
+          "role": "centralized log sink",
+          "security": [
+            "retention 30 days",
+            "KMS encrypted"
+          ]
+        },
+        {
+          "id": "cw_alarms",
+          "awsService": "CloudWatch Alarms",
+          "role": "golden-signal alarms",
+          "security": [
+            "least-priv role"
+          ]
+        },
+        {
+          "id": "sns_alerts",
+          "awsService": "SNS",
+          "role": "ops alert topic",
+          "security": [
+            "TLS",
+            "least-priv publish policy"
+          ]
+        },
+        {
+          "id": "xray",
+          "awsService": "AWS X-Ray",
+          "role": "distributed tracing",
+          "security": [
+            "least-priv role"
+          ]
+        },
+        {
+          "id": "cloudtrail",
+          "awsService": "CloudTrail",
+          "role": "audit trail",
+          "security": [
+            "multi-region trail",
+            "S3 log bucket: MFA delete",
+            "CloudWatch Logs integration"
+          ]
+        },
+        {
+          "id": "alb",
+          "awsService": "Application Load Balancer",
+          "role": "HTTPS ingress (web + admin)",
+          "security": [
+            "TLS termination",
+            "SG: 443 from CF only",
+            "access logging → S3",
+            "deletion protection"
+          ]
+        },
+        {
+          "id": "fargate_web",
+          "awsService": "AWS Fargate (ECS)",
+          "role": "Next.js web service (2 tasks)",
+          "security": [
+            "private subnet",
+            "SG: 8080 from ALB only",
+            "least-priv task role",
+            "no public IP",
+            "Secrets Manager env inject"
+          ]
+        },
+        {
+          "id": "fargate_orch",
+          "awsService": "AWS Fargate (ECS)",
+          "role": "orchestrator service (1–2 tasks)",
+          "security": [
+            "private subnet",
+            "SG: internal only",
+            "least-priv task role",
+            "no public IP",
+            "Secrets Manager env inject"
+          ]
+        },
+        {
+          "id": "rds_pg",
+          "awsService": "Amazon RDS for PostgreSQL (db.t4g.medium, Multi-AZ)",
+          "role": "multi-AZ Postgres + PostGIS",
+          "security": [
+            "private subnet (multi-AZ)",
+            "SG: 5432 from Fargate SGs only",
+            "KMS at rest",
+            "TLS enforced",
+            "automated backups 14d",
+            "deletion protection",
+            "enhanced monitoring"
+          ]
+        },
+        {
+          "id": "elasticache",
+          "awsService": "ElastiCache Redis (cache.t4g.small, Multi-AZ)",
+          "role": "multi-AZ ISR + session cache",
+          "security": [
+            "private subnet (multi-AZ)",
+            "SG: 6379 from Fargate only",
+            "TLS in-transit",
+            "at-rest encryption",
+            "auto-failover enabled"
+          ]
+        },
+        {
+          "id": "nat_gw",
+          "awsService": "NAT Gateway",
+          "role": "private subnet egress",
+          "security": [
+            "single-AZ (one NAT)",
+            "Elastic IP"
+          ]
+        },
+        {
+          "id": "cw_dashboard",
+          "awsService": "CloudWatch Dashboard",
+          "role": "golden-signal dashboard",
+          "security": [
+            "read-only IAM"
+          ]
+        },
+        {
+          "id": "nat_gw_b",
+          "awsService": "NAT Gateway",
+          "role": "AZ-B private subnet egress",
+          "security": [
+            "second-AZ NAT",
+            "Elastic IP"
+          ]
+        },
+        {
+          "id": "sqs_render",
+          "awsService": "SQS (Standard Queue)",
+          "role": "render job buffer",
+          "security": [
+            "SSE-KMS",
+            "DLQ enabled",
+            "VPC endpoint",
+            "least-priv policy"
+          ]
+        },
+        {
+          "id": "sqs_render_dlq",
+          "awsService": "SQS (Dead-Letter Queue)",
+          "role": "render job DLQ",
+          "security": [
+            "SSE-KMS",
+            "alarm on depth > 0"
+          ]
+        },
+        {
+          "id": "eventbridge_bus",
+          "awsService": "Amazon EventBridge",
+          "role": "pipeline event bus",
+          "security": [
+            "least-priv resource policy",
+            "archive enabled"
+          ]
+        },
+        {
+          "id": "s3_backups_replica",
+          "awsService": "S3",
+          "role": "cross-region backup replica",
+          "security": [
+            "SSE-KMS",
+            "block public access",
+            "S3 CRR from primary backup bucket",
+            "lifecycle: Glacier IR day 1, expire 14d"
+          ]
+        },
+        {
+          "id": "pagerduty_sub",
+          "awsService": "SNS",
+          "role": "PagerDuty escalation topic",
+          "security": [
+            "TLS",
+            "HTTPS subscription to PagerDuty endpoint"
+          ]
+        },
+        {
+          "id": "cw_anomaly",
+          "awsService": "CloudWatch Anomaly Detection",
+          "role": "SLO + anomaly alarms",
+          "security": [
+            "least-priv role"
+          ]
+        }
+      ],
+      "edges": [
+        {
+          "from": "client",
+          "to": "cf",
+          "payload": "HTTPS page/asset requests",
+          "protocol": "HTTPS"
+        },
+        {
+          "from": "cf",
+          "to": "s3_assets",
+          "payload": "ISR static asset fetch (cache miss)",
+          "protocol": "HTTPS"
+        },
+        {
+          "from": "render_lambda",
+          "to": "s3_renders",
+          "payload": "Rendered HTML/screenshot (>6 MB offloaded)",
+          "protocol": "HTTPS (AWS SDK)"
+        },
+        {
+          "from": "scheduler",
+          "to": "backup_lambda",
+          "payload": "Nightly backup trigger event",
+          "protocol": "EventBridge"
+        },
+        {
+          "from": "scheduler",
+          "to": "cron_lambda",
+          "payload": "Reconciliation schedule trigger",
+          "protocol": "EventBridge"
+        },
+        {
+          "from": "backup_lambda",
+          "to": "s3_backups",
+          "payload": "Compressed SQL dump",
+          "protocol": "HTTPS (AWS SDK)"
+        },
+        {
+          "from": "render_lambda",
+          "to": "cw_logs",
+          "payload": "Lambda execution logs",
+          "protocol": "CloudWatch Logs"
+        },
+        {
+          "from": "backup_lambda",
+          "to": "cw_logs",
+          "payload": "Backup job logs",
+          "protocol": "CloudWatch Logs"
+        },
+        {
+          "from": "cw_logs",
+          "to": "cw_alarms",
+          "payload": "Metric filters (error rate, latency)",
+          "protocol": "CloudWatch"
+        },
+        {
+          "from": "cw_alarms",
+          "to": "sns_alerts",
+          "payload": "Alarm state-change notification",
+          "protocol": "CloudWatch → SNS"
+        },
+        {
+          "from": "sns_alerts",
+          "to": "client",
+          "payload": "Email/Slack alert",
+          "protocol": "SNS subscription (email)"
+        },
+        {
+          "from": "render_lambda",
+          "to": "xray",
+          "payload": "Trace segments",
+          "protocol": "UDP/HTTPS (X-Ray SDK)"
+        },
+        {
+          "from": "cf",
+          "to": "alb",
+          "payload": "SSR/ISR dynamic page request",
+          "protocol": "HTTPS"
+        },
+        {
+          "from": "alb",
+          "to": "fargate_web",
+          "payload": "HTTP/1.1 page request (path-routed)",
+          "protocol": "HTTP"
+        },
+        {
+          "from": "fargate_web",
+          "to": "rds_pg",
+          "payload": "SQL + PostGIS spatial queries",
+          "protocol": "TCP/TLS (5432)"
+        },
+        {
+          "from": "fargate_web",
+          "to": "elasticache",
+          "payload": "ISR cache reads/writes",
+          "protocol": "Redis TLS (6379)"
+        },
+        {
+          "from": "fargate_web",
+          "to": "s3_assets",
+          "payload": "ISR HTML/JSON write-through",
+          "protocol": "HTTPS (AWS SDK)"
+        },
+        {
+          "from": "fargate_web",
+          "to": "render_lambda",
+          "payload": "Render job request (URL + params)",
+          "protocol": "HTTPS (Lambda invoke)"
+        },
+        {
+          "from": "fargate_web",
+          "to": "secrets",
+          "payload": "DB + Redis credentials fetch",
+          "protocol": "HTTPS (AWS SDK)"
+        },
+        {
+          "from": "fargate_orch",
+          "to": "rds_pg",
+          "payload": "Job queue reads/writes (pg-boss)",
+          "protocol": "TCP/TLS (5432)"
+        },
+        {
+          "from": "fargate_orch",
+          "to": "secrets",
+          "payload": "Credentials fetch",
+          "protocol": "HTTPS (AWS SDK)"
+        },
+        {
+          "from": "fargate_web",
+          "to": "nat_gw",
+          "payload": "Outbound AWS API / AI calls",
+          "protocol": "HTTPS"
+        },
+        {
+          "from": "fargate_orch",
+          "to": "nat_gw",
+          "payload": "Outbound AI API calls",
+          "protocol": "HTTPS"
+        },
+        {
+          "from": "fargate_web",
+          "to": "cw_logs",
+          "payload": "Structured app logs",
+          "protocol": "CloudWatch (awslogs driver)"
+        },
+        {
+          "from": "fargate_orch",
+          "to": "cw_logs",
+          "payload": "Orchestrator + job logs",
+          "protocol": "CloudWatch (awslogs driver)"
+        },
+        {
+          "from": "cw_logs",
+          "to": "cw_dashboard",
+          "payload": "Metric + log data",
+          "protocol": "CloudWatch"
+        },
+        {
+          "from": "cron_lambda",
+          "to": "rds_pg",
+          "payload": "Reconciliation SQL writes (via VPC Lambda)",
+          "protocol": "TCP/TLS (5432)"
+        },
+        {
+          "from": "fargate_orch",
+          "to": "eventbridge_bus",
+          "payload": "Pipeline job event (city ID, job type)",
+          "protocol": "HTTPS (EventBridge PutEvents)"
+        },
+        {
+          "from": "eventbridge_bus",
+          "to": "sqs_render",
+          "payload": "Render job event (rule-matched)",
+          "protocol": "EventBridge → SQS"
+        },
+        {
+          "from": "sqs_render",
+          "to": "render_lambda",
+          "payload": "Render job message (URL + params)",
+          "protocol": "SQS event source mapping"
+        },
+        {
+          "from": "sqs_render",
+          "to": "sqs_render_dlq",
+          "payload": "Failed render jobs (after maxReceiveCount)",
+          "protocol": "SQS redrive"
+        },
+        {
+          "from": "sqs_render_dlq",
+          "to": "cw_alarms",
+          "payload": "DLQ depth metric",
+          "protocol": "CloudWatch"
+        },
+        {
+          "from": "cw_alarms",
+          "to": "pagerduty_sub",
+          "payload": "Critical alarm (SLO breach, DLQ depth)",
+          "protocol": "SNS → HTTPS"
+        },
+        {
+          "from": "cw_anomaly",
+          "to": "cw_alarms",
+          "payload": "Anomaly band breach signal",
+          "protocol": "CloudWatch"
+        },
+        {
+          "from": "s3_backups",
+          "to": "s3_backups_replica",
+          "payload": "Backup objects (CRR async replication)",
+          "protocol": "S3 CRR"
+        }
+      ],
+      "delta": [
+        "RDS promoted to Multi-AZ standby (automated synchronous failover, ~60s RTO)",
+        "ElastiCache promoted to Multi-AZ (cache.t4g.small) with auto-failover",
+        "Second NAT Gateway added (one per AZ) — eliminates AZ-single-point for outbound egress",
+        "EventBridge pipeline bus + SQS render queue replace direct Lambda invoke — decouples orchestrator from renderer, absorbs burst, adds DLQ",
+        "Render Lambda now SQS-triggered (event source mapping, idempotent, DLQ-backed)",
+        "Cross-region S3 replication (CRR) for backup bucket — DR-grade backup copy in secondary region",
+        "CloudWatch Anomaly Detection + SLO alarms + PagerDuty escalation topic for critical paths",
+        "Burst handling: SQS buffers render spike; Lambda reserved concurrency controls drain rate; Fargate auto-scales across 2 AZs"
+      ],
+      "tradeoffs": [
+        "Highest cost tier: second NAT, Multi-AZ RDS, Multi-AZ ElastiCache, EventBridge + SQS, CRR",
+        "Multi-AZ RDS is standby (not read replica) — read scale still needs explicit read-replica promotion if needed",
+        "SQS async render path adds latency vs. synchronous invoke; acceptable for pipeline (not user-request) path",
+        "Cross-region is backup CRR only — active-active multi-region not included (deferred; would require Aurora Global / DynamoDB Global Tables)"
+      ],
+      "costDrivers": [
+        {
+          "service": "CloudFront",
+          "unit": "$/GB transferred",
+          "estimateRange": "$0.043–$0.425/mo",
+          "note": "Data transfer out to internet, first 10TB/month tier (North America). First 1TB/month is free."
+        },
+        {
+          "service": "CloudFront",
           "unit": "per 1k requests",
-          "estimateRange": "$0.040–$0.400/mo",
-          "note": "Standard queue requests ($0.40 per 1M). First 1M/month free. FIFO is $0.50 per 1M."
+          "estimateRange": "$0.075–$0.750/mo",
+          "note": "HTTPS requests ($0.0075 per 10,000). North America/Europe."
         },
         {
           "service": "S3",
@@ -1010,23 +1490,16 @@
           "note": "PUT/COPY/POST/LIST requests per 1,000. GET/SELECT requests are ~$0.0004 per 1,000."
         },
         {
-          "service": "RDS",
-          "unit": "$/hr",
-          "estimateRange": "$46.72–$93.44/mo",
-          "note": "Assumed-throughput estimate: db.t4g.small on-demand (us-east-1). Cost = instance count × running hours; storage/IO billed separately, multi-AZ via the tier multiplier.",
-          "instanceType": "db.t4g.small"
+          "service": "Lambda",
+          "unit": "$/GB-second",
+          "estimateRange": "$0.167–$1.67/mo",
+          "note": "Compute duration: $0.0000166667 per GB-second (x86). Multiply by memoryGB x durationSeconds per invocation."
         },
         {
-          "service": "NAT Gateway",
-          "unit": "$/GB processed",
-          "estimateRange": "$0.022–$0.225/mo",
-          "note": "Per GB processed. Forced by the private-subnet data-tier default (security baseline no-public-data-tier); the most common budget surprise."
-        },
-        {
-          "service": "NAT Gateway",
-          "unit": "$/hr",
-          "estimateRange": "$65.70–$131.40/mo",
-          "note": "Per NAT gateway-hour (always-on, ~$32.40/month per AZ before data processing)."
+          "service": "Lambda",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.020–$0.200/mo",
+          "note": "On-demand list price ($0.20 per 1M requests). Excludes Free Tier."
         },
         {
           "service": "EventBridge",
@@ -1047,527 +1520,10 @@
           "note": "Standard topic API requests ($0.50 per 1M). Delivery (HTTP/SMS/email) priced separately."
         },
         {
-          "service": "ElastiCache",
-          "unit": "$/hr",
-          "estimateRange": "$23.36–$46.72/mo",
-          "note": "Assumed-throughput estimate: cache.t4g.micro on-demand (us-east-1). Cost = instance count × running hours; storage/IO billed separately, multi-AZ via the tier multiplier.",
-          "instanceType": "cache.t4g.micro"
-        },
-        {
           "service": "X-Ray",
           "unit": "per 1k requests",
           "estimateRange": "$0.500–$5.00/mo",
           "note": "X-Ray traces: $5.00 per 1M traces recorded (first 100k/mo free)."
-        },
-        {
-          "service": "Data Transfer",
-          "unit": "$/GB cross-AZ",
-          "estimateRange": "$0.0050–$0.050/mo",
-          "note": "Required by the private-subnet security default (no public data tier) — the most common budget surprise. Inter-AZ data transfer, charged $0.01/GB in each direction."
-        },
-        {
-          "service": "Data Transfer",
-          "unit": "$/GB internet egress",
-          "estimateRange": "$0.045–$0.450/mo",
-          "note": "Required by the private-subnet security default (no public data tier) — the most common budget surprise. Data transfer out to internet, first 10TB/month tier. First 100GB/month is free."
-        }
-      ]
-    },
-    {
-      "name": "resilient",
-      "summary": "Cross-region DR + production-grade hardening. RDS promoted to Aurora PostgreSQL (Multi-AZ cluster + cross-region read replica for DR). Fargate services auto-scale with target-tracking. ElastiCache upgraded to a Multi-AZ cluster. Render Lambda gets provisioned concurrency for warm-start on city onboarding bursts. EventBridge replaces direct SQS polling for fan-out. PagerDuty escalation on critical alarms.",
-      "nodes": [
-        {
-          "id": "cf",
-          "awsService": "CloudFront",
-          "role": "CDN + ISR edge cache",
-          "security": [
-            "TLS",
-            "WAF managed rules",
-            "WAF rate-based rule",
-            "Shield Standard",
-            "access logging",
-            "OAC for S3"
-          ]
-        },
-        {
-          "id": "waf",
-          "awsService": "AWS WAF",
-          "role": "edge rule enforcement",
-          "security": [
-            "managed rule groups",
-            "rate-based rule",
-            "geo-block optional"
-          ]
-        },
-        {
-          "id": "alb",
-          "awsService": "Application Load Balancer",
-          "role": "web tier ingress",
-          "security": [
-            "TLS termination",
-            "HTTPS only",
-            "access logging",
-            "security group: web-sg"
-          ]
-        },
-        {
-          "id": "web",
-          "awsService": "AWS Fargate",
-          "role": "Next.js SSR/ISR server (0.5 vCPU/1 GB)",
-          "security": [
-            "private subnet",
-            "least-priv role",
-            "Secrets Manager for env",
-            "read-only root FS",
-            "security group: web-sg"
-          ]
-        },
-        {
-          "id": "orch",
-          "awsService": "AWS Fargate",
-          "role": "job orchestrator (0.25 vCPU/0.5 GB)",
-          "security": [
-            "private subnet",
-            "least-priv role",
-            "Secrets Manager for DB URL",
-            "security group: orch-sg"
-          ]
-        },
-        {
-          "id": "render_fn",
-          "awsService": "AWS Lambda",
-          "role": "headless Chromium renderer (provisioned concurrency=2)",
-          "security": [
-            "least-priv role",
-            "reserved concurrency 20",
-            "Secrets Manager",
-            "VPC-free",
-            "KMS encrypted env"
-          ]
-        },
-        {
-          "id": "job_queue",
-          "awsService": "Amazon SQS",
-          "role": "pipeline job buffer",
-          "security": [
-            "SSE-KMS",
-            "DLQ",
-            "visibility timeout 5 min"
-          ]
-        },
-        {
-          "id": "job_dlq",
-          "awsService": "Amazon SQS",
-          "role": "pipeline dead-letter queue",
-          "security": [
-            "SSE-KMS",
-            "CloudWatch alarm on depth"
-          ]
-        },
-        {
-          "id": "render_bucket",
-          "awsService": "Amazon S3",
-          "role": "render output + media store",
-          "security": [
-            "SSE-KMS",
-            "block public access",
-            "OAC",
-            "versioning",
-            "lifecycle: 7-day render TTL"
-          ]
-        },
-        {
-          "id": "rds",
-          "awsService": "Amazon Aurora PostgreSQL",
-          "role": "Aurora Multi-AZ cluster w/ PostGIS (db.r8g.large writer)",
-          "security": [
-            "private subnet",
-            "KMS CMK at rest",
-            "security group: db-sg",
-            "automated backups 14d",
-            "no public access",
-            "Multi-AZ",
-            "cross-region read replica (DR)"
-          ]
-        },
-        {
-          "id": "nat",
-          "awsService": "AWS NAT Gateway",
-          "role": "private-subnet egress",
-          "security": [
-            "single-AZ",
-            "Elastic IP"
-          ]
-        },
-        {
-          "id": "igw",
-          "awsService": "Internet Gateway",
-          "role": "VPC internet egress/ingress",
-          "security": []
-        },
-        {
-          "id": "ecr",
-          "awsService": "Amazon ECR",
-          "role": "container image registry",
-          "security": [
-            "image scanning",
-            "KMS encrypted",
-            "least-priv pull role"
-          ]
-        },
-        {
-          "id": "secrets",
-          "awsService": "AWS Secrets Manager",
-          "role": "credentials store",
-          "security": [
-            "KMS encrypted",
-            "least-priv read",
-            "rotation enabled"
-          ]
-        },
-        {
-          "id": "cron",
-          "awsService": "Amazon EventBridge Scheduler",
-          "role": "nightly backup + reconciliation cron",
-          "security": [
-            "least-priv role",
-            "TLS"
-          ]
-        },
-        {
-          "id": "cw_logs",
-          "awsService": "Amazon CloudWatch Logs",
-          "role": "centralized structured logs",
-          "security": [
-            "retention 30d",
-            "KMS encrypted"
-          ]
-        },
-        {
-          "id": "cw_alarms",
-          "awsService": "Amazon CloudWatch",
-          "role": "golden-signal alarms",
-          "security": [
-            "least-priv role"
-          ]
-        },
-        {
-          "id": "sns_ops",
-          "awsService": "Amazon SNS",
-          "role": "ops alert notification topic",
-          "security": [
-            "SSE-KMS",
-            "HTTPS delivery only"
-          ]
-        },
-        {
-          "id": "cloudtrail",
-          "awsService": "AWS CloudTrail",
-          "role": "audit trail (mgmt + data events)",
-          "security": [
-            "S3 log bucket",
-            "log file validation",
-            "KMS encrypted"
-          ]
-        },
-        {
-          "id": "elasticache",
-          "awsService": "Amazon ElastiCache for Redis",
-          "role": "Multi-AZ Redis cluster (cache.r7g.large)",
-          "security": [
-            "private subnet",
-            "KMS at rest",
-            "auth token",
-            "security group: cache-sg",
-            "in-transit TLS",
-            "Multi-AZ with auto-failover"
-          ]
-        },
-        {
-          "id": "nat_b",
-          "awsService": "AWS NAT Gateway",
-          "role": "AZ-b private-subnet egress",
-          "security": [
-            "Elastic IP",
-            "AZ-b"
-          ]
-        },
-        {
-          "id": "cw_dashboard",
-          "awsService": "Amazon CloudWatch",
-          "role": "ops dashboard (golden signals)",
-          "security": [
-            "least-priv read"
-          ]
-        },
-        {
-          "id": "xray",
-          "awsService": "AWS X-Ray",
-          "role": "distributed tracing",
-          "security": [
-            "least-priv role",
-            "sampling rules"
-          ]
-        },
-        {
-          "id": "eventbridge",
-          "awsService": "Amazon EventBridge",
-          "role": "pipeline event bus + fan-out",
-          "security": [
-            "least-priv role",
-            "SSE-KMS",
-            "DLQ on rules"
-          ]
-        },
-        {
-          "id": "pagerduty_sub",
-          "awsService": "Amazon SNS",
-          "role": "PagerDuty escalation topic",
-          "security": [
-            "SSE-KMS",
-            "HTTPS delivery only",
-            "least-priv publish"
-          ]
-        },
-        {
-          "id": "waf_shield",
-          "awsService": "AWS Shield Advanced",
-          "role": "L3/L4/L7 DDoS protection",
-          "security": [
-            "DRT access",
-            "cost protection"
-          ]
-        }
-      ],
-      "edges": [
-        {
-          "from": "client",
-          "to": "cf",
-          "payload": "HTTPS page/asset request",
-          "protocol": "HTTPS"
-        },
-        {
-          "from": "cf",
-          "to": "waf",
-          "payload": "filtered HTTP request",
-          "protocol": "HTTPS"
-        },
-        {
-          "from": "waf",
-          "to": "alb",
-          "payload": "inspected HTTP request",
-          "protocol": "HTTPS"
-        },
-        {
-          "from": "alb",
-          "to": "web",
-          "payload": "HTTP request (SSR/ISR/admin)",
-          "protocol": "HTTP (internal)"
-        },
-        {
-          "from": "web",
-          "to": "rds",
-          "payload": "SQL + PostGIS queries",
-          "protocol": "TLS/TCP 5432"
-        },
-        {
-          "from": "web",
-          "to": "render_bucket",
-          "payload": "media upload (PUT)",
-          "protocol": "HTTPS/S3 API"
-        },
-        {
-          "from": "cf",
-          "to": "render_bucket",
-          "payload": "CDN-served media/render output",
-          "protocol": "HTTPS (OAC)"
-        },
-        {
-          "from": "job_queue",
-          "to": "orch",
-          "payload": "job message (JSON, at-least-once)",
-          "protocol": "HTTPS/SQS long-poll"
-        },
-        {
-          "from": "job_queue",
-          "to": "job_dlq",
-          "payload": "poison job message (after maxReceiveCount)",
-          "protocol": "SQS redrive"
-        },
-        {
-          "from": "orch",
-          "to": "render_fn",
-          "payload": "render request (URL, options)",
-          "protocol": "HTTPS/Lambda invoke"
-        },
-        {
-          "from": "render_fn",
-          "to": "render_bucket",
-          "payload": "rendered HTML/screenshot (>6 MB via S3 PUT)",
-          "protocol": "HTTPS/S3 API"
-        },
-        {
-          "from": "render_fn",
-          "to": "orch",
-          "payload": "S3 pre-signed URL (render reference)",
-          "protocol": "HTTPS/Lambda response"
-        },
-        {
-          "from": "orch",
-          "to": "rds",
-          "payload": "job state read/write (SQL)",
-          "protocol": "TLS/TCP 5432"
-        },
-        {
-          "from": "orch",
-          "to": "nat",
-          "payload": "outbound egress (AI API calls)",
-          "protocol": "HTTPS"
-        },
-        {
-          "from": "nat",
-          "to": "igw",
-          "payload": "NATed egress to internet",
-          "protocol": "TCP"
-        },
-        {
-          "from": "cron",
-          "to": "orch",
-          "payload": "scheduled trigger (reconciliation)",
-          "protocol": "HTTPS/Lambda or ECS RunTask"
-        },
-        {
-          "from": "web",
-          "to": "cw_logs",
-          "payload": "structured app logs (JSON)",
-          "protocol": "CloudWatch API"
-        },
-        {
-          "from": "orch",
-          "to": "cw_logs",
-          "payload": "job orchestrator logs (JSON)",
-          "protocol": "CloudWatch API"
-        },
-        {
-          "from": "render_fn",
-          "to": "cw_logs",
-          "payload": "render function logs + duration",
-          "protocol": "CloudWatch API"
-        },
-        {
-          "from": "rds",
-          "to": "cw_logs",
-          "payload": "slow query + error logs",
-          "protocol": "CloudWatch API"
-        },
-        {
-          "from": "cw_logs",
-          "to": "cw_alarms",
-          "payload": "metric filters (error rate, latency, DLQ depth)",
-          "protocol": "CloudWatch"
-        },
-        {
-          "from": "cw_alarms",
-          "to": "sns_ops",
-          "payload": "alarm state change notification",
-          "protocol": "HTTPS/SNS"
-        },
-        {
-          "from": "sns_ops",
-          "to": "client",
-          "payload": "ops email alert",
-          "protocol": "HTTPS/email"
-        },
-        {
-          "from": "web",
-          "to": "elasticache",
-          "payload": "ISR cache read/write (Redis GET/SET)",
-          "protocol": "TLS/Redis 6380"
-        },
-        {
-          "from": "orch",
-          "to": "elasticache",
-          "payload": "job result cache read/write",
-          "protocol": "TLS/Redis 6380"
-        },
-        {
-          "from": "web",
-          "to": "xray",
-          "payload": "trace segments (SSR latency)",
-          "protocol": "UDP/X-Ray daemon"
-        },
-        {
-          "from": "orch",
-          "to": "xray",
-          "payload": "trace segments (job execution)",
-          "protocol": "UDP/X-Ray daemon"
-        },
-        {
-          "from": "render_fn",
-          "to": "xray",
-          "payload": "trace segments (render duration)",
-          "protocol": "UDP/X-Ray daemon"
-        },
-        {
-          "from": "web",
-          "to": "eventbridge",
-          "payload": "pipeline trigger event (JSON, ordered)",
-          "protocol": "HTTPS/EventBridge API"
-        },
-        {
-          "from": "eventbridge",
-          "to": "job_queue",
-          "payload": "routed job event (JSON)",
-          "protocol": "HTTPS/SQS target"
-        },
-        {
-          "from": "eventbridge",
-          "to": "orch",
-          "payload": "fan-out: reconciliation event",
-          "protocol": "HTTPS/ECS RunTask target"
-        },
-        {
-          "from": "cw_alarms",
-          "to": "pagerduty_sub",
-          "payload": "critical alarm (P1/P2) escalation",
-          "protocol": "HTTPS/SNS → PagerDuty webhook"
-        }
-      ],
-      "delta": [
-        "RDS → Aurora PostgreSQL Multi-AZ cluster: writer + 2 readers, cross-region replica for DR.",
-        "ElastiCache → Multi-AZ Redis cluster with auto-failover.",
-        "Lambda render: provisioned concurrency=2 eliminates cold-start on city onboarding bursts.",
-        "EventBridge bus replaces direct SQS publish from web: decoupled fan-out, rule-based routing.",
-        "Shield Advanced added for DDoS cost protection and DRT access.",
-        "PagerDuty escalation topic wired to critical CloudWatch alarms (P1/P2 SLO breaches).",
-        "Fargate services: target-tracking auto-scaling (CPU 60%, ALB req/task) + min 2 tasks.",
-        "SLO alarms: p99 latency and error-rate budget burn alerts on CloudWatch."
-      ],
-      "tradeoffs": [
-        "Aurora + cross-region replica and Shield Advanced add substantial cost — justified only at SLA-bearing scale.",
-        "Provisioned Lambda concurrency is a fixed charge even when idle; right-size to city-onboarding burst pattern.",
-        "EventBridge adds routing flexibility but another hop to reason about in incident triage.",
-        "Cross-region replica is read-only DR, not active-active; promotion requires manual intervention or Global Database upgrade."
-      ],
-      "costDrivers": [
-        {
-          "service": "CloudFront",
-          "unit": "$/GB transferred",
-          "estimateRange": "$0.043–$0.425/mo",
-          "note": "Data transfer out to internet, first 10TB/month tier (North America). First 1TB/month is free."
-        },
-        {
-          "service": "CloudFront",
-          "unit": "per 1k requests",
-          "estimateRange": "$0.075–$0.750/mo",
-          "note": "HTTPS requests ($0.0075 per 10,000). North America/Europe."
-        },
-        {
-          "service": "WAF",
-          "unit": "$/web-ACL-month",
-          "estimateRange": "$15.00–$15.00/mo",
-          "note": "Per web ACL/month. Add ~$1.00 per rule/month and ~$0.60 per 1M requests inspected."
         },
         {
           "service": "ALB",
@@ -1594,41 +1550,18 @@
           "note": "Assumed-throughput estimate: per vCPU-hour (Linux/x86). Total = vCPU x hours."
         },
         {
-          "service": "Lambda",
-          "unit": "$/GB-second",
-          "estimateRange": "$0.167–$1.67/mo",
-          "note": "Compute duration: $0.0000166667 per GB-second (x86). Multiply by memoryGB x durationSeconds per invocation."
-        },
-        {
-          "service": "Lambda",
-          "unit": "per 1k requests",
-          "estimateRange": "$0.020–$0.200/mo",
-          "note": "On-demand list price ($0.20 per 1M requests). Excludes Free Tier."
-        },
-        {
-          "service": "SQS",
-          "unit": "per 1k requests",
-          "estimateRange": "$0.040–$0.400/mo",
-          "note": "Standard queue requests ($0.40 per 1M). First 1M/month free. FIFO is $0.50 per 1M."
-        },
-        {
-          "service": "S3",
-          "unit": "$/GB-month",
-          "estimateRange": "$0.230–$2.30/mo",
-          "note": "S3 Standard storage, first 50TB/month tier."
-        },
-        {
-          "service": "S3",
-          "unit": "per 1k requests",
-          "estimateRange": "$0.500–$5.00/mo",
-          "note": "PUT/COPY/POST/LIST requests per 1,000. GET/SELECT requests are ~$0.0004 per 1,000."
-        },
-        {
-          "service": "Aurora",
+          "service": "RDS",
           "unit": "$/hr",
-          "estimateRange": "$1051.20–$2102.40/mo",
-          "note": "Assumed-throughput estimate: db.r6g.xlarge on-demand (us-east-1). Cost = instance count × running hours; storage/IO billed separately, multi-AZ via the tier multiplier.",
-          "instanceType": "db.r6g.xlarge"
+          "estimateRange": "$142.35–$284.70/mo",
+          "note": "Assumed-throughput estimate: db.t4g.medium on-demand (us-east-1). Cost = instance count × running hours; storage/IO billed separately, multi-AZ via the tier multiplier.",
+          "instanceType": "db.t4g.medium"
+        },
+        {
+          "service": "ElastiCache",
+          "unit": "$/hr",
+          "estimateRange": "$70.08–$140.16/mo",
+          "note": "Assumed-throughput estimate: cache.t4g.small on-demand (us-east-1). Cost = instance count × running hours; storage/IO billed separately, multi-AZ via the tier multiplier.",
+          "instanceType": "cache.t4g.small"
         },
         {
           "service": "NAT Gateway",
@@ -1643,35 +1576,10 @@
           "note": "Per NAT gateway-hour (always-on, ~$32.40/month per AZ before data processing)."
         },
         {
-          "service": "EventBridge",
+          "service": "SQS",
           "unit": "per 1k requests",
-          "estimateRange": "$0.100–$1.00/mo",
-          "note": "Custom event-bus events: $1.00 per 1M events published. Pipes/schema registry priced separately."
-        },
-        {
-          "service": "CloudWatch Logs",
-          "unit": "$/GB ingested",
-          "estimateRange": "$0.010–$0.100/mo",
-          "note": "CloudWatch Logs ingestion $0.50/GB (first 10GB/mo free in some accounts). Archival storage is cheaper; Insights queries extra."
-        },
-        {
-          "service": "SNS",
-          "unit": "per 1k requests",
-          "estimateRange": "$0.050–$0.500/mo",
-          "note": "Standard topic API requests ($0.50 per 1M). Delivery (HTTP/SMS/email) priced separately."
-        },
-        {
-          "service": "ElastiCache",
-          "unit": "$/hr",
-          "estimateRange": "$448.95–$897.90/mo",
-          "note": "Assumed-throughput estimate: cache.r6g.large on-demand (us-east-1). Cost = instance count × running hours; storage/IO billed separately, multi-AZ via the tier multiplier.",
-          "instanceType": "cache.r6g.large"
-        },
-        {
-          "service": "X-Ray",
-          "unit": "per 1k requests",
-          "estimateRange": "$0.500–$5.00/mo",
-          "note": "X-Ray traces: $5.00 per 1M traces recorded (first 100k/mo free)."
+          "estimateRange": "$0.040–$0.400/mo",
+          "note": "Standard queue requests ($0.40 per 1M). First 1M/month free. FIFO is $0.50 per 1M."
         },
         {
           "service": "Data Transfer",
@@ -1690,78 +1598,58 @@
   ],
   "keyDecisions": [
     {
-      "decision": "Compute model for the Next.js web tier",
-      "chosen": "Fargate (single task, single AZ) behind ALB",
+      "decision": "Budget compute shape: single box vs. managed split",
+      "chosen": "Single EC2 t4g.medium (Docker Compose: Next.js web + orchestrator + self-managed Postgres/PostGIS) + render Lambda",
       "alternativesConsidered": [
-        "Lambda@Edge / OpenNext (serverless SSR)",
-        "EC2 single instance",
-        "App Runner"
+        "Fargate + RDS + ALB + NAT (balanced-tier managed split)",
+        "Fargate + Aurora Serverless v2 + NAT"
       ],
-      "rationale": "Persistent Node server with ISR in-process cache and on-demand revalidation requires a long-running container runtime; Lambda's stateless cold-start model breaks ISR consistency, and App Runner lacks the routing control needed for the /admin split — Fargate on a t-class CPU reservation is the cheapest always-on container option (Performance Efficiency + Cost Optimization)."
+      "rationale": "Cost Optimization: a single host with self-managed Postgres matches the current footprint at ~$0 incremental infra cost vs. the ~$100+/mo always-on NAT+ALB+RDS quartet that belongs at balanced; render Lambda split out first per the brief's stated goal."
     },
     {
-      "decision": "Compute model for the orchestrator (job queue) tier",
-      "chosen": "Fargate (separate service, independent scaling)",
+      "decision": "Render workload isolation: Lambda vs. Fargate spot task",
+      "chosen": "Lambda (2048 MB, arm64) with S3 large-output offload",
       "alternativesConsidered": [
-        "Co-located on web Fargate task",
-        "EC2 worker",
-        "Lambda polling SQS"
+        "Fargate Spot task triggered via ECS RunTask",
+        "ECS-on-EC2 with auto-scaling"
       ],
-      "rationale": "pg-boss requires a persistent Postgres connection for reliable job polling; Lambda's stateless model wastes connection slots and adds reconnect latency — a small always-on Fargate task decoupled from the web service scales independently and is connection-pool-friendly (Reliability + Cost Optimization)."
+      "rationale": "Performance Efficiency + Cost Optimization: scale-to-zero pay-per-invocation perfectly matches the spiky/idle headless-Chromium pattern; S3 offload solves the >6 MB payload constraint without a custom HTTP proxy."
     },
     {
-      "decision": "Compute model for the headless Chromium render service",
-      "chosen": "Lambda with Chromium layer (reserved concurrency, S3 output for large payloads)",
+      "decision": "Postgres/PostGIS at budget: self-managed on EC2 vs. RDS",
+      "chosen": "Self-managed Postgres + PostGIS extension on the single EC2 box (localhost-bound, nightly pg_dump → S3)",
       "alternativesConsidered": [
-        "Fargate task with scale-to-zero",
-        "EC2 spot instance"
+        "RDS for PostgreSQL with PostGIS (rds.force_ssl, multi-AZ option)",
+        "Aurora PostgreSQL-compatible with PostGIS"
       ],
-      "rationale": "Spiky, idle-most-of-the-time workload with hard pay-per-invocation requirement — Lambda's scale-to-zero is the only model that costs $0 when idle; Fargate scale-to-zero has a ~2-min cold start making synchronous orchestrator calls impractical (Cost Optimization + Performance Efficiency)."
+      "rationale": "Cost Optimization: PostGIS is a standard extension installable on any Postgres; a separate RDS instance adds ~$30–50/mo always-on cost with no robustness benefit at single-AZ scale — promoted to balanced where multi-AZ and connection pooling justify it."
     },
     {
-      "decision": "Primary datastore: managed Postgres with PostGIS",
-      "chosen": "RDS for PostgreSQL (db.t4g.micro single-AZ) at budget; Aurora PostgreSQL at balanced/resilient",
+      "decision": "Balanced tier: promote to managed split (Fargate + RDS + ALB + NAT)",
+      "chosen": "Fargate (web + orchestrator as separate services) + RDS for PostgreSQL with PostGIS + ALB + NAT Gateway + ElastiCache Redis (ISR session cache)",
       "alternativesConsidered": [
-        "Aurora Serverless v2 for all tiers",
-        "Self-managed Postgres on EC2"
+        "Keep single box, add standby",
+        "EC2 ASG + RDS"
       ],
-      "rationale": "PostGIS is load-bearing; RDS for PostgreSQL supports it at the lowest always-on price point (db.t4g.micro ~$13/mo) which beats Aurora Serverless v2's minimum ACU cost at near-zero traffic — Aurora's serverless scaling wins only when traffic variance is high, which balanced+ justifies (Cost Optimization → Reliability step-up)."
+      "rationale": "Reliability + Operational Excellence: separating tiers onto managed services enables independent scaling, automated patching, and multi-AZ promotion in the resilient tier without redesign; NAT+ALB cost is the explicit trade-off vs. budget."
     },
     {
-      "decision": "NAT gateway placement (VPC cost honesty)",
-      "chosen": "Single NAT gateway in all tiers (required by private-subnet RDS)",
+      "decision": "Job queue mechanism: Postgres-backed vs. SQS",
+      "chosen": "Postgres-backed queue (pg-boss) at budget/balanced; EventBridge + SQS fan-out added at resilient",
       "alternativesConsidered": [
-        "Public-subnet RDS (violates security floor)",
-        "VPC endpoint-only (insufficient for RDS egress)"
+        "SQS from the start",
+        "Amazon MQ / RabbitMQ"
       ],
-      "rationale": "RDS in a private subnet requires a NAT gateway for the Fargate tasks in the app subnet to reach it — this is the unavoidable always-on cost of the private-data-tier baseline; there is no serverless-no-VPC shape when PostGIS on RDS is load-bearing (Security + Cost transparency)."
+      "rationale": "Cost Optimization + Reliability: Postgres is already present; pg-boss gives SKIP LOCKED job semantics, retries, and visibility — no extra service or cost at budget/balanced; SQS fan-out promoted at resilient where multi-consumer pipeline branches justify it."
     },
     {
-      "decision": "ISR cache layer and CDN",
-      "chosen": "CloudFront in front of ALB; Next.js in-process ISR cache on the Fargate task",
+      "decision": "ISR cache storage",
+      "chosen": "File-system ISR cache on the container's ephemeral storage (Next.js default); S3 as the revalidation write-through backing store at balanced+",
       "alternativesConsidered": [
-        "ElastiCache for shared ISR store",
-        "Redis-backed ISR adapter"
+        "ElastiCache Redis as ISR cache from the start",
+        "CloudFront + S3 only (no SSR)"
       ],
-      "rationale": "At very low traffic, CloudFront absorbs the read burst and the single Fargate task's in-process ISR cache is sufficient; ElastiCache adds ~$15–25/mo always-on cost with no benefit until multiple web tasks need a shared cache (Cost Optimization → introduced at balanced)."
-    },
-    {
-      "decision": "Render output delivery for payloads >6 MB",
-      "chosen": "Lambda writes rendered HTML/screenshot to S3; returns a pre-signed URL to the orchestrator",
-      "alternativesConsidered": [
-        "Inline response with chunked encoding",
-        "EFS mount for Lambda output"
-      ],
-      "rationale": "Lambda's 6 MB synchronous response limit is a hard constraint; S3 pre-signed URLs are the canonical pattern — atomic, durable, and CDN-cacheable without EFS's added latency and VPC complexity (Reliability + Performance Efficiency)."
-    },
-    {
-      "decision": "Background pipeline decoupling mechanism",
-      "chosen": "SQS queue between web tier and orchestrator, with DLQ",
-      "alternativesConsidered": [
-        "Direct Postgres insert from web tier",
-        "SNS topic"
-      ],
-      "rationale": "SQS decouples the web request path from pipeline execution, absorbs bursts, and gives at-least-once delivery with a DLQ for poison jobs — the orchestrator pulls at its own rate without coupling to web traffic (Reliability + Operational Excellence)."
+      "rationale": "Cost Optimization: in-process/file-system cache has zero marginal cost at budget; S3-backed ISR write-through + CloudFront CDN promotion at balanced gives durable cross-task cache consistency when multiple Fargate tasks run."
     }
   ],
   "securityFloor": [
