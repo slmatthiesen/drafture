@@ -90,8 +90,6 @@ describe("deterministic Terraform — the zero-wire-up-gaps invariant (plan step
   });
 
   it("carries each wire-up consequence as a template invariant", () => {
-    // CMK key policy keyed off the LITERAL region (the LLM path's recurring miss).
-    expect(code).toContain("logs.us-east-1.amazonaws.com");
     // ACM cert is always paired with its validation resource.
     expect(code).toContain('resource "aws_acm_certificate_validation"');
     // No EC2 instance public DNS as a CloudFront origin.
@@ -100,6 +98,32 @@ describe("deterministic Terraform — the zero-wire-up-gaps invariant (plan step
     expect(code).toContain("CanonicalUser");
     // No rotation resource (a null rotation_lambda_arn is invalid).
     expect(code).not.toContain("aws_secretsmanager_secret_rotation");
+  });
+
+  it("a none-sensitivity BUDGET tier carries only the FREE security floor (no WAF / customer CMK / multi-region trail)", () => {
+    // Budget = cheapest CORRECT (docs/plans/2026-06-30-005): paid security rides the
+    // ladder. The emitter must NOT deploy the WAF web ACL, any customer-managed CMK, or
+    // a multi-region trail here — that is the over-build the gate now rejects.
+    expect(code).not.toContain('resource "aws_wafv2_web_acl"');
+    expect(code).not.toContain('resource "aws_kms_key"');
+    expect(code).not.toContain("logs.us-east-1.amazonaws.com"); // no CMK key policy needed
+    expect(code).not.toContain("web_acl_id"); // distribution attaches no WAF
+    expect(code).toContain("is_multi_region_trail         = false"); // single-region trail
+    // At-rest still satisfied — SSE-S3 (AES256) + the AWS-managed SNS key, both free.
+    expect(code).toContain('sse_algorithm     = "AES256"');
+    expect(code).toContain('kms_master_key_id = "alias/aws/sns"');
+  });
+
+  it("the SAME tier UNDER COMPLIANCE pulls the paid floor down into budget", () => {
+    // The compliance override: regulated data makes the paid controls correct-required,
+    // so a compliance build carries the WAF, customer CMKs, and a multi-region trail
+    // even on the budget tier — and still emits ZERO wire-up gaps.
+    const c = assembleTier(budgetVocabularyTier(), { region: "us-east-1", compliance: true });
+    expect(c.gaps).toEqual([]);
+    expect(c.code).toContain('resource "aws_wafv2_web_acl"');
+    expect(c.code).toContain('resource "aws_kms_key" "main"');
+    expect(c.code).toContain("logs.us-east-1.amazonaws.com"); // CMK key policy present
+    expect(c.code).toContain("is_multi_region_trail         = true");
   });
 
   it("derives least-privilege IAM from the edges, not from prose", () => {

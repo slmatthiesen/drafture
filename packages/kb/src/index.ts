@@ -6,6 +6,29 @@
  * (U6) can append in the exact same shape.
  */
 
+/** The robustness rung a control enters at — the same ladder NAT/ALB/multi-AZ ride. */
+export type SecurityTier = "budget" | "balanced" | "resilient";
+
+/**
+ * A PAID security step-up that hardens a baseline up the robustness ladder (a
+ * customer-managed CMK, a WAF web ACL, a multi-region trail). It enters at its
+ * `tierFloor` (balanced or resilient) — NOT in budget — UNLESS the design is
+ * compliance-flagged and `escalatesUnderCompliance` is true, which pulls it down
+ * into budget (budget = cheapest *correct*, and regulated data makes the paid
+ * control correct-required). The free part of the baseline always stays in budget.
+ */
+export interface SecurityEnhancement {
+  id: string;
+  /** Lowest tier this PAID control enters at (never "budget" — that's the free floor). */
+  tierFloor: "balanced" | "resilient";
+  /** Short one-line statement of the paid control (surfaced in the tier delta). */
+  summary: string;
+  /** Pull this control into budget when intake flags regulated/sensitive data. */
+  escalatesUnderCompliance: boolean;
+  /** Approx fixed monthly cost the control adds, [low, high] USD. */
+  monthlyUsd: [number, number];
+}
+
 export interface SecurityBaseline {
   id: string;
   rule: string;
@@ -13,6 +36,12 @@ export interface SecurityBaseline {
   /** Short one-line floor statement, used as the deterministic securityFloor text. */
   summary: string;
   source: string;
+  /** Lowest tier the FREE structural baseline applies at — always "budget" (the
+   *  $0 floor is universal). Paid hardening rides `enhancements`. */
+  tierFloor: SecurityTier;
+  /** Paid step-ups that harden this baseline up the robustness ladder (absent for the
+   *  baselines that are already free + structural). */
+  enhancements?: SecurityEnhancement[];
 }
 
 /**

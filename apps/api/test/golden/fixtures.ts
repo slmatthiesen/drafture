@@ -68,7 +68,14 @@ function makeTier(name: TierName, opts: TierOptions = {}): Tier {
     // TAGS, no prose. Queue resilience is a TAG on the queue ("DLQ") and its
     // consumer ("idempotent consumer"), not setup-step narration.
     nodes: [
-      { id: "cdn", awsService: "CloudFront", role: "edge CDN + cache", security: ["WAF", "TLS 1.3", "Shield Standard"] },
+      // Tiered security floor (docs/plans/2026-06-30-005): the budget edge is CloudFront
+      // + Shield Standard (free L3/L4); the WAF web ACL (paid L7) enters at balanced+.
+      {
+        id: "cdn",
+        awsService: "CloudFront",
+        role: "edge CDN + cache",
+        security: name === "budget" ? ["Shield Standard", "TLS 1.3"] : ["WAF", "TLS 1.3", "Shield Standard"],
+      },
       { id: "api", awsService: "API Gateway", role: "REST front door", security: ["TLS", "throttling", "least-priv role"] },
       { id: "fn", awsService: "Lambda", role: "business logic", security: ["least-priv role", "no long-lived keys"] },
       { id: "db", awsService: "DynamoDB", role: "primary datastore", security: ["KMS at rest", "private subnet", "least-priv role"] },
@@ -204,7 +211,7 @@ export function incoherentComputeArchitecture(): ArchitectureResult {
           ? { id: "fn", awsService: "EC2", role: "API server", security: ["private subnet", "least-priv role"] }
           : n,
       ),
-      { id: "alb", awsService: "ALB", role: "load balancer", security: ["TLS", "WAF"] },
+      { id: "alb", awsService: "ALB", role: "load balancer", security: ["TLS"] },
     ],
     // Wire the ALB in front of the EC2 (front door → ALB → API server) so the ONLY
     // broken invariant stays compute↔decision coherence — an unwired ALB would be a
@@ -291,7 +298,12 @@ export function alertOnlySnsArchitecture(): ArchitectureResult {
     ...tier,
     // Lambda + DynamoDB + an SNS alarm notifier; drop the SQS work queue + its worker.
     nodes: [
-      { id: "cdn", awsService: "CloudFront", role: "edge CDN + cache", security: ["WAF", "TLS 1.3"] },
+      {
+        id: "cdn",
+        awsService: "CloudFront",
+        role: "edge CDN + cache",
+        security: tier.name === "budget" ? ["Shield Standard", "TLS 1.3"] : ["WAF", "TLS 1.3"],
+      },
       { id: "api", awsService: "API Gateway", role: "REST front door", security: ["TLS", "throttling"] },
       { id: "fn", awsService: "Lambda", role: "business logic", security: ["least-priv role"] },
       { id: "db", awsService: "DynamoDB", role: "primary datastore", security: ["KMS at rest"] },

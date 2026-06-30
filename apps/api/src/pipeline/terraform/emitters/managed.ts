@@ -9,7 +9,7 @@
  * there's no SG dependency cycle.
  */
 import type { ArchitectureNode } from "../../../schema/architecture.js";
-import { inVpcComputeCallers, type EmitCtx } from "../context.js";
+import { cwLogsKmsLine, inVpcComputeCallers, type EmitCtx } from "../context.js";
 import { edgeIamStatements } from "../glue.js";
 import { type HclBlock, jsonencode, policyDoc, raw } from "../hcl.js";
 
@@ -233,7 +233,7 @@ export function emitFargate(node: ArchitectureNode, ctx: EmitCtx): HclBlock[] {
     `resource "aws_cloudwatch_log_group" "${tf}" {`,
     `  name              = "/ecs/${ctx.prefix}/${dash(tf)}"`,
     `  retention_in_days = 30`,
-    `  kms_key_id        = aws_kms_key.cw_logs.arn`,
+    ...cwLogsKmsLine(ctx),
     `}`,
     ``,
     `resource "aws_iam_role" "${tf}" {`,
@@ -390,7 +390,7 @@ export function emitRds(node: ArchitectureNode, ctx: EmitCtx): HclBlock[] {
         `  max_allocated_storage       = 100`,
         `  storage_type                = "gp3"`,
         `  storage_encrypted           = true`,
-        `  kms_key_id                  = aws_kms_key.main.arn`,
+        ...(ctx.paidSecurity ? [`  kms_key_id                  = aws_kms_key.main.arn`] : []),
         `  db_subnet_group_name        = aws_db_subnet_group.${tf}.name`,
         `  vpc_security_group_ids      = [aws_security_group.${tf}.id]`,
         `  db_name                     = "appdb"`,

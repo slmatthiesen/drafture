@@ -12,12 +12,12 @@ import { assembleTier } from "../src/pipeline/terraform/assemble.js";
 import type { ArchitectureResult } from "../src/schema/architecture.js";
 
 const packDir = process.argv[2];
-const outDir = process.argv[3] ?? packDir;
-const region = process.argv[4] ?? "us-east-1";
 if (!packDir) {
   console.error("usage: _emitDogfood.ts <packDir> [outDir] [region]");
   process.exit(1);
 }
+const outDir = process.argv[3] ?? packDir;
+const region = process.argv[4] ?? "us-east-1";
 
 mkdirSync(outDir, { recursive: true });
 const design = JSON.parse(readFileSync(join(packDir, "design.json"), "utf8")) as ArchitectureResult;

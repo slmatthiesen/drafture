@@ -7,7 +7,7 @@
  * tier actually runs, derived from the node list — never invented.
  */
 import type { ArchitectureNode } from "../../../schema/architecture.js";
-import { ref, type EmitCtx } from "../context.js";
+import { cwLogsKmsLine, ref, type EmitCtx } from "../context.js";
 import { type HclBlock, jsonencode, policyDoc, raw } from "../hcl.js";
 
 const indentPolicy = (json: string): string =>
@@ -27,7 +27,7 @@ export function emitCloudwatchLogs(node: ArchitectureNode, ctx: EmitCtx): HclBlo
         `resource "aws_cloudwatch_log_group" "${tf}" {`,
         `  name              = "/${ctx.prefix}/app"`,
         `  retention_in_days = 30`,
-        `  kms_key_id        = aws_kms_key.cw_logs.arn`,
+        ...cwLogsKmsLine(ctx),
         `}`,
       ].join("\n"),
     },
@@ -115,7 +115,9 @@ export function emitSns(node: ArchitectureNode, ctx: EmitCtx): HclBlock[] {
       hcl: [
         `resource "aws_sns_topic" "${tf}" {`,
         `  name              = "${ctx.prefix}-${tf.replace(/_/g, "-")}"`,
-        `  kms_master_key_id = aws_kms_key.sns.arn`,
+        // Budget floor: the AWS-managed alias/aws/sns key (free). Balanced+: a CMK
+        // granting the cloudwatch + sns principals (emitted in baseline.ts).
+        `  kms_master_key_id = ${ctx.paidSecurity ? "aws_kms_key.sns.arn" : '"alias/aws/sns"'}`,
         `}`,
         ``,
         `resource "aws_sns_topic_policy" "${tf}" {`,
@@ -218,7 +220,7 @@ export function emitCloudtrail(node: ArchitectureNode, ctx: EmitCtx): HclBlock[]
         `resource "aws_cloudwatch_log_group" "${tf}" {`,
         `  name              = "/aws/cloudtrail/${ctx.prefix}"`,
         `  retention_in_days = 90`,
-        `  kms_key_id        = aws_kms_key.cw_logs.arn`,
+        ...cwLogsKmsLine(ctx),
         `}`,
         ``,
         `data "aws_iam_policy_document" "${tf}_assume" {`,
@@ -255,7 +257,9 @@ export function emitCloudtrail(node: ArchitectureNode, ctx: EmitCtx): HclBlock[]
         `resource "aws_cloudtrail" "${tf}" {`,
         `  name                          = "${ctx.prefix}-trail"`,
         `  s3_bucket_name                = aws_s3_bucket.${tf}_logs.bucket`,
-        `  is_multi_region_trail         = true`,
+        // Budget/balanced floor: a single-region management-event trail (free management
+        // events). Resilient (or any tier under compliance): a multi-region trail.
+        `  is_multi_region_trail         = ${ctx.multiRegionTrail}`,
         `  enable_log_file_validation    = true`,
         `  include_global_service_events = true`,
         `  cloud_watch_logs_group_arn    = "\${aws_cloudwatch_log_group.${tf}.arn}:*"`,

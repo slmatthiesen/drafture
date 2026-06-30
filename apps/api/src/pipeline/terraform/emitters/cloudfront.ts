@@ -34,7 +34,10 @@ export function emitCloudfront(node: ArchitectureNode, ctx: EmitCtx): HclBlock[]
     .filter((n): n is ArchitectureNode => !!n && ctx.keyOf(n) !== "s3");
 
   // --- WAF (managed common + known-bad rule sets + IP rate limit) ---
-  blocks.push({
+  // PAID L7 floor (~$8/mo): a balanced+ step-up, OR budget under compliance. The budget
+  // floor is CloudFront + Shield Standard (free, automatic L3/L4) — no web ACL, so the
+  // distribution below omits `web_acl_id` too.
+  if (ctx.paidSecurity) blocks.push({
     section,
     hcl: [
       `resource "aws_wafv2_web_acl" "${tf}" {`,
@@ -262,7 +265,9 @@ export function emitCloudfront(node: ArchitectureNode, ctx: EmitCtx): HclBlock[]
       `  http_version        = "http2and3"`,
       `  default_root_object = "index.html"`,
       `  price_class         = "PriceClass_100"`,
-      `  web_acl_id          = aws_wafv2_web_acl.${tf}.arn`,
+      // Shield Standard (free L3/L4) protects every distribution; the L7 WAF web ACL
+      // is attached only at balanced+/compliance (see the WAF block above).
+      ...(ctx.paidSecurity ? [`  web_acl_id          = aws_wafv2_web_acl.${tf}.arn`] : []),
       `  aliases             = [var.domain_name]`,
       ``,
       ...originBlocks,
