@@ -516,6 +516,33 @@ export const VPC_PRIVATE_SERVICE_KEYWORDS = [
 ] as const;
 
 /**
+ * Managed DATA-TIER engines that the no-public-data-tier baseline (R7 #5) ALWAYS
+ * places in a private subnet — so their presence genuinely forces the recurring
+ * NAT-gateway + internet-egress cost. This is a strict SUBSET of
+ * {@link VPC_PRIVATE_SERVICE_KEYWORDS}: it deliberately EXCLUDES bare compute
+ * (EC2/Fargate/ECS/EKS), which is VPC-CAPABLE but commonly runs in a PUBLIC subnet —
+ * the documented single-box budget shape is a public-IP EC2/ECS box with a tight SG
+ * and direct egress, which needs NO NAT. Triggering NAT on bare compute fabricated a
+ * ~$33/mo gateway on every single-box budget that didn't happen to tag itself public
+ * (inflating a $24 box to $45). The wider list still drives sanitize.ts (which nodes
+ * may legitimately carry a "private subnet" tag) — only the NAT-billing trigger narrows.
+ */
+const PRIVATE_DATA_TIER_KEYWORDS = [
+  "rds",
+  "aurora",
+  "elasticache",
+  "opensearch",
+  "elasticsearch",
+  "redshift",
+  "msk",
+  "kafka",
+  "neptune",
+  "documentdb",
+  "memorydb",
+  "emr",
+] as const;
+
+/**
  * A node's tags explicitly say it lives in a PUBLIC subnet (or needs no NAT). This is
  * the documented single-public-instance budget shape: an EC2/ECS box with a public IP
  * behind a tight SG and DIRECT outbound egress — no NAT gateway. NAT exists only to
@@ -529,29 +556,37 @@ function isExplicitlyPublicSubnet(node: GeneratedTier["nodes"][number]): boolean
   return node.security.some((tag) => PUBLIC_SUBNET_TAG.test(tag));
 }
 
+/** The tier draws an actual NAT Gateway node — honor it (the model put it there). */
+function hasNatNode(tier: GeneratedTier): boolean {
+  return tier.nodes.some((n) => /\bnat\b/i.test(`${n.awsService} ${n.role}`));
+}
+
 /**
- * Detect a tier that actually runs VPC-bound resources IN A PRIVATE SUBNET, which
- * forces a NAT gateway + internet-egress recurring cost (R7 #5 / KTD6).
+ * Detect a tier that actually runs PRIVATE-subnet resources which force a NAT gateway
+ * + internet-egress recurring cost (R7 #5 / KTD6).
  *
- * Trigger: a real VPC-bound service whose node is NOT explicitly public-subnet. We
- * deliberately do NOT trip on a bare "private subnet" text tag (the model sprinkles
- * it inconsistently, even onto pure-serverless tiers, which produced a phantom NAT
- * line). But we DO honor an explicit PUBLIC-subnet tag as an opt-out: the documented
- * budget shape is a single public-IP EC2/ECS box with direct egress and no NAT, so a
- * node tagged "public subnet"/"no NAT" must not fabricate a $33/mo gateway it doesn't
- * have. A pure-serverless tier (Lambda + DynamoDB + S3) matches no VPC service and
- * also correctly shows no NAT.
+ * Positive evidence only — we synthesize NAT when the tier either:
+ *   1. runs a managed DATA-TIER engine ({@link PRIVATE_DATA_TIER_KEYWORDS}: RDS,
+ *      Aurora, ElastiCache, OpenSearch…) that is NOT explicitly public-tagged, OR
+ *   2. literally draws a NAT Gateway node.
+ *
+ * Critically, BARE COMPUTE (EC2/Fargate/ECS/EKS) no longer trips this on its own: a
+ * single public-IP box with direct egress needs no NAT, and defaulting it to "private"
+ * fabricated a phantom $33/mo gateway. We also deliberately do NOT trip on a bare
+ * "private subnet" text tag (the model sprinkles it inconsistently, even onto
+ * pure-serverless tiers). A pure-serverless tier (Lambda + DynamoDB + S3) matches none
+ * of these and correctly shows no NAT.
  */
 function egressesFromPrivateSubnet(tier: GeneratedTier): boolean {
+  if (hasNatNode(tier)) return true;
   return tier.nodes.some((n) => {
     const serviceSurface = `${n.awsService} ${n.role}`.toLowerCase();
     // Word-boundary match, not a bare substring: `includes("rds")` mis-fires on
     // "dashboaRDS" / "recoRDS" / "standaRDS", adding a PHANTOM NAT line to
     // pure-serverless tiers that merely have a dashboards/records node. `\bkw\b`
-    // requires the VPC service to appear as its own token ("rds", "fargate"…),
-    // which is what we actually mean.
-    const isVpcBound = VPC_PRIVATE_SERVICE_KEYWORDS.some((kw) => new RegExp(`\\b${kw}\\b`).test(serviceSurface));
-    return isVpcBound && !isExplicitlyPublicSubnet(n);
+    // requires the data engine to appear as its own token ("rds", "aurora"…).
+    const isPrivateDataTier = PRIVATE_DATA_TIER_KEYWORDS.some((kw) => new RegExp(`\\b${kw}\\b`).test(serviceSurface));
+    return isPrivateDataTier && !isExplicitlyPublicSubnet(n);
   });
 }
 

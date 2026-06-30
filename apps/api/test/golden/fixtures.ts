@@ -239,6 +239,47 @@ export function incoherentDatastoreArchitecture(): ArchitectureResult {
 }
 
 /**
+ * A clean, COHERENT tier-ladder datastore decision (the gap-A false-positive guard):
+ * the "Primary datastore engine" decision introduces the managed VPC-bound store only
+ * at balanced+ ("RDS at balanced; Aurora at resilient"), while BUDGET legitimately
+ * defers it to a lighter serverless store. This classifies as a "vpcbound" decision,
+ * so the pre-fix per-tier check wrongly demanded the budget tier ALSO carry a VPC-bound
+ * store and failed an honest design. The fix scopes the vpcbound check DESIGN-WIDE
+ * (contradicted only when NO tier draws the store), so this must PASS — and the whole
+ * aggregate stays green (the deferral is the only thing that changed).
+ */
+export function tierLadderDatastoreArchitecture(): ArchitectureResult {
+  const base = goodArchitecture();
+  const promoteManagedStore = (tier: Tier): Tier => {
+    if (tier.name === "budget") return tier; // budget keeps the lighter serverless store
+    const engine = tier.name === "resilient" ? "Aurora" : "RDS";
+    return {
+      ...tier,
+      nodes: tier.nodes.map((n) =>
+        n.id === "db"
+          ? { id: "db", awsService: engine, role: "Postgres datastore", security: ["private subnet", "KMS at rest", "least-priv role"] }
+          : n,
+      ),
+    };
+  };
+  return {
+    ...base,
+    keyDecisions: base.keyDecisions.map((d) =>
+      d.decision === "Primary datastore"
+        ? {
+            decision: "Primary datastore engine across tiers",
+            chosen: "Managed RDS for PostgreSQL at balanced; Aurora at resilient; budget defers the managed relational engine",
+            alternativesConsidered: ["RDS at every tier", "DynamoDB everywhere"],
+            rationale:
+              "Defer the always-on managed-DB floor (and its NAT) until scale justifies it; budget stays cheapest-correct, the relational engine arrives at balanced+.",
+          }
+        : d,
+    ),
+    tiers: base.tiers.map(promoteManagedStore),
+  };
+}
+
+/**
  * A clean serverless result whose ONLY queue-keyword node is an SNS *alarm notifier*
  * (the CloudWatch alarm → SNS → email path), with NO work queue and NO DLQ/idempotency
  * tags anywhere. Mirrors the real curated url-shortener. `queuesAreResilient` must PASS
@@ -272,6 +313,7 @@ export function alertOnlySnsArchitecture(): ArchitectureResult {
 ArchitectureResultSchema.parse(goodArchitecture());
 ArchitectureResultSchema.parse(incoherentComputeArchitecture());
 ArchitectureResultSchema.parse(incoherentDatastoreArchitecture());
+ArchitectureResultSchema.parse(tierLadderDatastoreArchitecture());
 ArchitectureResultSchema.parse(alertOnlySnsArchitecture());
 
 export interface FakeProvider {

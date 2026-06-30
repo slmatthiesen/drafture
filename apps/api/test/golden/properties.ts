@@ -516,9 +516,21 @@ function tierStoreKinds(tier: Tier): { serverless: string[]; vpcbound: string[] 
 
 /**
  * Coherence: a stated datastore decision must not be contradicted by the tiers'
- * datastore nodes. A "serverless" datastore decision with a VPC-bound store node
- * present (the case that secretly adds NAT), or a "vpcbound" decision with no such
- * store anywhere, is a hard fail. Mixed/unknown decisions pass.
+ * datastore nodes. The two directions scope DIFFERENTLY:
+ *
+ *  - serverless decision ↔ VPC-bound node: checked PER TIER. A serverless store
+ *    decision drawn as a VPC-bound store secretly adds NAT, and that harm is local
+ *    to the tier that carries the store, so any such tier is a hard fail.
+ *
+ *  - vpcbound decision ↔ store absent: checked DESIGN-WIDE ("no such store
+ *    anywhere"). A datastore decision is commonly a TIER LADDER ("self-managed
+ *    Postgres at budget; RDS at balanced; Aurora at resilient") — the budget tier
+ *    legitimately DEFERS the managed VPC store, so demanding EVERY tier carry it is
+ *    a false positive. The real contradiction is naming a VPC-bound store that NO
+ *    tier ever draws; we fail only then. (Mirrors `computeMatchesDecision`'s
+ *    scoping fix: judge the decision against where it actually applies, not blanket.)
+ *
+ * Mixed/unknown decisions pass.
  */
 export const datastoreMatchesDecision: Property = (result) => {
   const storeDecisions = result.keyDecisions.filter((d) =>
@@ -528,16 +540,21 @@ export const datastoreMatchesDecision: Property = (result) => {
   for (const d of storeDecisions) {
     const choice = classifyChosenStore(d.chosen);
     if (choice === "unknown") continue;
-    for (const tier of result.tiers) {
-      const kinds = tierStoreKinds(tier);
-      if (choice === "serverless" && kinds.vpcbound.length > 0) {
-        offenders.push(
-          `${tier.name}: decision chose a serverless datastore ("${d.chosen}") but tier runs a VPC-bound store [${kinds.vpcbound.join(", ")}] (forces NAT)`,
-        );
+    if (choice === "serverless") {
+      for (const tier of result.tiers) {
+        const kinds = tierStoreKinds(tier);
+        if (kinds.vpcbound.length > 0) {
+          offenders.push(
+            `${tier.name}: decision chose a serverless datastore ("${d.chosen}") but tier runs a VPC-bound store [${kinds.vpcbound.join(", ")}] (forces NAT)`,
+          );
+        }
       }
-      if (choice === "vpcbound" && kinds.vpcbound.length === 0) {
+    }
+    if (choice === "vpcbound") {
+      const presentSomewhere = result.tiers.some((t) => tierStoreKinds(t).vpcbound.length > 0);
+      if (!presentSomewhere) {
         offenders.push(
-          `${tier.name}: decision chose a VPC-bound datastore ("${d.chosen}") but tier has no such store node`,
+          `decision chose a VPC-bound datastore ("${d.chosen}") but no tier draws such a store node`,
         );
       }
     }

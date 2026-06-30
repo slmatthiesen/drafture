@@ -103,20 +103,27 @@ becomes Balanced), vs. a new tier below Budget. Leaning re-scope (three tiers is
   PHANTOM NAT** (gap B). (`scratchpad/selfhost/`)
 
 ## TWO gaps to fix before promotion (both $0 — code + offline verify, NO API)
-- **A. `datastoreMatchesDecision` false-positive on a TIER-LADDER datastore decision** (the datastore
-  analog of the compute fix already done). A decision like *"RDS at balanced; Aurora at resilient"*
-  classifies "vpcbound" and the check then demands the BUDGET tier also have a VPC-bound store — but
-  budget correctly defers RDS. Fix mirroring `computeMatchesDecision`: scope/relax so a budget tier
-  that legitimately defers the managed store (and has a serverless/self-managed store instead) is not
-  failed; only fail a tier that has NO primary store, or a true serverless-decision↔vpcbound-node
-  contradiction. `apps/api/test/golden/properties.ts`. Add a tier-ladder fixture.
-- **B. Phantom NAT in the cost engine on a single-box budget.** `estimateCosts` (apps/api/src/pipeline/
-  cost.ts) injects a ~$33 NAT Gateway cost driver ("required by the private-subnet security default")
-  on a budget tier that has NO NAT node and NO private-subnet tag — only an EC2 box. It inflated a
-  $24 single-box budget to $45 (and only hh-pack1 escaped, because the model happened to tag its EC2
-  "public subnet"). Fix: do NOT synthesize a NAT cost unless the tier actually runs a PRIVATE-subnet
-  VPC-bound service (or has a NAT node). A public-subnet single box needs no NAT. Verify offline with
-  the existing scratchpad designs (no API).
+- ✅ **DONE — A. `datastoreMatchesDecision` false-positive on a TIER-LADDER datastore decision.** The
+  `vpcbound`-decision branch checked PER TIER ("this tier has no VPC-bound store → fail"), contradicting
+  its own docstring ("no such store *anywhere*"). Split the two directions: the serverless↔vpc-node
+  check stays PER TIER (that NAT harm is local), but the vpcbound "store absent" check is now
+  DESIGN-WIDE — contradicted only when NO tier draws the store. A budget that defers RDS to balanced+
+  passes; a vpcbound decision whose engine no tier draws still fails. `properties.ts` + tier-ladder
+  fixture (`tierLadderDatastoreArchitecture`) + over-relaxation guard. Verified offline on the scratch
+  designs (selfhost/ct-steady-api/hh-final all pass; controls still fail).
+- ✅ **DONE — B. Phantom NAT in the cost engine on a single-box budget.** The NAT trigger keyed on the
+  broad `VPC_PRIVATE_SERVICE_KEYWORDS` (which includes bare compute EC2/Fargate/ECS/EKS), so a single
+  EC2 box defaulted to "private" → a ~$33 phantom NAT (inflated $24→$45). Added a narrower
+  `PRIVATE_DATA_TIER_KEYWORDS` (managed engines the no-public-data-tier baseline ALWAYS makes private:
+  RDS/Aurora/ElastiCache/OpenSearch/…); `egressesFromPrivateSubnet` now synthesizes NAT ONLY when the
+  tier runs such an engine (not public-tagged) OR literally draws a NAT node. Bare compute alone never
+  trips it. The broad list still drives `sanitize.ts` unchanged. Verified offline: hh-final/selfhost
+  budgets $45→$12 (match the public-tagged hh-sonnet2), ct-steady-api keeps its NAT (real RDS+NAT nodes).
+  `cost.ts` + cost.test.ts (single-box-no-tag + NAT-node tests). 329 api tests green, typecheck clean.
+
+  **Promotion is now unblocked** (the two false-fail classes are gone): run the full golden set
+  (~$2–3 design-only) to confirm budget floors drop broadly, THEN add `budgetTierIsCostHonest` to
+  `ALL_PROPERTIES` (+ re-check `readPathWhenUiImplied`). Not done here — that step costs API.
 
 ## Open follow-ups
 - ✅ **DONE** — `computeMatchesDecision` HYBRID false-positive: now per-service scoped (serverless

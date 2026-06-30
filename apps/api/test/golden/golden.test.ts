@@ -10,6 +10,7 @@ import {
   badArchitecture,
   incoherentComputeArchitecture,
   incoherentDatastoreArchitecture,
+  tierLadderDatastoreArchitecture,
   alertOnlySnsArchitecture,
   fakeProvider,
 } from "./fixtures.js";
@@ -210,6 +211,37 @@ describe("datastoreMatchesDecision detects the serverless-decision / VPC-bound-s
   it("isolates the defect: only datastoreMatchesDecision fails on the incoherent fixture", () => {
     const failing = runAllProperties(incoherent).results.filter((r) => !r.ok).map((r) => r.name);
     expect(failing).toEqual(["datastoreMatchesDecision"]);
+  });
+});
+
+describe("datastoreMatchesDecision does NOT false-fail an honest tier-ladder datastore decision (gap A)", () => {
+  const tierLadder = tierLadderDatastoreArchitecture();
+
+  it("passes: a 'RDS at balanced; Aurora at resilient' decision where budget defers the managed store", () => {
+    const r = datastoreMatchesDecision(tierLadder);
+    expect(r.ok, r.reason).toBe(true);
+  });
+
+  it("the whole aggregate stays green — deferring the managed store at budget is legitimate", () => {
+    expect(runAllProperties(tierLadder).ok).toBe(true);
+  });
+
+  it("still FAILS a vpcbound decision whose store is absent from EVERY tier (no over-relaxation)", () => {
+    // Strip the managed store from balanced+resilient too → the decision now names a
+    // VPC-bound engine no tier draws, which is a real contradiction the design-wide
+    // check must still catch.
+    const absent = {
+      ...tierLadder,
+      tiers: tierLadder.tiers.map((t) => ({
+        ...t,
+        nodes: t.nodes.map((n) =>
+          n.id === "db" ? { ...n, awsService: "DynamoDB", role: "primary datastore" } : n,
+        ),
+      })),
+    };
+    const r = datastoreMatchesDecision(absent);
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(/no tier draws/i);
   });
 });
 

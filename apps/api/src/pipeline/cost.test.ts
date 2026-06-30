@@ -232,9 +232,10 @@ describe("estimateCosts", () => {
     expect(out.tiers[0]!.costDrivers.some((d) => d.service === "NAT Gateway")).toBe(false);
   });
 
-  it("STILL adds a NAT line for a VPC service in a private subnet (no public-subnet tag)", () => {
-    // Guard the opt-out doesn't over-fire: a normal private-subnet EC2/Fargate box
-    // (no public-subnet tag) must keep its NAT line.
+  it("STILL adds a NAT line for a managed data-tier engine in a private subnet (RDS)", () => {
+    // The NAT trigger is a managed DATA-TIER engine (RDS/Aurora/ElastiCache…), which the
+    // no-public-data-tier baseline always places in a private subnet. A Fargate + RDS
+    // tier keeps its NAT line via the RDS data tier (no public-subnet tag needed).
     const privateBox: ArchitectureResult = {
       assumptions: [],
       clarificationsUsed: [],
@@ -243,6 +244,49 @@ describe("estimateCosts", () => {
       tiers: [tier("balanced", [node("Fargate"), node("RDS")], ["+ multi-AZ"])],
     };
     const out = estimateCosts(privateBox, stores.pricing, REGION);
+    expect(out.tiers[0]!.costDrivers.some((d) => d.service === "NAT Gateway")).toBe(true);
+  });
+
+  it("does NOT add a NAT line for a single-box budget with no managed data tier and no public tag (gap B)", () => {
+    // The documented single-box budget shape: one EC2 box (self-managed Postgres on the
+    // box) + S3 + serverless render, NO managed data-tier engine and NO NAT node. The
+    // model often forgets to tag the box "public subnet", and the old logic defaulted
+    // bare compute to "private" → a PHANTOM ~$33/mo NAT gateway that inflated a $24 box
+    // to $45. Bare compute alone must NOT fabricate NAT.
+    const singleBox: ArchitectureResult = {
+      assumptions: [],
+      clarificationsUsed: [],
+      securityFloor: SECURITY_FLOOR,
+      ...RECOMMENDATION,
+      tiers: [
+        tier(
+          "budget",
+          [
+            node("EC2", { role: "single box: Next.js + orchestrator + self-managed Postgres (localhost)" }),
+            node("S3"),
+            node("Lambda", { role: "render worker" }),
+            node("CloudFront"),
+          ],
+          ["baseline: single box, self-managed Postgres, no managed DB, no NAT"],
+        ),
+      ],
+    };
+    const out = estimateCosts(singleBox, stores.pricing, REGION);
+    expect(out.tiers[0]!.costDrivers.some((d) => d.service === "NAT Gateway")).toBe(false);
+    expect(out.tiers[0]!.costDrivers.some((d) => d.service === "Data Transfer")).toBe(false);
+  });
+
+  it("DOES add a NAT line when the budget tier actually draws a NAT Gateway node", () => {
+    // If the model explicitly puts a NAT gateway in the graph, honor it (don't drop a
+    // cost the design says it has) — even with no managed data-tier engine present.
+    const withNat: ArchitectureResult = {
+      assumptions: [],
+      clarificationsUsed: [],
+      securityFloor: SECURITY_FLOOR,
+      ...RECOMMENDATION,
+      tiers: [tier("budget", [node("EC2"), node("NAT Gateway"), node("S3")], ["+ private subnet w/ NAT"])],
+    };
+    const out = estimateCosts(withNat, stores.pricing, REGION);
     expect(out.tiers[0]!.costDrivers.some((d) => d.service === "NAT Gateway")).toBe(true);
   });
 
