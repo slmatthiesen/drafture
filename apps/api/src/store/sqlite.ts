@@ -182,6 +182,11 @@ export function getDb(path: string): Db {
   // curated_runs gained a tags column so the gallery facets curated + user-generated
   // designs uniformly (backfilled by the retag script).
   addColumnIfMissing(db, "curated_runs", "tags_json", "TEXT NOT NULL DEFAULT '[]'");
+  // curated_runs has no status workflow (curated = public on seed), so a known-bad
+  // seed design (one that no longer clears the property gate) is suppressed with a
+  // hidden flag rather than deleted — survives a re-seed (upsert preserves it) and
+  // is the curated mirror of a generation's status='hidden'.
+  addColumnIfMissing(db, "curated_runs", "hidden", "INTEGER NOT NULL DEFAULT 0");
   return db;
 }
 

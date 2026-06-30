@@ -1,8 +1,10 @@
 # DRAFTURE — Happy Hour Friends, agent handoff brief (READ THIS FIRST)
 
-> Source: generated from this pack's `prompt.txt` + `answers.json` through the Drafture
-> pipeline (model claude-sonnet-4-6) · tier: **budget** · region: us-east-1 · 2026-06-30
-> Siblings: `budget.tf` (reference Terraform, 84 resources), `design.json` (all 3 tiers).
+> Source: `design.json` generated from this pack's `prompt.txt` + `answers.json` (model
+> claude-sonnet-4-6); the `*.tf` are emitted **deterministically** from that graph · tier
+> focus: **budget** · region: us-east-1 · 2026-06-30
+> Siblings: `budget.tf` (82 resources), `balanced.tf` (109), `resilient.tf` (127) — reference
+> Terraform for all three tiers · `design.json` (the full typed graph).
 
 This is an **agent-ready build plan**, not a finished stack. Drafture did the judgment-heavy
 first 80% (architecture, sizing, security floor, cost). Your job is the last 20%: turn
@@ -38,10 +40,16 @@ It nails the hard parts of the brief — and, crucially, **does not over-build**
 
 - **Single box, not a managed split — the cost-honest call.** Web + orchestrator +
   Postgres/PostGIS are co-located in **Docker Compose on ONE EC2 `t4g.medium`** (matches your
-  current single-host footprint). **No ALB, no Fargate, no RDS, no NAT gateway.** Idle floor
-  **~$25/mo (the instance)** — versus the ~$100+/mo the managed ALB+Fargate+RDS+NAT quartet
-  bills at *zero* traffic. The brief's "containerized / managed Postgres / scale independently"
-  language describes the end-state, not a budget mandate.
+  current single-host footprint). **No ALB, no Fargate, no RDS, no NAT gateway.** The
+  **compute idle floor is ~$25/mo (the instance)** — versus the ~$100+/mo the managed
+  ALB+Fargate+RDS+NAT quartet bills at *zero* traffic. The brief's "containerized / managed
+  Postgres / scale independently" language describes the end-state, not a budget mandate.
+  - **Honest all-in baseline (read this):** the box is ~$25, but the **always-on security
+    floor adds ~$15–25/mo** — WAF web ACL (~$5 + ~$1/rule), **3 KMS CMKs** (~$3), multi-region
+    CloudTrail + CloudWatch Logs ingestion/retention, plus ~70 GB gp3 EBS (~$6) and S3/egress.
+    Realistically **~$45–65/mo all-in at idle** (list-price estimate), not $25 — still well
+    under the managed quartet, but materially above a bare DO droplet. If you want to trim it,
+    §6 lists which security-floor items are safe to drop at this scale.
 - **The render service IS split out — the one place serverless wins.** Headless Chromium is
   spiky, memory-heavy, and idle most of the time, so it's a **Lambda (2048 MB, arm64)**:
   scale-to-zero, pay-per-invocation. Outputs >6 MB are written to **S3 and returned by a
@@ -87,25 +95,44 @@ credential. `budget.tf` models these — keep them when you refactor.
 
 ## 5. What you MUST do to make `budget.tf` apply-ready
 
-This is **reference-only** HCL. Known gaps the agent owns:
+This is **reference-only** HCL. **The emitter now closes the wire-up gaps a prior LLM draft
+left** — `detectWireupGaps()` returns **zero** and the file is `terraform validate`-clean:
+- `kms-key-policy` — the CloudWatch Logs CMK is emitted **with** the `logs.<region>.amazonaws.com`
+  grant baked into its key policy (keyed off the literal region). Done.
+- `cloudfront-origin-tls` — CloudFront no longer points at a churning EC2 public DNS. The dynamic
+  origin is now a **required `variable "origin_domain"`** (https-only): you supply a real
+  domain+cert for the box. It's an explicit input you MUST set, **not a silent failure**.
+- `s3-access-log-delivery` — the CloudFront-logs bucket is emitted with the canonical
+  log-delivery ACL grant. Done.
 
-- **Placeholder container images + Lambda package.** The box expects a Docker Compose stack
-  (real Next.js web + orchestrator images) and the render Lambda a placeholder zip/layer. Supply
-  the real images (e.g. `@sparticuz/chromium` for the Lambda) and bootstrap Compose on the
-  instance via user-data or SSM.
-- **⚠ Wire-up gaps flagged in the file** (`terraform plan` stays green on each — fix before apply):
-  - `kms-key-policy` — the KMS-encrypted CloudWatch Logs group needs `logs.<region>.amazonaws.com`
-    granted `kms:Decrypt`/`GenerateDataKey*` in the CMK key policy, or PutLogEvents fails at runtime.
-  - `cloudfront-origin-tls` — CloudFront → the EC2 **public DNS** has no trusted CA cert
-    (`*.compute-1.amazonaws.com`) and that DNS churns on replacement. Put a **domain + ACM cert
-    on an Elastic IP** in front of the box (or a small ALB+ACM, or Cloudflare) as the origin.
-  - `s3-access-log-delivery` — the access-log bucket has no log-delivery grant; with Block Public
-    Access, logging silently no-ops. Add the canonical delivery policy.
+**But "valid HCL" ≠ "a running app." The agent still owns the last 20% — this file builds the
+house, not the tenant:**
+
+- **The EC2 box boots BARE.** No `user_data`, no Docker/Compose, no app pull/build, no systemd
+  unit, no Postgres/PostGIS install, no reverse proxy. **Nothing deploys your app yet.** Add a
+  `user_data` (or SSM doc) that installs Docker + Compose, pulls your Next.js web + orchestrator
+  images, installs/enables **PG17 + PostGIS**, and starts everything. This is the single biggest
+  gap — the rest is config.
+- **Placeholder Lambda packages (render / backup / cron).** All three `*_placeholder.zip` are
+  empty. The **render** one is the hard one: headless Chromium needs a **container image or a
+  `@sparticuz/chromium` layer**, not an empty zip. backup/cron need their real handlers (the
+  backup Lambda assumes `pg_dump` reachable over SSM port-forward to the box).
+- **`origin_domain` needs a cert someone provisions.** CloudFront talks **https-only** to
+  `var.origin_domain`, but nothing here issues that cert. Run **Caddy (Let's Encrypt) on the box**
+  bound to that hostname, or front the box with **ALB + ACM**. Until then the origin is undefined.
+- **Postgres + PostGIS migration off the droplet.** Self-managed means install PG17 + PostGIS on
+  the box, then import prod data from DO (`pg_dump`/restore). `CREATE EXTENSION postgis;` + your
+  versioned migrations run as a deploy step — not Terraform's job.
+- **Required variables with no defaults — set every one:** `ami_id`, `domain_name`,
+  `route53_zone_id`, `origin_domain`, `ops_email`. **Route53 must already be authoritative for the
+  domain** (it currently points at DO — cutover is a DNS move).
+- **Secrets + state + access:** `aws_secretsmanager_secret_version` ships `REPLACE_ME` —
+  inject the real DB credential out-of-band (never commit it). There's **no backend/state config**
+  (add S3+DynamoDB remote state before a team applies) and **SSM-only access (no SSH key)** by
+  design — confirm you have Session Manager set up before you need to get in.
 - **Idempotent job consumption.** The pg-boss queue is at-least-once — the orchestrator's
   consumer MUST dedupe (idempotency key per job) so a redelivery doesn't double-run a pipeline.
-  This is handler logic, not in the `.tf`.
-- **Migrations + PostGIS enable.** `CREATE EXTENSION postgis` on the box's Postgres and run your
-  versioned migrations as a deploy step — neither is Terraform's job.
+  Handler logic, not in the `.tf`.
 - **Backups are `pg_dump` → S3, not RDS snapshots.** The nightly Lambda dumps the box's Postgres
   to S3 (Glacier IR). This is your DR at budget — **RPO ≈ the last nightly dump**; rehearse the
   restore before you depend on it.
@@ -123,11 +150,22 @@ This is **reference-only** HCL. Known gaps the agent owns:
   the budget tier does **not** also stand up an SQS buffer — pg-boss on the existing Postgres is
   the single queue. SQS/EventBridge fan-out is deferred to resilient. Confirm that's the write
   path you want.
-- **Gate note (honest):** the design passes **12/13** structural checks. The one miss is a
-  **resilient-tier** nit — a second multi-AZ NAT gateway node left unwired in the graph. It does
-  **not** affect the budget tier you're building here. (The earlier `computeMatchesDecision`
-  false-positive on this hybrid box+Lambda shape is now **fixed upstream** — the check is
-  per-service scoped, so a "render = Lambda" decision no longer flags the box's compute.)
+- **Gate note (honest):** the design now passes **13/13** structural checks and the cost-honest
+  budget check (idle floor $24.53, EC2 only). The prior 12/13 (a multi-AZ NAT node read as an
+  unwired orphan) and the `computeMatchesDecision` false-positive on this hybrid box+Lambda shape
+  are both **fixed upstream** (NAT/WAF/Shield are now orphan-exempt; the compute check is
+  per-service scoped, so "render = Lambda" no longer flags the box).
+- **Trimming the security-floor overhead (the ~$15–25/mo from §2).** The gate's idle floor counts
+  only always-on *compute/db*, so WAF + KMS + CloudTrail don't show up there — but they're real
+  fixed cost. At "very low traffic, single box" you can defensibly drop some:
+  - **Multi-region CloudTrail → single-region.** A one-box, one-region app doesn't need a
+    multi-region trail; the budget `aws_cloudtrail` hard-codes `is_multi_region_trail = true`.
+    Single-region management events are the cheaper floor. *(This is the one item that's arguably
+    an emitter default worth changing for budget — flagged for the generator, not just this pack.)*
+  - **3 KMS CMKs → fewer.** Separate CMKs (main/cw-logs/sns) are clean isolation but $1/mo each;
+    consolidating to one CMK is fine at this scale if you'd rather save the ~$2/mo.
+  - **WAF** is the one to KEEP — it's your edge protection baseline and the cheapest real defense
+    on a single public box. Don't drop it to save $8.
 
 ## 7. Hard rules
 

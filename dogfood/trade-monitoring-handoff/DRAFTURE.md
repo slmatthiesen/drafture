@@ -3,7 +3,9 @@
 > Source: regenerated from this pack's `prompt.txt` + `answers.json` through the improved
 > Drafture pipeline (tier-delta + wire-up rules + 13-property completeness gate, gate PASS
 > 13/13) · model claude-sonnet-4-6 · tier: **budget** · region: us-east-1 · 2026-06-29
-> Siblings in this pack: `budget.tf` (reference Terraform), `design.json` (full design body).
+> Siblings in this pack: `budget.tf` (64 resources), `balanced.tf` (65), `resilient.tf` (70) —
+> reference Terraform for all three tiers, emitted deterministically from `design.json` (full
+> design body), `detectWireupGaps()` = 0 and `terraform validate`-clean on each.
 
 This pack is an **agent-ready build plan**, not a finished stack. Drafture did the
 judgment-heavy first 80% (architecture, sizing, security floor, cost). Your job is the

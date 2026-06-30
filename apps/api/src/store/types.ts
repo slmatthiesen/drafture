@@ -119,6 +119,8 @@ export interface CuratedStore {
   get(id: string): CuratedRun | undefined;
   /** Admin insert/replace (seed script). Preserves existing votes on replace. */
   upsert(run: { id: string; title: string; prompt: string; body: string }): void;
+  /** Suppress (true) or restore (false) a run from every served surface. False for an unknown id. */
+  setHidden(id: string, hidden: boolean): boolean;
   /**
    * Cast or change one voter's up/down vote, recomputing counters. Returns the new
    * counts, or undefined if the run does not exist.

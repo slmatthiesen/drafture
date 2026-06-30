@@ -98,4 +98,29 @@ describe("SqliteCuratedStore", () => {
     expect(got?.prompt).toBe("new prompt");
     expect(got?.upvotes).toBe(1);
   });
+
+  it("setHidden removes a run from list AND get (every served surface), and restores it", () => {
+    store.upsert(run("a", "Alpha"));
+    store.upsert(run("b", "Beta"));
+
+    expect(store.setHidden("a", true)).toBe(true);
+    // Gallery (list) and the deep-link/RAG read path (get) both drop the hidden run.
+    expect(store.list().map((r) => r.id)).toEqual(["b"]);
+    expect(store.get("a")).toBeUndefined();
+
+    // Restorable — the suppression is a reversible flag, not a delete.
+    expect(store.setHidden("a", false)).toBe(true);
+    expect(store.get("a")?.title).toBe("Alpha");
+  });
+
+  it("re-upsert (re-seed) preserves a run's hidden flag", () => {
+    store.upsert(run("a", "Alpha"));
+    store.setHidden("a", true);
+    store.upsert({ ...run("a", "Alpha v2"), prompt: "re-seeded" });
+    expect(store.get("a")).toBeUndefined(); // still hidden after a seed re-run
+  });
+
+  it("setHidden returns false for an unknown id", () => {
+    expect(store.setHidden("nope", true)).toBe(false);
+  });
 });

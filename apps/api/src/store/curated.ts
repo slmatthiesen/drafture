@@ -33,10 +33,13 @@ export class SqliteCuratedStore implements CuratedStore {
   list(): CuratedRunSummary[] {
     // Body is read (not returned) only to derive the one-line tech blurb; 4 rows, so
     // parsing per call is negligible and keeps the gallery card self-describing.
+    // hidden=0 only: a suppressed seed design leaves the gallery (and, via get()
+    // returning undefined, the deep-link + RAG read paths too).
     const rows = this.db
       .prepare(
         `SELECT id, title, prompt, body, upvotes, downvotes, created_at
          FROM curated_runs
+         WHERE hidden = 0
          ORDER BY (upvotes - downvotes) DESC, created_at DESC`,
       )
       .all() as RunRow[];
@@ -44,11 +47,22 @@ export class SqliteCuratedStore implements CuratedStore {
   }
 
   get(id: string): CuratedRun | undefined {
-    const row = this.db.prepare(`SELECT * FROM curated_runs WHERE id = ?`).get(id) as
+    // A hidden run is invisible everywhere it could be served — the deep-link route
+    // and `retrieve.loadDesign` both go through get(), mirroring how a non-approved
+    // generation is filtered out of retrieval.
+    const row = this.db.prepare(`SELECT * FROM curated_runs WHERE id = ? AND hidden = 0`).get(id) as
       | RunRow
       | undefined;
     if (!row) return undefined;
     return { ...toSummary(row), tech: deriveTech(row.body), body: row.body };
+  }
+
+  /** Suppress (or restore) a curated run. Returns false for an unknown id. */
+  setHidden(id: string, hidden: boolean): boolean {
+    const res = this.db
+      .prepare(`UPDATE curated_runs SET hidden = ? WHERE id = ?`)
+      .run(hidden ? 1 : 0, id);
+    return res.changes > 0;
   }
 
   upsert(run: { id: string; title: string; prompt: string; body: string }): void {

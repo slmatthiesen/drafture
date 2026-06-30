@@ -27,8 +27,16 @@ function main(): void {
       console.error(`usage: reviewGenerations.ts ${cmd} <id>`);
       process.exit(1);
     }
-    const ok = stores.generations.setStatus(target, cmd === "approve" ? "approved" : "hidden");
-    console.log(ok ? `${cmd}d  ${target}` : `not found: ${target}`);
+    // Try the generation queue first; fall back to a curated run (curated has no
+    // pending/approved workflow, so approve = restore, hide = suppress its `hidden` flag).
+    const asGen = stores.generations.setStatus(target, cmd === "approve" ? "approved" : "hidden");
+    if (asGen) {
+      console.log(`${cmd}d  ${target} (generation)`);
+    } else if (stores.curated.setHidden(target, cmd === "hide")) {
+      console.log(`${cmd}d  ${target} (curated)`);
+    } else {
+      console.log(`not found: ${target}`);
+    }
     db.close();
     return;
   }
