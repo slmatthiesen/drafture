@@ -1,0 +1,1673 @@
+{
+  "assumptions": [
+    "Traffic ~<50k/mo (not stated); file ingestion is moderate volume — sized accordingly",
+    "Files are batch uploads (CSV/JSON/Parquet), not streaming byte streams",
+    "Transformation is CPU/memory-bounded but fits within Lambda 15-min / 10 GB limits per chunk; heavy jobs noted as option",
+    "Target datastore is DynamoDB (schemaless, serverless, scales with pipeline) — relational variant called out in keyDecisions",
+    "No compliance regime stated; standard security floor applied",
+    "Idempotency key = S3 object ETag + chunk offset stored in DynamoDB conditional write",
+    "Downtime tolerance: async pipeline; individual job failures are retried via DLQ — no strict SLA stated",
+    "Cost estimates are on-demand list prices for us-east-1, presented as ranges over assumed monthly volumes. They exclude the AWS Free Tier, Savings Plans, Reserved Instances, and negotiated discounts.",
+    "Assumed traffic ~100k–1M requests/month, applied equally to all three tiers (tiers differ by robustness, not traffic). Set \"expected monthly visitors\" in intake to change it."
+  ],
+  "clarificationsUsed": [],
+  "tiers": [
+    {
+      "name": "budget",
+      "summary": "Serverless-no-VPC ETL: S3 ingest → SQS-buffered chunking → parallel Lambda transform → DynamoDB load. Zero idle floor; scales to file burst via queue buffering and Lambda concurrency.",
+      "nodes": [
+        {
+          "id": "s3_ingest",
+          "awsService": "S3",
+          "role": "raw file landing zone",
+          "security": [
+            "SSE-KMS",
+            "block public access",
+            "versioning enabled",
+            "lifecycle → Glacier 90d",
+            "aws:SecureTransport policy"
+          ]
+        },
+        {
+          "id": "cf_ingest",
+          "awsService": "CloudFront",
+          "role": "upload edge / WAF front",
+          "security": [
+            "TLS only",
+            "WAF managed rules",
+            "rate-based rule",
+            "Shield Standard",
+            "OAC to S3"
+          ]
+        },
+        {
+          "id": "apigw",
+          "awsService": "API Gateway",
+          "role": "presigned-URL vending API",
+          "security": [
+            "TLS",
+            "IAM auth",
+            "throttling 500 rps",
+            "least-priv role"
+          ]
+        },
+        {
+          "id": "lambda_presign",
+          "awsService": "Lambda",
+          "role": "presigned URL generator",
+          "security": [
+            "least-priv role",
+            "Secrets Manager for config",
+            "X-Ray tracing"
+          ]
+        },
+        {
+          "id": "sqs_raw",
+          "awsService": "SQS",
+          "role": "raw-file event buffer",
+          "security": [
+            "SSE-KMS",
+            "DLQ enabled",
+            "visibility timeout 5 min"
+          ]
+        },
+        {
+          "id": "sqs_raw_dlq",
+          "awsService": "SQS",
+          "role": "raw-file dead-letter queue",
+          "security": [
+            "SSE-KMS",
+            "alarm on depth > 0"
+          ]
+        },
+        {
+          "id": "lambda_splitter",
+          "awsService": "Lambda",
+          "role": "file chunker / splitter",
+          "security": [
+            "least-priv role",
+            "reserved concurrency 20",
+            "X-Ray tracing",
+            "idempotent on ETag"
+          ]
+        },
+        {
+          "id": "sqs_chunks",
+          "awsService": "SQS",
+          "role": "per-chunk work queue",
+          "security": [
+            "SSE-KMS",
+            "DLQ enabled",
+            "visibility timeout 15 min"
+          ]
+        },
+        {
+          "id": "sqs_chunks_dlq",
+          "awsService": "SQS",
+          "role": "chunk dead-letter queue",
+          "security": [
+            "SSE-KMS",
+            "alarm on depth > 0"
+          ]
+        },
+        {
+          "id": "lambda_transform",
+          "awsService": "Lambda",
+          "role": "record transformer / loader",
+          "security": [
+            "least-priv role",
+            "reserved concurrency 50",
+            "X-Ray tracing",
+            "idempotent consumer"
+          ]
+        },
+        {
+          "id": "dynamo_target",
+          "awsService": "DynamoDB",
+          "role": "transformed record store",
+          "security": [
+            "SSE-KMS CMK",
+            "on-demand capacity",
+            "PITR enabled",
+            "least-priv resource policy"
+          ]
+        },
+        {
+          "id": "dynamo_state",
+          "awsService": "DynamoDB",
+          "role": "job state / dedup tracker",
+          "security": [
+            "SSE-KMS CMK",
+            "on-demand capacity",
+            "conditional writes",
+            "PITR enabled"
+          ]
+        },
+        {
+          "id": "s3_quarantine",
+          "awsService": "S3",
+          "role": "failed-record quarantine",
+          "security": [
+            "SSE-KMS",
+            "block public access",
+            "lifecycle 30d expiry"
+          ]
+        },
+        {
+          "id": "cw_logs",
+          "awsService": "CloudWatch Logs",
+          "role": "centralized structured logs",
+          "security": [
+            "retention 90d",
+            "KMS encrypted",
+            "least-priv log group policy"
+          ]
+        },
+        {
+          "id": "cw_alarms",
+          "awsService": "CloudWatch",
+          "role": "golden-signal alarms",
+          "security": [
+            "alarms: DLQ depth, error rate, p99 duration, throttles"
+          ]
+        },
+        {
+          "id": "sns_alerts",
+          "awsService": "SNS",
+          "role": "ops alert fanout",
+          "security": [
+            "SSE enabled",
+            "TLS",
+            "least-priv publish policy"
+          ]
+        },
+        {
+          "id": "email_oncall",
+          "awsService": "SES",
+          "role": "on-call email delivery",
+          "security": [
+            "TLS",
+            "DKIM/SPF",
+            "delivery events to CW"
+          ]
+        },
+        {
+          "id": "cloudtrail",
+          "awsService": "CloudTrail",
+          "role": "API audit trail",
+          "security": [
+            "multi-region",
+            "S3 data events on ingest bucket",
+            "log file integrity"
+          ]
+        }
+      ],
+      "edges": [
+        {
+          "from": "client",
+          "to": "cf_ingest",
+          "payload": "HTTPS upload request",
+          "protocol": "HTTPS"
+        },
+        {
+          "from": "cf_ingest",
+          "to": "apigw",
+          "payload": "presign request (filename, size)",
+          "protocol": "HTTPS"
+        },
+        {
+          "from": "apigw",
+          "to": "lambda_presign",
+          "payload": "presign params (key, TTL)",
+          "protocol": "HTTPS/Lambda invoke"
+        },
+        {
+          "from": "lambda_presign",
+          "to": "s3_ingest",
+          "payload": "presigned PUT URL generation",
+          "protocol": "AWS SDK / IAM SigV4"
+        },
+        {
+          "from": "lambda_presign",
+          "to": "client",
+          "payload": "presigned S3 PUT URL",
+          "protocol": "HTTPS"
+        },
+        {
+          "from": "client",
+          "to": "s3_ingest",
+          "payload": "raw file (PUT via presigned URL)",
+          "protocol": "HTTPS"
+        },
+        {
+          "from": "s3_ingest",
+          "to": "sqs_raw",
+          "payload": "S3 ObjectCreated event (key, ETag, size)",
+          "protocol": "S3 Event Notification"
+        },
+        {
+          "from": "sqs_raw",
+          "to": "lambda_splitter",
+          "payload": "S3 object metadata (key, ETag)",
+          "protocol": "SQS trigger"
+        },
+        {
+          "from": "sqs_raw",
+          "to": "sqs_raw_dlq",
+          "payload": "unprocessable raw events (maxReceiveCount=3)",
+          "protocol": "SQS redrive"
+        },
+        {
+          "from": "lambda_splitter",
+          "to": "s3_ingest",
+          "payload": "GetObject byte ranges for chunking",
+          "protocol": "HTTPS / S3 API"
+        },
+        {
+          "from": "lambda_splitter",
+          "to": "sqs_chunks",
+          "payload": "chunk descriptor (key, ETag, offset, length)",
+          "protocol": "SQS SendMessage"
+        },
+        {
+          "from": "lambda_splitter",
+          "to": "dynamo_state",
+          "payload": "job init record (fileId, chunkCount, status=PENDING)",
+          "protocol": "DynamoDB PutItem (conditional)"
+        },
+        {
+          "from": "sqs_chunks",
+          "to": "lambda_transform",
+          "payload": "chunk descriptor (key, ETag, offset, length)",
+          "protocol": "SQS trigger"
+        },
+        {
+          "from": "sqs_chunks",
+          "to": "sqs_chunks_dlq",
+          "payload": "poison chunk messages (maxReceiveCount=3)",
+          "protocol": "SQS redrive"
+        },
+        {
+          "from": "lambda_transform",
+          "to": "s3_ingest",
+          "payload": "GetObject byte range (chunk)",
+          "protocol": "HTTPS / S3 API"
+        },
+        {
+          "from": "lambda_transform",
+          "to": "dynamo_target",
+          "payload": "transformed records (PutItem conditional on ETag+offset)",
+          "protocol": "DynamoDB API / TLS"
+        },
+        {
+          "from": "lambda_transform",
+          "to": "dynamo_state",
+          "payload": "chunk completion update (chunkId, status=DONE)",
+          "protocol": "DynamoDB UpdateItem (conditional)"
+        },
+        {
+          "from": "lambda_transform",
+          "to": "s3_quarantine",
+          "payload": "unparseable records (JSON)",
+          "protocol": "HTTPS / S3 API"
+        },
+        {
+          "from": "lambda_splitter",
+          "to": "cw_logs",
+          "payload": "structured split logs (fileId, chunkCount)",
+          "protocol": "CloudWatch Logs API"
+        },
+        {
+          "from": "lambda_transform",
+          "to": "cw_logs",
+          "payload": "structured transform logs (chunkId, recordCount, errors)",
+          "protocol": "CloudWatch Logs API"
+        },
+        {
+          "from": "cw_logs",
+          "to": "cw_alarms",
+          "payload": "metric filters (error rate, throttles)",
+          "protocol": "CloudWatch Metrics"
+        },
+        {
+          "from": "cw_alarms",
+          "to": "sns_alerts",
+          "payload": "alarm state change (threshold breach)",
+          "protocol": "SNS publish"
+        },
+        {
+          "from": "sns_alerts",
+          "to": "email_oncall",
+          "payload": "alert notification (alarm name, metric, value)",
+          "protocol": "SES SendEmail"
+        },
+        {
+          "from": "cloudtrail",
+          "to": "cw_logs",
+          "payload": "management + S3 data events",
+          "protocol": "CloudTrail → CW Logs"
+        }
+      ],
+      "delta": [
+        "Baseline: single-region, serverless-no-VPC — $0 idle floor",
+        "SQS raw-event buffer absorbs file-upload bursts without dropping events",
+        "Splitter Lambda chunks large files so each unit is independently retried",
+        "DLQs on both queues with CW alarm on depth > 0",
+        "Lambda reserved concurrency (splitter=20, transform=50) controls drain rate",
+        "DynamoDB on-demand absorbs write spikes; conditional writes enforce idempotency",
+        "Quarantine bucket captures unparseable records without failing the job",
+        "Observability: CW Logs + golden-signal alarms → SNS → SES email on-call"
+      ],
+      "tradeoffs": [
+        "Single-region: a regional outage stalls the pipeline until recovery",
+        "Lambda 15-min / 10 GB per chunk — very large files require fine-grained chunking or migration to Fargate/Glue (balanced option)",
+        "DynamoDB: no ad-hoc SQL; swap to Aurora Serverless v2 if relational schema needed",
+        "No dedicated monitoring dashboard — balanced tier adds CloudWatch dashboards"
+      ],
+      "costDrivers": [
+        {
+          "service": "S3",
+          "unit": "$/GB-month",
+          "estimateRange": "$0.230–$2.30/mo",
+          "note": "S3 Standard storage, first 50TB/month tier."
+        },
+        {
+          "service": "S3",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.500–$5.00/mo",
+          "note": "PUT/COPY/POST/LIST requests per 1,000. GET/SELECT requests are ~$0.0004 per 1,000."
+        },
+        {
+          "service": "CloudFront",
+          "unit": "$/GB transferred",
+          "estimateRange": "$0.043–$0.425/mo",
+          "note": "Data transfer out to internet, first 10TB/month tier (North America). First 1TB/month is free."
+        },
+        {
+          "service": "CloudFront",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.075–$0.750/mo",
+          "note": "HTTPS requests ($0.0075 per 10,000). North America/Europe."
+        },
+        {
+          "service": "API Gateway",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.350–$3.50/mo",
+          "note": "REST API on-demand ($3.50 per 1M, first 333M tier). HTTP API is cheaper (~$0.001 per 1k / $1.00 per 1M)."
+        },
+        {
+          "service": "Lambda",
+          "unit": "$/GB-second",
+          "estimateRange": "$0.167–$1.67/mo",
+          "note": "Compute duration: $0.0000166667 per GB-second (x86). Multiply by memoryGB x durationSeconds per invocation."
+        },
+        {
+          "service": "Lambda",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.020–$0.200/mo",
+          "note": "On-demand list price ($0.20 per 1M requests). Excludes Free Tier."
+        },
+        {
+          "service": "SQS",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.040–$0.400/mo",
+          "note": "Standard queue requests ($0.40 per 1M). First 1M/month free. FIFO is $0.50 per 1M."
+        },
+        {
+          "service": "DynamoDB",
+          "unit": "per 1k read units",
+          "estimateRange": "$0.013–$0.125/mo",
+          "note": "On-demand read request units ($0.125 per 1M RRU). 1 RRU = 1 strongly-consistent read up to 4KB."
+        },
+        {
+          "service": "DynamoDB",
+          "unit": "per 1k write units",
+          "estimateRange": "$0.063–$0.625/mo",
+          "note": "On-demand write request units ($0.625 per 1M WRU). 1 WRU = 1 write up to 1KB."
+        },
+        {
+          "service": "CloudWatch Logs",
+          "unit": "$/GB ingested",
+          "estimateRange": "$0.010–$0.100/mo",
+          "note": "CloudWatch Logs ingestion $0.50/GB (first 10GB/mo free in some accounts). Archival storage is cheaper; Insights queries extra."
+        },
+        {
+          "service": "SNS",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.050–$0.500/mo",
+          "note": "Standard topic API requests ($0.50 per 1M). Delivery (HTTP/SMS/email) priced separately."
+        },
+        {
+          "service": "SES",
+          "unit": "per 1k requests",
+          "estimateRange": "$10.00–$100.00/mo",
+          "note": "Email send: $0.10 per 1,000 emails (content). Attachment/data transfer billed separately."
+        }
+      ]
+    },
+    {
+      "name": "balanced",
+      "summary": "Multi-AZ, VPC-isolated target datastore, Glue option for heavy transforms, Slack alerting, and CloudWatch dashboard for operational visibility.",
+      "nodes": [
+        {
+          "id": "s3_ingest",
+          "awsService": "S3",
+          "role": "raw file landing zone",
+          "security": [
+            "SSE-KMS",
+            "block public access",
+            "versioning enabled",
+            "lifecycle → Glacier 90d",
+            "aws:SecureTransport policy"
+          ]
+        },
+        {
+          "id": "cf_ingest",
+          "awsService": "CloudFront",
+          "role": "upload edge / WAF front",
+          "security": [
+            "TLS only",
+            "WAF managed rules",
+            "rate-based rule",
+            "Shield Standard",
+            "OAC to S3"
+          ]
+        },
+        {
+          "id": "apigw",
+          "awsService": "API Gateway",
+          "role": "presigned-URL vending API",
+          "security": [
+            "TLS",
+            "IAM auth",
+            "throttling 500 rps",
+            "least-priv role"
+          ]
+        },
+        {
+          "id": "lambda_presign",
+          "awsService": "Lambda",
+          "role": "presigned URL generator",
+          "security": [
+            "least-priv role",
+            "Secrets Manager for config",
+            "X-Ray tracing"
+          ]
+        },
+        {
+          "id": "sqs_raw",
+          "awsService": "SQS",
+          "role": "raw-file event buffer",
+          "security": [
+            "SSE-KMS",
+            "DLQ enabled",
+            "visibility timeout 5 min"
+          ]
+        },
+        {
+          "id": "sqs_raw_dlq",
+          "awsService": "SQS",
+          "role": "raw-file dead-letter queue",
+          "security": [
+            "SSE-KMS",
+            "alarm on depth > 0"
+          ]
+        },
+        {
+          "id": "lambda_splitter",
+          "awsService": "Lambda",
+          "role": "file chunker / splitter",
+          "security": [
+            "least-priv role",
+            "reserved concurrency 20",
+            "X-Ray tracing",
+            "idempotent on ETag"
+          ]
+        },
+        {
+          "id": "sqs_chunks",
+          "awsService": "SQS",
+          "role": "per-chunk work queue",
+          "security": [
+            "SSE-KMS",
+            "DLQ enabled",
+            "visibility timeout 15 min"
+          ]
+        },
+        {
+          "id": "sqs_chunks_dlq",
+          "awsService": "SQS",
+          "role": "chunk dead-letter queue",
+          "security": [
+            "SSE-KMS",
+            "alarm on depth > 0"
+          ]
+        },
+        {
+          "id": "lambda_transform",
+          "awsService": "Lambda",
+          "role": "record transformer / loader",
+          "security": [
+            "least-priv role",
+            "reserved concurrency 100",
+            "X-Ray tracing",
+            "idempotent consumer",
+            "VPC endpoint to DynamoDB"
+          ]
+        },
+        {
+          "id": "dynamo_target",
+          "awsService": "DynamoDB",
+          "role": "transformed record store",
+          "security": [
+            "SSE-KMS CMK",
+            "on-demand capacity",
+            "PITR enabled",
+            "least-priv resource policy"
+          ]
+        },
+        {
+          "id": "dynamo_state",
+          "awsService": "DynamoDB",
+          "role": "job state / dedup tracker",
+          "security": [
+            "SSE-KMS CMK",
+            "on-demand capacity",
+            "conditional writes",
+            "PITR enabled"
+          ]
+        },
+        {
+          "id": "s3_quarantine",
+          "awsService": "S3",
+          "role": "failed-record quarantine",
+          "security": [
+            "SSE-KMS",
+            "block public access",
+            "lifecycle 30d expiry"
+          ]
+        },
+        {
+          "id": "cw_logs",
+          "awsService": "CloudWatch Logs",
+          "role": "centralized structured logs",
+          "security": [
+            "retention 90d",
+            "KMS encrypted",
+            "least-priv log group policy"
+          ]
+        },
+        {
+          "id": "cw_alarms",
+          "awsService": "CloudWatch",
+          "role": "golden-signal alarms",
+          "security": [
+            "alarms: DLQ depth, error rate, p99 duration, throttles"
+          ]
+        },
+        {
+          "id": "sns_alerts",
+          "awsService": "SNS",
+          "role": "ops alert fanout",
+          "security": [
+            "SSE enabled",
+            "TLS",
+            "least-priv publish policy"
+          ]
+        },
+        {
+          "id": "email_oncall",
+          "awsService": "SES",
+          "role": "on-call email delivery",
+          "security": [
+            "TLS",
+            "DKIM/SPF",
+            "delivery events to CW"
+          ]
+        },
+        {
+          "id": "cloudtrail",
+          "awsService": "CloudTrail",
+          "role": "API audit trail",
+          "security": [
+            "multi-region",
+            "S3 data events on ingest bucket",
+            "log file integrity"
+          ]
+        },
+        {
+          "id": "glue_job",
+          "awsService": "AWS Glue",
+          "role": "heavy-file ETL worker",
+          "security": [
+            "least-priv role",
+            "job bookmark for idempotency",
+            "KMS job encryption"
+          ]
+        },
+        {
+          "id": "sqs_glue_trigger",
+          "awsService": "SQS",
+          "role": "large-file Glue trigger queue",
+          "security": [
+            "SSE-KMS",
+            "DLQ enabled",
+            "visibility timeout 30 min"
+          ]
+        },
+        {
+          "id": "sqs_glue_dlq",
+          "awsService": "SQS",
+          "role": "Glue trigger dead-letter queue",
+          "security": [
+            "SSE-KMS",
+            "alarm on depth > 0"
+          ]
+        },
+        {
+          "id": "cw_dashboard",
+          "awsService": "CloudWatch",
+          "role": "ETL ops dashboard",
+          "security": [
+            "read-only IAM access"
+          ]
+        },
+        {
+          "id": "slack_webhook",
+          "awsService": "Lambda",
+          "role": "SNS→Slack bridge",
+          "security": [
+            "least-priv role",
+            "Secrets Manager for webhook URL",
+            "X-Ray"
+          ]
+        }
+      ],
+      "edges": [
+        {
+          "from": "client",
+          "to": "cf_ingest",
+          "payload": "HTTPS upload request",
+          "protocol": "HTTPS"
+        },
+        {
+          "from": "cf_ingest",
+          "to": "apigw",
+          "payload": "presign request (filename, size)",
+          "protocol": "HTTPS"
+        },
+        {
+          "from": "apigw",
+          "to": "lambda_presign",
+          "payload": "presign params (key, TTL)",
+          "protocol": "HTTPS/Lambda invoke"
+        },
+        {
+          "from": "lambda_presign",
+          "to": "s3_ingest",
+          "payload": "presigned PUT URL generation",
+          "protocol": "AWS SDK / IAM SigV4"
+        },
+        {
+          "from": "lambda_presign",
+          "to": "client",
+          "payload": "presigned S3 PUT URL",
+          "protocol": "HTTPS"
+        },
+        {
+          "from": "client",
+          "to": "s3_ingest",
+          "payload": "raw file (PUT via presigned URL)",
+          "protocol": "HTTPS"
+        },
+        {
+          "from": "s3_ingest",
+          "to": "sqs_raw",
+          "payload": "S3 ObjectCreated event (key, ETag, size)",
+          "protocol": "S3 Event Notification"
+        },
+        {
+          "from": "sqs_raw",
+          "to": "lambda_splitter",
+          "payload": "S3 object metadata (key, ETag)",
+          "protocol": "SQS trigger"
+        },
+        {
+          "from": "sqs_raw",
+          "to": "sqs_raw_dlq",
+          "payload": "unprocessable raw events (maxReceiveCount=3)",
+          "protocol": "SQS redrive"
+        },
+        {
+          "from": "lambda_splitter",
+          "to": "s3_ingest",
+          "payload": "GetObject byte ranges for chunking",
+          "protocol": "HTTPS / S3 API"
+        },
+        {
+          "from": "lambda_splitter",
+          "to": "sqs_chunks",
+          "payload": "chunk descriptor (key, ETag, offset, length)",
+          "protocol": "SQS SendMessage"
+        },
+        {
+          "from": "lambda_splitter",
+          "to": "dynamo_state",
+          "payload": "job init record (fileId, chunkCount, status=PENDING)",
+          "protocol": "DynamoDB PutItem (conditional)"
+        },
+        {
+          "from": "sqs_chunks",
+          "to": "lambda_transform",
+          "payload": "chunk descriptor (key, ETag, offset, length)",
+          "protocol": "SQS trigger"
+        },
+        {
+          "from": "sqs_chunks",
+          "to": "sqs_chunks_dlq",
+          "payload": "poison chunk messages (maxReceiveCount=3)",
+          "protocol": "SQS redrive"
+        },
+        {
+          "from": "lambda_transform",
+          "to": "s3_ingest",
+          "payload": "GetObject byte range (chunk)",
+          "protocol": "HTTPS / S3 API"
+        },
+        {
+          "from": "lambda_transform",
+          "to": "dynamo_target",
+          "payload": "transformed records (PutItem conditional on ETag+offset)",
+          "protocol": "DynamoDB API / TLS"
+        },
+        {
+          "from": "lambda_transform",
+          "to": "dynamo_state",
+          "payload": "chunk completion update (chunkId, status=DONE)",
+          "protocol": "DynamoDB UpdateItem (conditional)"
+        },
+        {
+          "from": "lambda_transform",
+          "to": "s3_quarantine",
+          "payload": "unparseable records (JSON)",
+          "protocol": "HTTPS / S3 API"
+        },
+        {
+          "from": "lambda_splitter",
+          "to": "cw_logs",
+          "payload": "structured split logs (fileId, chunkCount)",
+          "protocol": "CloudWatch Logs API"
+        },
+        {
+          "from": "lambda_transform",
+          "to": "cw_logs",
+          "payload": "structured transform logs (chunkId, recordCount, errors)",
+          "protocol": "CloudWatch Logs API"
+        },
+        {
+          "from": "cw_logs",
+          "to": "cw_alarms",
+          "payload": "metric filters (error rate, throttles)",
+          "protocol": "CloudWatch Metrics"
+        },
+        {
+          "from": "cw_alarms",
+          "to": "sns_alerts",
+          "payload": "alarm state change (threshold breach)",
+          "protocol": "SNS publish"
+        },
+        {
+          "from": "sns_alerts",
+          "to": "email_oncall",
+          "payload": "alert notification (alarm name, metric, value)",
+          "protocol": "SES SendEmail"
+        },
+        {
+          "from": "cloudtrail",
+          "to": "cw_logs",
+          "payload": "management + S3 data events",
+          "protocol": "CloudTrail → CW Logs"
+        },
+        {
+          "from": "lambda_splitter",
+          "to": "sqs_glue_trigger",
+          "payload": "large-file descriptor (key, ETag, size > threshold)",
+          "protocol": "SQS SendMessage"
+        },
+        {
+          "from": "sqs_glue_trigger",
+          "to": "glue_job",
+          "payload": "file descriptor for Glue ETL run",
+          "protocol": "EventBridge / Lambda → Glue StartJobRun"
+        },
+        {
+          "from": "sqs_glue_trigger",
+          "to": "sqs_glue_dlq",
+          "payload": "failed Glue trigger messages",
+          "protocol": "SQS redrive"
+        },
+        {
+          "from": "glue_job",
+          "to": "dynamo_target",
+          "payload": "batch transformed records",
+          "protocol": "DynamoDB BatchWriteItem / TLS"
+        },
+        {
+          "from": "glue_job",
+          "to": "dynamo_state",
+          "payload": "job completion update",
+          "protocol": "DynamoDB UpdateItem"
+        },
+        {
+          "from": "glue_job",
+          "to": "s3_quarantine",
+          "payload": "unparseable records",
+          "protocol": "HTTPS / S3 API"
+        },
+        {
+          "from": "glue_job",
+          "to": "cw_logs",
+          "payload": "Glue job structured logs",
+          "protocol": "CloudWatch Logs API"
+        },
+        {
+          "from": "cw_alarms",
+          "to": "slack_webhook",
+          "payload": "alarm state change (critical path)",
+          "protocol": "SNS → Lambda invoke"
+        },
+        {
+          "from": "cw_logs",
+          "to": "cw_dashboard",
+          "payload": "metrics: throughput, error rate, DLQ depth",
+          "protocol": "CloudWatch Metrics"
+        }
+      ],
+      "delta": [
+        "Glue ETL job added for files exceeding Lambda chunk limits (size threshold in splitter)",
+        "Dedicated SQS queue + DLQ for large-file Glue triggers",
+        "Lambda transform reserved concurrency raised to 100 for higher sustained throughput",
+        "SNS→Lambda→Slack bridge for critical-path alarm routing",
+        "CloudWatch dashboard: pipeline throughput, error rate, DLQ depth, p99 latency",
+        "VPC endpoint from Lambda to DynamoDB (no public egress for data path)"
+      ],
+      "tradeoffs": [
+        "Glue adds cold-start latency (~1–2 min) per large-file job — acceptable for batch, not streaming",
+        "Still single-region: a regional event stalls in-flight jobs; resilient tier adds cross-region DR",
+        "NAT gateway cost introduced if Glue job needs public internet egress (avoid by using S3/DynamoDB VPC endpoints)",
+        "No cross-region replication of DynamoDB target table — resilient tier adds Global Tables"
+      ],
+      "costDrivers": [
+        {
+          "service": "S3",
+          "unit": "$/GB-month",
+          "estimateRange": "$0.230–$2.30/mo",
+          "note": "S3 Standard storage, first 50TB/month tier."
+        },
+        {
+          "service": "S3",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.500–$5.00/mo",
+          "note": "PUT/COPY/POST/LIST requests per 1,000. GET/SELECT requests are ~$0.0004 per 1,000."
+        },
+        {
+          "service": "CloudFront",
+          "unit": "$/GB transferred",
+          "estimateRange": "$0.043–$0.425/mo",
+          "note": "Data transfer out to internet, first 10TB/month tier (North America). First 1TB/month is free."
+        },
+        {
+          "service": "CloudFront",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.075–$0.750/mo",
+          "note": "HTTPS requests ($0.0075 per 10,000). North America/Europe."
+        },
+        {
+          "service": "API Gateway",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.350–$3.50/mo",
+          "note": "REST API on-demand ($3.50 per 1M, first 333M tier). HTTP API is cheaper (~$0.001 per 1k / $1.00 per 1M)."
+        },
+        {
+          "service": "Lambda",
+          "unit": "$/GB-second",
+          "estimateRange": "$0.167–$1.67/mo",
+          "note": "Compute duration: $0.0000166667 per GB-second (x86). Multiply by memoryGB x durationSeconds per invocation."
+        },
+        {
+          "service": "Lambda",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.020–$0.200/mo",
+          "note": "On-demand list price ($0.20 per 1M requests). Excludes Free Tier."
+        },
+        {
+          "service": "SQS",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.040–$0.400/mo",
+          "note": "Standard queue requests ($0.40 per 1M). First 1M/month free. FIFO is $0.50 per 1M."
+        },
+        {
+          "service": "DynamoDB",
+          "unit": "per 1k read units",
+          "estimateRange": "$0.013–$0.125/mo",
+          "note": "On-demand read request units ($0.125 per 1M RRU). 1 RRU = 1 strongly-consistent read up to 4KB."
+        },
+        {
+          "service": "DynamoDB",
+          "unit": "per 1k write units",
+          "estimateRange": "$0.063–$0.625/mo",
+          "note": "On-demand write request units ($0.625 per 1M WRU). 1 WRU = 1 write up to 1KB."
+        },
+        {
+          "service": "CloudWatch Logs",
+          "unit": "$/GB ingested",
+          "estimateRange": "$0.010–$0.100/mo",
+          "note": "CloudWatch Logs ingestion $0.50/GB (first 10GB/mo free in some accounts). Archival storage is cheaper; Insights queries extra."
+        },
+        {
+          "service": "SNS",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.050–$0.500/mo",
+          "note": "Standard topic API requests ($0.50 per 1M). Delivery (HTTP/SMS/email) priced separately."
+        },
+        {
+          "service": "SES",
+          "unit": "per 1k requests",
+          "estimateRange": "$10.00–$100.00/mo",
+          "note": "Email send: $0.10 per 1,000 emails (content). Attachment/data transfer billed separately."
+        }
+      ]
+    },
+    {
+      "name": "resilient",
+      "summary": "Multi-region active-passive DR: DynamoDB Global Tables, S3 cross-region replication, EventBridge cross-region routing, Route 53 health-checked failover, PagerDuty escalation, and SLO alarms.",
+      "nodes": [
+        {
+          "id": "s3_ingest",
+          "awsService": "S3",
+          "role": "raw file landing zone",
+          "security": [
+            "SSE-KMS",
+            "block public access",
+            "versioning enabled",
+            "lifecycle → Glacier 90d",
+            "aws:SecureTransport policy"
+          ]
+        },
+        {
+          "id": "cf_ingest",
+          "awsService": "CloudFront",
+          "role": "upload edge / WAF front",
+          "security": [
+            "TLS only",
+            "WAF managed rules",
+            "rate-based rule",
+            "Shield Standard",
+            "OAC to S3"
+          ]
+        },
+        {
+          "id": "apigw",
+          "awsService": "API Gateway",
+          "role": "presigned-URL vending API",
+          "security": [
+            "TLS",
+            "IAM auth",
+            "throttling 500 rps",
+            "least-priv role"
+          ]
+        },
+        {
+          "id": "lambda_presign",
+          "awsService": "Lambda",
+          "role": "presigned URL generator",
+          "security": [
+            "least-priv role",
+            "Secrets Manager for config",
+            "X-Ray tracing"
+          ]
+        },
+        {
+          "id": "sqs_raw",
+          "awsService": "SQS",
+          "role": "raw-file event buffer",
+          "security": [
+            "SSE-KMS",
+            "DLQ enabled",
+            "visibility timeout 5 min"
+          ]
+        },
+        {
+          "id": "sqs_raw_dlq",
+          "awsService": "SQS",
+          "role": "raw-file dead-letter queue",
+          "security": [
+            "SSE-KMS",
+            "alarm on depth > 0"
+          ]
+        },
+        {
+          "id": "lambda_splitter",
+          "awsService": "Lambda",
+          "role": "file chunker / splitter",
+          "security": [
+            "least-priv role",
+            "reserved concurrency 20",
+            "X-Ray tracing",
+            "idempotent on ETag"
+          ]
+        },
+        {
+          "id": "sqs_chunks",
+          "awsService": "SQS",
+          "role": "per-chunk work queue",
+          "security": [
+            "SSE-KMS",
+            "DLQ enabled",
+            "visibility timeout 15 min"
+          ]
+        },
+        {
+          "id": "sqs_chunks_dlq",
+          "awsService": "SQS",
+          "role": "chunk dead-letter queue",
+          "security": [
+            "SSE-KMS",
+            "alarm on depth > 0"
+          ]
+        },
+        {
+          "id": "lambda_transform",
+          "awsService": "Lambda",
+          "role": "record transformer / loader",
+          "security": [
+            "least-priv role",
+            "reserved concurrency 100",
+            "X-Ray tracing",
+            "idempotent consumer",
+            "VPC endpoint to DynamoDB"
+          ]
+        },
+        {
+          "id": "dynamo_target",
+          "awsService": "DynamoDB",
+          "role": "transformed record store (Global Table)",
+          "security": [
+            "SSE-KMS CMK",
+            "Global Tables 2x regions",
+            "PITR enabled",
+            "least-priv resource policy"
+          ]
+        },
+        {
+          "id": "dynamo_state",
+          "awsService": "DynamoDB",
+          "role": "job state / dedup (Global Table)",
+          "security": [
+            "SSE-KMS CMK",
+            "Global Tables 2x regions",
+            "conditional writes",
+            "PITR enabled"
+          ]
+        },
+        {
+          "id": "s3_quarantine",
+          "awsService": "S3",
+          "role": "failed-record quarantine",
+          "security": [
+            "SSE-KMS",
+            "block public access",
+            "lifecycle 30d expiry"
+          ]
+        },
+        {
+          "id": "cw_logs",
+          "awsService": "CloudWatch Logs",
+          "role": "centralized structured logs",
+          "security": [
+            "retention 90d",
+            "KMS encrypted",
+            "least-priv log group policy"
+          ]
+        },
+        {
+          "id": "cw_alarms",
+          "awsService": "CloudWatch",
+          "role": "golden-signal alarms",
+          "security": [
+            "alarms: DLQ depth, error rate, p99 duration, throttles"
+          ]
+        },
+        {
+          "id": "sns_alerts",
+          "awsService": "SNS",
+          "role": "ops alert fanout",
+          "security": [
+            "SSE enabled",
+            "TLS",
+            "least-priv publish policy"
+          ]
+        },
+        {
+          "id": "email_oncall",
+          "awsService": "SES",
+          "role": "on-call email delivery",
+          "security": [
+            "TLS",
+            "DKIM/SPF",
+            "delivery events to CW"
+          ]
+        },
+        {
+          "id": "cloudtrail",
+          "awsService": "CloudTrail",
+          "role": "API audit trail",
+          "security": [
+            "multi-region",
+            "S3 data events on ingest bucket",
+            "log file integrity"
+          ]
+        },
+        {
+          "id": "glue_job",
+          "awsService": "AWS Glue",
+          "role": "heavy-file ETL worker",
+          "security": [
+            "least-priv role",
+            "job bookmark for idempotency",
+            "KMS job encryption"
+          ]
+        },
+        {
+          "id": "sqs_glue_trigger",
+          "awsService": "SQS",
+          "role": "large-file Glue trigger queue",
+          "security": [
+            "SSE-KMS",
+            "DLQ enabled",
+            "visibility timeout 30 min"
+          ]
+        },
+        {
+          "id": "sqs_glue_dlq",
+          "awsService": "SQS",
+          "role": "Glue trigger dead-letter queue",
+          "security": [
+            "SSE-KMS",
+            "alarm on depth > 0"
+          ]
+        },
+        {
+          "id": "cw_dashboard",
+          "awsService": "CloudWatch",
+          "role": "ETL ops dashboard",
+          "security": [
+            "read-only IAM access"
+          ]
+        },
+        {
+          "id": "slack_webhook",
+          "awsService": "Lambda",
+          "role": "SNS→Slack bridge",
+          "security": [
+            "least-priv role",
+            "Secrets Manager for webhook URL",
+            "X-Ray"
+          ]
+        },
+        {
+          "id": "s3_ingest_replica",
+          "awsService": "S3",
+          "role": "CRR replica (DR region)",
+          "security": [
+            "SSE-KMS",
+            "block public access",
+            "CRR replication role",
+            "versioning enabled"
+          ]
+        },
+        {
+          "id": "eventbridge_bus",
+          "awsService": "EventBridge",
+          "role": "cross-region event router",
+          "security": [
+            "least-priv resource policy",
+            "TLS",
+            "schema registry"
+          ]
+        },
+        {
+          "id": "r53_health",
+          "awsService": "Route 53",
+          "role": "ingest endpoint health check",
+          "security": [
+            "health check on API GW",
+            "failover routing policy"
+          ]
+        },
+        {
+          "id": "pagerduty_sub",
+          "awsService": "SNS",
+          "role": "PagerDuty escalation topic",
+          "security": [
+            "SSE enabled",
+            "TLS",
+            "HTTPS subscription to PagerDuty endpoint"
+          ]
+        },
+        {
+          "id": "cw_anomaly",
+          "awsService": "CloudWatch",
+          "role": "anomaly detection / SLO alarms",
+          "security": [
+            "ML anomaly band on throughput + error rate",
+            "SLO burn-rate alarms"
+          ]
+        }
+      ],
+      "edges": [
+        {
+          "from": "client",
+          "to": "cf_ingest",
+          "payload": "HTTPS upload request",
+          "protocol": "HTTPS"
+        },
+        {
+          "from": "cf_ingest",
+          "to": "apigw",
+          "payload": "presign request (filename, size)",
+          "protocol": "HTTPS"
+        },
+        {
+          "from": "apigw",
+          "to": "lambda_presign",
+          "payload": "presign params (key, TTL)",
+          "protocol": "HTTPS/Lambda invoke"
+        },
+        {
+          "from": "lambda_presign",
+          "to": "s3_ingest",
+          "payload": "presigned PUT URL generation",
+          "protocol": "AWS SDK / IAM SigV4"
+        },
+        {
+          "from": "lambda_presign",
+          "to": "client",
+          "payload": "presigned S3 PUT URL",
+          "protocol": "HTTPS"
+        },
+        {
+          "from": "client",
+          "to": "s3_ingest",
+          "payload": "raw file (PUT via presigned URL)",
+          "protocol": "HTTPS"
+        },
+        {
+          "from": "s3_ingest",
+          "to": "sqs_raw",
+          "payload": "S3 ObjectCreated event (key, ETag, size)",
+          "protocol": "S3 Event Notification"
+        },
+        {
+          "from": "sqs_raw",
+          "to": "lambda_splitter",
+          "payload": "S3 object metadata (key, ETag)",
+          "protocol": "SQS trigger"
+        },
+        {
+          "from": "sqs_raw",
+          "to": "sqs_raw_dlq",
+          "payload": "unprocessable raw events (maxReceiveCount=3)",
+          "protocol": "SQS redrive"
+        },
+        {
+          "from": "lambda_splitter",
+          "to": "s3_ingest",
+          "payload": "GetObject byte ranges for chunking",
+          "protocol": "HTTPS / S3 API"
+        },
+        {
+          "from": "lambda_splitter",
+          "to": "sqs_chunks",
+          "payload": "chunk descriptor (key, ETag, offset, length)",
+          "protocol": "SQS SendMessage"
+        },
+        {
+          "from": "lambda_splitter",
+          "to": "dynamo_state",
+          "payload": "job init record (fileId, chunkCount, status=PENDING)",
+          "protocol": "DynamoDB PutItem (conditional)"
+        },
+        {
+          "from": "sqs_chunks",
+          "to": "lambda_transform",
+          "payload": "chunk descriptor (key, ETag, offset, length)",
+          "protocol": "SQS trigger"
+        },
+        {
+          "from": "sqs_chunks",
+          "to": "sqs_chunks_dlq",
+          "payload": "poison chunk messages (maxReceiveCount=3)",
+          "protocol": "SQS redrive"
+        },
+        {
+          "from": "lambda_transform",
+          "to": "s3_ingest",
+          "payload": "GetObject byte range (chunk)",
+          "protocol": "HTTPS / S3 API"
+        },
+        {
+          "from": "lambda_transform",
+          "to": "dynamo_target",
+          "payload": "transformed records (PutItem conditional on ETag+offset)",
+          "protocol": "DynamoDB API / TLS"
+        },
+        {
+          "from": "lambda_transform",
+          "to": "dynamo_state",
+          "payload": "chunk completion update (chunkId, status=DONE)",
+          "protocol": "DynamoDB UpdateItem (conditional)"
+        },
+        {
+          "from": "lambda_transform",
+          "to": "s3_quarantine",
+          "payload": "unparseable records (JSON)",
+          "protocol": "HTTPS / S3 API"
+        },
+        {
+          "from": "lambda_splitter",
+          "to": "cw_logs",
+          "payload": "structured split logs (fileId, chunkCount)",
+          "protocol": "CloudWatch Logs API"
+        },
+        {
+          "from": "lambda_transform",
+          "to": "cw_logs",
+          "payload": "structured transform logs (chunkId, recordCount, errors)",
+          "protocol": "CloudWatch Logs API"
+        },
+        {
+          "from": "cw_logs",
+          "to": "cw_alarms",
+          "payload": "metric filters (error rate, throttles)",
+          "protocol": "CloudWatch Metrics"
+        },
+        {
+          "from": "cw_alarms",
+          "to": "sns_alerts",
+          "payload": "alarm state change (threshold breach)",
+          "protocol": "SNS publish"
+        },
+        {
+          "from": "sns_alerts",
+          "to": "email_oncall",
+          "payload": "alert notification (alarm name, metric, value)",
+          "protocol": "SES SendEmail"
+        },
+        {
+          "from": "cloudtrail",
+          "to": "cw_logs",
+          "payload": "management + S3 data events",
+          "protocol": "CloudTrail → CW Logs"
+        },
+        {
+          "from": "lambda_splitter",
+          "to": "sqs_glue_trigger",
+          "payload": "large-file descriptor (key, ETag, size > threshold)",
+          "protocol": "SQS SendMessage"
+        },
+        {
+          "from": "sqs_glue_trigger",
+          "to": "glue_job",
+          "payload": "file descriptor for Glue ETL run",
+          "protocol": "EventBridge / Lambda → Glue StartJobRun"
+        },
+        {
+          "from": "sqs_glue_trigger",
+          "to": "sqs_glue_dlq",
+          "payload": "failed Glue trigger messages",
+          "protocol": "SQS redrive"
+        },
+        {
+          "from": "glue_job",
+          "to": "dynamo_target",
+          "payload": "batch transformed records",
+          "protocol": "DynamoDB BatchWriteItem / TLS"
+        },
+        {
+          "from": "glue_job",
+          "to": "dynamo_state",
+          "payload": "job completion update",
+          "protocol": "DynamoDB UpdateItem"
+        },
+        {
+          "from": "glue_job",
+          "to": "s3_quarantine",
+          "payload": "unparseable records",
+          "protocol": "HTTPS / S3 API"
+        },
+        {
+          "from": "glue_job",
+          "to": "cw_logs",
+          "payload": "Glue job structured logs",
+          "protocol": "CloudWatch Logs API"
+        },
+        {
+          "from": "cw_alarms",
+          "to": "slack_webhook",
+          "payload": "alarm state change (critical path)",
+          "protocol": "SNS → Lambda invoke"
+        },
+        {
+          "from": "cw_logs",
+          "to": "cw_dashboard",
+          "payload": "metrics: throughput, error rate, DLQ depth",
+          "protocol": "CloudWatch Metrics"
+        },
+        {
+          "from": "s3_ingest",
+          "to": "s3_ingest_replica",
+          "payload": "raw files (async CRR replication)",
+          "protocol": "S3 CRR / TLS"
+        },
+        {
+          "from": "s3_ingest",
+          "to": "eventbridge_bus",
+          "payload": "ObjectCreated event (key, ETag)",
+          "protocol": "EventBridge rule / TLS"
+        },
+        {
+          "from": "eventbridge_bus",
+          "to": "sqs_raw",
+          "payload": "normalized ingest event (primary region)",
+          "protocol": "EventBridge → SQS"
+        },
+        {
+          "from": "r53_health",
+          "to": "apigw",
+          "payload": "health probe (HTTP 200 check)",
+          "protocol": "HTTPS"
+        },
+        {
+          "from": "cw_alarms",
+          "to": "pagerduty_sub",
+          "payload": "P1 alarm state change",
+          "protocol": "SNS publish"
+        },
+        {
+          "from": "cw_logs",
+          "to": "cw_anomaly",
+          "payload": "metric streams (throughput, errors)",
+          "protocol": "CloudWatch Metrics"
+        },
+        {
+          "from": "cw_anomaly",
+          "to": "sns_alerts",
+          "payload": "anomaly / SLO burn-rate alarm",
+          "protocol": "SNS publish"
+        }
+      ],
+      "delta": [
+        "DynamoDB Global Tables: active-active replication across 2 regions for target + state tables",
+        "S3 Cross-Region Replication on ingest bucket → DR region replica",
+        "EventBridge cross-region bus replaces direct S3→SQS in primary; DR region can re-replay from replica",
+        "Route 53 health-checked failover on ingest API endpoint",
+        "PagerDuty SNS topic for P1 escalation (SLO burn-rate breach)",
+        "CloudWatch anomaly detection + SLO burn-rate alarms on pipeline throughput and error rate"
+      ],
+      "tradeoffs": [
+        "Global Tables replication lag ~1–2 s; conditional writes still prevent double-processing but cross-region ordering is eventual",
+        "CRR adds S3 egress cost proportional to file volume — worthwhile only if RPO < 1 hr is required",
+        "EventBridge adds ~1 ms latency per event; schema registry governance overhead",
+        "Significantly higher cost floor vs balanced — justified only for pipelines with SLA-backed RPO/RTO requirements"
+      ],
+      "costDrivers": [
+        {
+          "service": "S3",
+          "unit": "$/GB-month",
+          "estimateRange": "$0.230–$2.30/mo",
+          "note": "S3 Standard storage, first 50TB/month tier."
+        },
+        {
+          "service": "S3",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.500–$5.00/mo",
+          "note": "PUT/COPY/POST/LIST requests per 1,000. GET/SELECT requests are ~$0.0004 per 1,000."
+        },
+        {
+          "service": "CloudFront",
+          "unit": "$/GB transferred",
+          "estimateRange": "$0.043–$0.425/mo",
+          "note": "Data transfer out to internet, first 10TB/month tier (North America). First 1TB/month is free."
+        },
+        {
+          "service": "CloudFront",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.075–$0.750/mo",
+          "note": "HTTPS requests ($0.0075 per 10,000). North America/Europe."
+        },
+        {
+          "service": "API Gateway",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.350–$3.50/mo",
+          "note": "REST API on-demand ($3.50 per 1M, first 333M tier). HTTP API is cheaper (~$0.001 per 1k / $1.00 per 1M)."
+        },
+        {
+          "service": "Lambda",
+          "unit": "$/GB-second",
+          "estimateRange": "$0.167–$1.67/mo",
+          "note": "Compute duration: $0.0000166667 per GB-second (x86). Multiply by memoryGB x durationSeconds per invocation."
+        },
+        {
+          "service": "Lambda",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.020–$0.200/mo",
+          "note": "On-demand list price ($0.20 per 1M requests). Excludes Free Tier."
+        },
+        {
+          "service": "SQS",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.040–$0.400/mo",
+          "note": "Standard queue requests ($0.40 per 1M). First 1M/month free. FIFO is $0.50 per 1M."
+        },
+        {
+          "service": "DynamoDB",
+          "unit": "per 1k read units",
+          "estimateRange": "$0.013–$0.125/mo",
+          "note": "On-demand read request units ($0.125 per 1M RRU). 1 RRU = 1 strongly-consistent read up to 4KB."
+        },
+        {
+          "service": "DynamoDB",
+          "unit": "per 1k write units",
+          "estimateRange": "$0.063–$0.625/mo",
+          "note": "On-demand write request units ($0.625 per 1M WRU). 1 WRU = 1 write up to 1KB."
+        },
+        {
+          "service": "CloudWatch Logs",
+          "unit": "$/GB ingested",
+          "estimateRange": "$0.010–$0.100/mo",
+          "note": "CloudWatch Logs ingestion $0.50/GB (first 10GB/mo free in some accounts). Archival storage is cheaper; Insights queries extra."
+        },
+        {
+          "service": "SNS",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.050–$0.500/mo",
+          "note": "Standard topic API requests ($0.50 per 1M). Delivery (HTTP/SMS/email) priced separately."
+        },
+        {
+          "service": "SES",
+          "unit": "per 1k requests",
+          "estimateRange": "$10.00–$100.00/mo",
+          "note": "Email send: $0.10 per 1,000 emails (content). Attachment/data transfer billed separately."
+        },
+        {
+          "service": "EventBridge",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.100–$1.00/mo",
+          "note": "Custom event-bus events: $1.00 per 1M events published. Pipes/schema registry priced separately."
+        }
+      ]
+    }
+  ],
+  "keyDecisions": [
+    {
+      "decision": "Compute model for transformation workers",
+      "chosen": "Lambda (event-driven, per-chunk)",
+      "alternativesConsidered": [
+        "Fargate/ECS task per file",
+        "Glue ETL job",
+        "EC2 batch worker"
+      ],
+      "rationale": "Cost Optimization + Performance Efficiency: Lambda gives $0 idle floor and scales per-chunk concurrently with no cluster management; Glue/Fargate belong in balanced/resilient where startup latency and sustained throughput justify the always-on cost."
+    },
+    {
+      "decision": "Ingest trigger mechanism",
+      "chosen": "S3 Event Notification → SQS → Lambda (queue-buffered)",
+      "alternativesConsidered": [
+        "S3 → Lambda direct trigger",
+        "EventBridge Pipes"
+      ],
+      "rationale": "Reliability: SQS decouples burst uploads from worker drain rate, gives at-least-once with DLQ, and prevents Lambda concurrency spikes from dropping events — a direct S3→Lambda trigger has no buffer and throttled invocations are lost."
+    },
+    {
+      "decision": "Target datastore",
+      "chosen": "DynamoDB on-demand",
+      "alternativesConsidered": [
+        "Aurora Serverless v2 (Postgres)",
+        "S3 data lake + Athena",
+        "Redshift Serverless"
+      ],
+      "rationale": "Cost Optimization + Reliability: DynamoDB on-demand absorbs write spikes from workers without provisioned capacity and has no always-on floor; Aurora Serverless v2 is the right swap if a relational schema or SQL analytics is required — call out in balanced delta."
+    },
+    {
+      "decision": "File chunking strategy",
+      "chosen": "Splitter Lambda reads S3 object, emits per-chunk SQS messages",
+      "alternativesConsidered": [
+        "Single Lambda per file (hits 15-min/10 GB limit)",
+        "S3 Select for filtering before transform"
+      ],
+      "rationale": "Reliability + Performance Efficiency: chunking prevents timeouts on large files, allows parallel workers per file, and makes each unit of work independently retryable via DLQ."
+    },
+    {
+      "decision": "Idempotent load into DynamoDB",
+      "chosen": "Conditional write on composite key (file ETag + chunk index)",
+      "alternativesConsidered": [
+        "Optimistic locking with version counter",
+        "Dedup table in RDS"
+      ],
+      "rationale": "Reliability: a conditional PutItem is atomic and cheap — it turns at-least-once SQS delivery into exactly-once record processing without a separate dedup store."
+    }
+  ],
+  "securityFloor": [
+    "Encrypt all data at rest (KMS / service-native SSE), preferring customer-managed keys.",
+    "Enforce TLS in transit everywhere; terminate HTTPS at the edge and reject plaintext.",
+    "Least-privilege IAM: scoped per-service roles, no wildcards, no long-lived access keys.",
+    "Enable S3 Block Public Access account-wide so no bucket or object can be made public.",
+    "Keep the data tier private: VPC-bound stores in private subnets with no public route; managed/serverless stores (DynamoDB/S3) are already private via IAM and need no VPC or NAT.",
+    "Store secrets in AWS Secrets Manager / SSM Parameter Store — never in code or images.",
+    "Front public endpoints with CloudFront + AWS WAF (managed + rate-based rules); Shield Standard for L3/L4.",
+    "Enable CloudTrail plus S3/CloudFront/ALB access logs and VPC Flow Logs for audit."
+  ],
+  "recommendedTier": "balanced",
+  "recommendationRationale": ""
+}

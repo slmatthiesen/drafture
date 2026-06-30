@@ -1,0 +1,1112 @@
+{
+  "assumptions": [
+    "Traffic assumed ~<50k MAU (sensible scalable default — not stated)",
+    "WebSocket connections are persistent; Lambda cold-start latency makes it unsuitable as the primary connection handler",
+    "Chat messages are stored persistently (not ephemeral); DynamoDB is the primary message/session store",
+    "Presence and recent-message caching via ElastiCache Redis",
+    "Single AWS region unless stated otherwise",
+    "No compliance regime specified — standard security floor applied",
+    "Pub/sub fan-out for message delivery uses Redis Pub/Sub on the same ElastiCache cluster, upgraded to ElastiCache + SQS fan-out at resilient tier",
+    "Budget tier uses a single EC2 box running Docker Compose (WebSocket server + self-managed Redis) — serverless-no-VPC does not fit persistent WebSocket connections at budget scale",
+    "Alerting delivered to email at budget, Slack at balanced, PagerDuty at resilient",
+    "Cost estimates are on-demand list prices for us-east-1, presented as ranges over assumed monthly volumes. They exclude the AWS Free Tier, Savings Plans, Reserved Instances, and negotiated discounts.",
+    "Assumed traffic ~100k–1M requests/month, applied equally to all three tiers (tiers differ by robustness, not traffic). Set \"expected monthly visitors\" in intake to change it."
+  ],
+  "clarificationsUsed": [],
+  "tiers": [
+    {
+      "name": "budget",
+      "summary": "Single EC2 (t4g.small) in a public subnet running Docker Compose: Node.js/Go WebSocket server + self-managed Redis on localhost. DynamoDB on-demand for persistent messages and sessions. CloudFront + WAF at the edge. No ALB, no NAT gateway, no separate managed cache.",
+      "nodes": [
+        {
+          "id": "client",
+          "awsService": "Client (browser/mobile)",
+          "role": "WebSocket client",
+          "security": [
+            "TLS required"
+          ]
+        },
+        {
+          "id": "cloudfront",
+          "awsService": "CloudFront",
+          "role": "edge TLS termination / WAF",
+          "security": [
+            "WAF managed rules",
+            "rate-based rule",
+            "HTTPS-only",
+            "access logging",
+            "Shield Standard"
+          ]
+        },
+        {
+          "id": "ec2",
+          "awsService": "EC2 (t4g.small)",
+          "role": "WebSocket server + Redis",
+          "security": [
+            "restrictive SG (443/80 inbound only)",
+            "public subnet",
+            "IMDSv2",
+            "least-priv role",
+            "KMS EBS encryption",
+            "SSM Session Manager (no SSH)"
+          ]
+        },
+        {
+          "id": "dynamo",
+          "awsService": "DynamoDB",
+          "role": "message + session store",
+          "security": [
+            "SSE KMS CMK",
+            "least-priv role",
+            "on-demand capacity",
+            "VPC endpoint"
+          ]
+        },
+        {
+          "id": "s3_assets",
+          "awsService": "S3",
+          "role": "static assets / media uploads",
+          "security": [
+            "SSE-KMS",
+            "block public access",
+            "bucket policy SecureTransport",
+            "least-priv role"
+          ]
+        },
+        {
+          "id": "cw_logs",
+          "awsService": "CloudWatch Logs",
+          "role": "structured log sink",
+          "security": [
+            "retention 30d",
+            "KMS encrypted"
+          ]
+        },
+        {
+          "id": "cw_alarm",
+          "awsService": "CloudWatch Alarms",
+          "role": "golden-signal alarms",
+          "security": [
+            "least-priv role"
+          ]
+        },
+        {
+          "id": "sns_alert",
+          "awsService": "SNS",
+          "role": "ops alert topic (email)",
+          "security": [
+            "TLS",
+            "least-priv role"
+          ]
+        },
+        {
+          "id": "cloudtrail",
+          "awsService": "CloudTrail",
+          "role": "audit trail",
+          "security": [
+            "multi-region trail",
+            "S3 access logging",
+            "KMS encrypted"
+          ]
+        },
+        {
+          "id": "secrets",
+          "awsService": "AWS Secrets Manager",
+          "role": "credentials store",
+          "security": [
+            "KMS CMK",
+            "least-priv role",
+            "rotation enabled"
+          ]
+        }
+      ],
+      "edges": [
+        {
+          "from": "client",
+          "to": "cloudfront",
+          "payload": "WebSocket upgrade + chat frames (WSS)",
+          "protocol": "WSS/HTTPS"
+        },
+        {
+          "from": "cloudfront",
+          "to": "ec2",
+          "payload": "proxied WebSocket frames",
+          "protocol": "WSS (TCP 443)"
+        },
+        {
+          "from": "ec2",
+          "to": "dynamo",
+          "payload": "chat message PutItem / Query",
+          "protocol": "HTTPS (AWS SDK)"
+        },
+        {
+          "from": "ec2",
+          "to": "s3_assets",
+          "payload": "pre-signed URL generation / media PUT",
+          "protocol": "HTTPS"
+        },
+        {
+          "from": "ec2",
+          "to": "cw_logs",
+          "payload": "structured JSON logs",
+          "protocol": "HTTPS (CloudWatch agent)"
+        },
+        {
+          "from": "ec2",
+          "to": "secrets",
+          "payload": "fetch app credentials at startup",
+          "protocol": "HTTPS (AWS SDK)"
+        },
+        {
+          "from": "cw_logs",
+          "to": "cw_alarm",
+          "payload": "metric filters (error rate, latency)",
+          "protocol": "CloudWatch internal"
+        },
+        {
+          "from": "cw_alarm",
+          "to": "sns_alert",
+          "payload": "alarm state change notification",
+          "protocol": "HTTPS"
+        },
+        {
+          "from": "sns_alert",
+          "to": "client",
+          "payload": "email alert to on-call",
+          "protocol": "SMTP/email"
+        }
+      ],
+      "delta": [
+        "Single EC2 (t4g.small) public subnet — no ALB, no NAT, no separate managed cache (~$0 egress overhead)",
+        "Self-managed Redis on localhost for pub/sub fan-out and presence (no ElastiCache cost)",
+        "DynamoDB on-demand absorbs write bursts without provisioning",
+        "CloudFront + WAF at edge — WebSocket proxy via CloudFront (WSS passthrough)",
+        "CloudWatch Logs + key alarms + SNS email alert; self-managed backup via nightly pg_dump-style DynamoDB export to S3",
+        "Single AZ — no HA; instance failure requires manual or auto-recovery"
+      ],
+      "tradeoffs": [
+        "Single point of failure: instance crash = full outage until EC2 auto-recovery (~1–3 min)",
+        "Self-managed Redis: no replication, no persistence (presence/pub-sub state lost on restart)",
+        "No horizontal scale — all connections on one box; vertical resize requires restart",
+        "CloudFront WebSocket proxying adds one hop but avoids NLB cost at this scale"
+      ],
+      "costDrivers": [
+        {
+          "service": "CloudFront",
+          "unit": "$/GB transferred",
+          "estimateRange": "$0.043–$0.425/mo",
+          "note": "Data transfer out to internet, first 10TB/month tier (North America). First 1TB/month is free."
+        },
+        {
+          "service": "CloudFront",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.075–$0.750/mo",
+          "note": "HTTPS requests ($0.0075 per 10,000). North America/Europe."
+        },
+        {
+          "service": "EC2",
+          "unit": "$/hr",
+          "estimateRange": "$12.26–$24.53/mo",
+          "note": "Assumed-throughput estimate: t4g.small on-demand (us-east-1). Cost = instance count × running hours; storage/IO billed separately, multi-AZ via the tier multiplier.",
+          "instanceType": "t4g.small"
+        },
+        {
+          "service": "DynamoDB",
+          "unit": "per 1k read units",
+          "estimateRange": "$0.013–$0.125/mo",
+          "note": "On-demand read request units ($0.125 per 1M RRU). 1 RRU = 1 strongly-consistent read up to 4KB."
+        },
+        {
+          "service": "DynamoDB",
+          "unit": "per 1k write units",
+          "estimateRange": "$0.063–$0.625/mo",
+          "note": "On-demand write request units ($0.625 per 1M WRU). 1 WRU = 1 write up to 1KB."
+        },
+        {
+          "service": "S3",
+          "unit": "$/GB-month",
+          "estimateRange": "$0.230–$2.30/mo",
+          "note": "S3 Standard storage, first 50TB/month tier."
+        },
+        {
+          "service": "S3",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.500–$5.00/mo",
+          "note": "PUT/COPY/POST/LIST requests per 1,000. GET/SELECT requests are ~$0.0004 per 1,000."
+        },
+        {
+          "service": "CloudWatch Logs",
+          "unit": "$/GB ingested",
+          "estimateRange": "$0.010–$0.100/mo",
+          "note": "CloudWatch Logs ingestion $0.50/GB (first 10GB/mo free in some accounts). Archival storage is cheaper; Insights queries extra."
+        },
+        {
+          "service": "SNS",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.050–$0.500/mo",
+          "note": "Standard topic API requests ($0.50 per 1M). Delivery (HTTP/SMS/email) priced separately."
+        }
+      ]
+    },
+    {
+      "name": "balanced",
+      "summary": "Multi-AZ Fargate service behind an NLB. Managed ElastiCache Redis cluster for pub/sub fan-out and presence. DynamoDB unchanged. Private subnets for Fargate tasks and ElastiCache. NAT Gateway for outbound. CloudWatch dashboards + X-Ray tracing.",
+      "nodes": [
+        {
+          "id": "client",
+          "awsService": "Client (browser/mobile)",
+          "role": "WebSocket client",
+          "security": [
+            "TLS required"
+          ]
+        },
+        {
+          "id": "cloudfront",
+          "awsService": "CloudFront",
+          "role": "edge TLS termination / WAF",
+          "security": [
+            "WAF managed rules",
+            "rate-based rule",
+            "HTTPS-only",
+            "access logging",
+            "Shield Standard"
+          ]
+        },
+        {
+          "id": "dynamo",
+          "awsService": "DynamoDB",
+          "role": "message + session store",
+          "security": [
+            "SSE KMS CMK",
+            "least-priv role",
+            "on-demand capacity",
+            "VPC endpoint"
+          ]
+        },
+        {
+          "id": "s3_assets",
+          "awsService": "S3",
+          "role": "static assets / media uploads",
+          "security": [
+            "SSE-KMS",
+            "block public access",
+            "bucket policy SecureTransport",
+            "least-priv role"
+          ]
+        },
+        {
+          "id": "cw_logs",
+          "awsService": "CloudWatch Logs",
+          "role": "structured log sink",
+          "security": [
+            "retention 30d",
+            "KMS encrypted"
+          ]
+        },
+        {
+          "id": "cw_alarm",
+          "awsService": "CloudWatch Alarms",
+          "role": "golden-signal alarms",
+          "security": [
+            "least-priv role"
+          ]
+        },
+        {
+          "id": "sns_alert",
+          "awsService": "SNS",
+          "role": "ops alert topic (email + Slack)",
+          "security": [
+            "TLS",
+            "least-priv role"
+          ]
+        },
+        {
+          "id": "cloudtrail",
+          "awsService": "CloudTrail",
+          "role": "audit trail",
+          "security": [
+            "multi-region trail",
+            "S3 access logging",
+            "KMS encrypted"
+          ]
+        },
+        {
+          "id": "secrets",
+          "awsService": "AWS Secrets Manager",
+          "role": "credentials store",
+          "security": [
+            "KMS CMK",
+            "least-priv role",
+            "rotation enabled"
+          ]
+        },
+        {
+          "id": "nlb",
+          "awsService": "Network Load Balancer",
+          "role": "TCP/TLS WebSocket front door",
+          "security": [
+            "TLS termination",
+            "cross-zone load balancing",
+            "access logging"
+          ]
+        },
+        {
+          "id": "fargate",
+          "awsService": "ECS Fargate",
+          "role": "WebSocket server tasks (multi-AZ)",
+          "security": [
+            "private subnet",
+            "least-priv task role",
+            "no public IP",
+            "Secrets Manager injection",
+            "KMS encrypted ephemeral storage"
+          ]
+        },
+        {
+          "id": "elasticache",
+          "awsService": "ElastiCache (Redis 7, cache.t4g.small)",
+          "role": "pub/sub fan-out + presence cache",
+          "security": [
+            "private subnet",
+            "in-transit TLS",
+            "at-rest encryption",
+            "auth token via Secrets Manager",
+            "multi-AZ replica"
+          ]
+        },
+        {
+          "id": "nat_gw",
+          "awsService": "NAT Gateway",
+          "role": "private-subnet outbound egress",
+          "security": [
+            "single AZ (balanced)",
+            "VPC flow logs"
+          ]
+        },
+        {
+          "id": "xray",
+          "awsService": "AWS X-Ray",
+          "role": "distributed tracing",
+          "security": [
+            "least-priv role"
+          ]
+        },
+        {
+          "id": "cw_dashboard",
+          "awsService": "CloudWatch Dashboards",
+          "role": "golden-signal dashboard",
+          "security": [
+            "least-priv role"
+          ]
+        }
+      ],
+      "edges": [
+        {
+          "from": "client",
+          "to": "cloudfront",
+          "payload": "WebSocket upgrade + chat frames (WSS)",
+          "protocol": "WSS/HTTPS"
+        },
+        {
+          "from": "cw_logs",
+          "to": "cw_alarm",
+          "payload": "metric filters (error rate, latency)",
+          "protocol": "CloudWatch internal"
+        },
+        {
+          "from": "cw_alarm",
+          "to": "sns_alert",
+          "payload": "alarm state change notification",
+          "protocol": "HTTPS"
+        },
+        {
+          "from": "sns_alert",
+          "to": "client",
+          "payload": "email alert to on-call",
+          "protocol": "SMTP/email"
+        },
+        {
+          "from": "cloudfront",
+          "to": "nlb",
+          "payload": "proxied WebSocket frames (TCP passthrough)",
+          "protocol": "TCP/TLS"
+        },
+        {
+          "from": "nlb",
+          "to": "fargate",
+          "payload": "WebSocket frames (persistent connection)",
+          "protocol": "TCP 443"
+        },
+        {
+          "from": "fargate",
+          "to": "elasticache",
+          "payload": "PUBLISH/SUBSCRIBE + presence GET/SET",
+          "protocol": "Redis protocol (TLS)"
+        },
+        {
+          "from": "fargate",
+          "to": "dynamo",
+          "payload": "chat message PutItem / Query",
+          "protocol": "HTTPS (AWS SDK)"
+        },
+        {
+          "from": "fargate",
+          "to": "s3_assets",
+          "payload": "pre-signed URL generation / media PUT",
+          "protocol": "HTTPS"
+        },
+        {
+          "from": "fargate",
+          "to": "nat_gw",
+          "payload": "outbound AWS API calls (private subnet egress)",
+          "protocol": "HTTPS"
+        },
+        {
+          "from": "fargate",
+          "to": "cw_logs",
+          "payload": "structured JSON logs + X-Ray segments",
+          "protocol": "HTTPS"
+        },
+        {
+          "from": "fargate",
+          "to": "xray",
+          "payload": "trace segments",
+          "protocol": "HTTPS (X-Ray SDK)"
+        },
+        {
+          "from": "fargate",
+          "to": "secrets",
+          "payload": "fetch credentials at task start",
+          "protocol": "HTTPS (AWS SDK)"
+        },
+        {
+          "from": "cw_logs",
+          "to": "cw_dashboard",
+          "payload": "metrics and log insights",
+          "protocol": "CloudWatch internal"
+        }
+      ],
+      "delta": [
+        "Single EC2 → Fargate multi-AZ tasks in private subnets (ECS service auto-scaling on CPU + connection count)",
+        "Self-managed Redis → ElastiCache Redis multi-AZ replica cluster (managed failover ~60s)",
+        "Direct EC2 public IP → NLB (TCP passthrough, sticky target groups for persistent connections)",
+        "Added NAT Gateway for private-subnet outbound egress (~$33/mo always-on cost)",
+        "Added X-Ray tracing across Fargate ↔ DynamoDB ↔ ElastiCache boundaries",
+        "SNS alert upgraded to email + Slack webhook on critical alarms",
+        "ECS task auto-scaling absorbs burst; ElastiCache absorbs hot read/pub-sub bursts"
+      ],
+      "tradeoffs": [
+        "NAT Gateway is an always-on cost even at zero traffic",
+        "Single NAT GW = AZ failure risk for outbound; resilient tier adds per-AZ NAT",
+        "ElastiCache failover ~60s — brief pub/sub disruption on primary failure",
+        "NLB adds per-LCU cost vs direct EC2 IP at budget"
+      ],
+      "costDrivers": [
+        {
+          "service": "CloudFront",
+          "unit": "$/GB transferred",
+          "estimateRange": "$0.043–$0.425/mo",
+          "note": "Data transfer out to internet, first 10TB/month tier (North America). First 1TB/month is free."
+        },
+        {
+          "service": "CloudFront",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.075–$0.750/mo",
+          "note": "HTTPS requests ($0.0075 per 10,000). North America/Europe."
+        },
+        {
+          "service": "DynamoDB",
+          "unit": "per 1k read units",
+          "estimateRange": "$0.013–$0.125/mo",
+          "note": "On-demand read request units ($0.125 per 1M RRU). 1 RRU = 1 strongly-consistent read up to 4KB."
+        },
+        {
+          "service": "DynamoDB",
+          "unit": "per 1k write units",
+          "estimateRange": "$0.063–$0.625/mo",
+          "note": "On-demand write request units ($0.625 per 1M WRU). 1 WRU = 1 write up to 1KB."
+        },
+        {
+          "service": "S3",
+          "unit": "$/GB-month",
+          "estimateRange": "$0.230–$2.30/mo",
+          "note": "S3 Standard storage, first 50TB/month tier."
+        },
+        {
+          "service": "S3",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.500–$5.00/mo",
+          "note": "PUT/COPY/POST/LIST requests per 1,000. GET/SELECT requests are ~$0.0004 per 1,000."
+        },
+        {
+          "service": "CloudWatch Logs",
+          "unit": "$/GB ingested",
+          "estimateRange": "$0.010–$0.100/mo",
+          "note": "CloudWatch Logs ingestion $0.50/GB (first 10GB/mo free in some accounts). Archival storage is cheaper; Insights queries extra."
+        },
+        {
+          "service": "SNS",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.050–$0.500/mo",
+          "note": "Standard topic API requests ($0.50 per 1M). Delivery (HTTP/SMS/email) priced separately."
+        },
+        {
+          "service": "Fargate",
+          "unit": "$/GB-hr",
+          "estimateRange": "$12.98–$25.96/mo",
+          "note": "Assumed-throughput estimate: per GB memory-hour (Linux/x86). Total = memoryGB x hours."
+        },
+        {
+          "service": "Fargate",
+          "unit": "$/vCPU-hr",
+          "estimateRange": "$59.10–$118.20/mo",
+          "note": "Assumed-throughput estimate: per vCPU-hour (Linux/x86). Total = vCPU x hours."
+        },
+        {
+          "service": "ElastiCache",
+          "unit": "$/hr",
+          "estimateRange": "$46.72–$93.44/mo",
+          "note": "Assumed-throughput estimate: cache.t4g.small on-demand (us-east-1). Cost = instance count × running hours; storage/IO billed separately, multi-AZ via the tier multiplier.",
+          "instanceType": "cache.t4g.small"
+        },
+        {
+          "service": "NAT Gateway",
+          "unit": "$/GB processed",
+          "estimateRange": "$0.022–$0.225/mo",
+          "note": "Per GB processed. Forced by the private-subnet data-tier default (security baseline no-public-data-tier); the most common budget surprise."
+        },
+        {
+          "service": "NAT Gateway",
+          "unit": "$/hr",
+          "estimateRange": "$65.70–$131.40/mo",
+          "note": "Per NAT gateway-hour (always-on, ~$32.40/month per AZ before data processing)."
+        },
+        {
+          "service": "X-Ray",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.500–$5.00/mo",
+          "note": "X-Ray traces: $5.00 per 1M traces recorded (first 100k/mo free)."
+        },
+        {
+          "service": "Data Transfer",
+          "unit": "$/GB cross-AZ",
+          "estimateRange": "$0.0050–$0.050/mo",
+          "note": "Required by the private-subnet security default (no public data tier) — the most common budget surprise. Inter-AZ data transfer, charged $0.01/GB in each direction."
+        },
+        {
+          "service": "Data Transfer",
+          "unit": "$/GB internet egress",
+          "estimateRange": "$0.045–$0.450/mo",
+          "note": "Required by the private-subnet security default (no public data tier) — the most common budget surprise. Data transfer out to internet, first 10TB/month tier. First 100GB/month is free."
+        }
+      ]
+    },
+    {
+      "name": "resilient",
+      "summary": "Multi-AZ Fargate with per-AZ NAT Gateways. ElastiCache Redis Global Datastore for cross-region pub/sub durability. DynamoDB Global Tables for active-active message replication. SQS per-room message fan-out queue with DLQ. Route 53 health-checked failover. CloudWatch anomaly detection + PagerDuty escalation.",
+      "nodes": [
+        {
+          "id": "client",
+          "awsService": "Client (browser/mobile)",
+          "role": "WebSocket client",
+          "security": [
+            "TLS required"
+          ]
+        },
+        {
+          "id": "cloudfront",
+          "awsService": "CloudFront",
+          "role": "edge TLS termination / WAF",
+          "security": [
+            "WAF managed rules",
+            "rate-based rule",
+            "HTTPS-only",
+            "access logging",
+            "Shield Standard"
+          ]
+        },
+        {
+          "id": "dynamo",
+          "awsService": "DynamoDB Global Tables",
+          "role": "message + session store (active-active)",
+          "security": [
+            "SSE KMS CMK",
+            "least-priv role",
+            "on-demand capacity",
+            "VPC endpoint",
+            "PITR enabled"
+          ]
+        },
+        {
+          "id": "s3_assets",
+          "awsService": "S3",
+          "role": "static assets / media uploads",
+          "security": [
+            "SSE-KMS",
+            "block public access",
+            "bucket policy SecureTransport",
+            "least-priv role"
+          ]
+        },
+        {
+          "id": "cw_logs",
+          "awsService": "CloudWatch Logs",
+          "role": "structured log sink",
+          "security": [
+            "retention 30d",
+            "KMS encrypted"
+          ]
+        },
+        {
+          "id": "cw_alarm",
+          "awsService": "CloudWatch Alarms",
+          "role": "anomaly detection + SLO alarms",
+          "security": [
+            "least-priv role"
+          ]
+        },
+        {
+          "id": "sns_alert",
+          "awsService": "SNS",
+          "role": "ops alert topic (PagerDuty escalation)",
+          "security": [
+            "TLS",
+            "least-priv role"
+          ]
+        },
+        {
+          "id": "cloudtrail",
+          "awsService": "CloudTrail",
+          "role": "audit trail",
+          "security": [
+            "multi-region trail",
+            "S3 access logging",
+            "KMS encrypted"
+          ]
+        },
+        {
+          "id": "secrets",
+          "awsService": "AWS Secrets Manager",
+          "role": "credentials store",
+          "security": [
+            "KMS CMK",
+            "least-priv role",
+            "rotation enabled"
+          ]
+        },
+        {
+          "id": "nlb",
+          "awsService": "Network Load Balancer",
+          "role": "TCP/TLS WebSocket front door",
+          "security": [
+            "TLS termination",
+            "cross-zone load balancing",
+            "access logging"
+          ]
+        },
+        {
+          "id": "fargate",
+          "awsService": "ECS Fargate",
+          "role": "WebSocket tasks (multi-AZ, min warm count)",
+          "security": [
+            "private subnet",
+            "least-priv task role",
+            "no public IP",
+            "Secrets Manager injection",
+            "KMS encrypted ephemeral storage",
+            "idempotent message handler"
+          ]
+        },
+        {
+          "id": "elasticache",
+          "awsService": "ElastiCache (Redis 7, cache.m7g.large)",
+          "role": "pub/sub + presence (Global Datastore)",
+          "security": [
+            "private subnet",
+            "in-transit TLS",
+            "at-rest encryption",
+            "auth token via Secrets Manager",
+            "multi-AZ + cross-region replication"
+          ]
+        },
+        {
+          "id": "nat_gw",
+          "awsService": "NAT Gateway",
+          "role": "per-AZ private-subnet egress",
+          "security": [
+            "one per AZ",
+            "VPC flow logs"
+          ]
+        },
+        {
+          "id": "xray",
+          "awsService": "AWS X-Ray",
+          "role": "distributed tracing",
+          "security": [
+            "least-priv role"
+          ]
+        },
+        {
+          "id": "cw_dashboard",
+          "awsService": "CloudWatch Dashboards",
+          "role": "golden-signal dashboard",
+          "security": [
+            "least-priv role"
+          ]
+        },
+        {
+          "id": "r53",
+          "awsService": "Route 53",
+          "role": "health-checked DNS failover",
+          "security": [
+            "health checks on NLB",
+            "least-priv role"
+          ]
+        },
+        {
+          "id": "sqs_fanout",
+          "awsService": "SQS (FIFO)",
+          "role": "per-room message fan-out queue",
+          "security": [
+            "SSE-KMS",
+            "DLQ",
+            "least-priv role",
+            "idempotent consumer"
+          ]
+        },
+        {
+          "id": "dlq",
+          "awsService": "SQS",
+          "role": "dead-letter queue for fan-out",
+          "security": [
+            "SSE-KMS",
+            "CloudWatch alarm on depth"
+          ]
+        },
+        {
+          "id": "eventbridge",
+          "awsService": "EventBridge",
+          "role": "cross-service event bus",
+          "security": [
+            "least-priv role",
+            "TLS"
+          ]
+        }
+      ],
+      "edges": [
+        {
+          "from": "client",
+          "to": "cloudfront",
+          "payload": "WebSocket upgrade + chat frames (WSS)",
+          "protocol": "WSS/HTTPS"
+        },
+        {
+          "from": "cw_logs",
+          "to": "cw_alarm",
+          "payload": "metric filters (error rate, latency)",
+          "protocol": "CloudWatch internal"
+        },
+        {
+          "from": "cw_alarm",
+          "to": "sns_alert",
+          "payload": "anomaly / SLO breach alert",
+          "protocol": "HTTPS"
+        },
+        {
+          "from": "sns_alert",
+          "to": "client",
+          "payload": "PagerDuty escalation",
+          "protocol": "HTTPS webhook"
+        },
+        {
+          "from": "cloudfront",
+          "to": "nlb",
+          "payload": "proxied WebSocket frames (TCP passthrough)",
+          "protocol": "TCP/TLS"
+        },
+        {
+          "from": "nlb",
+          "to": "fargate",
+          "payload": "WebSocket frames (persistent connection)",
+          "protocol": "TCP 443"
+        },
+        {
+          "from": "fargate",
+          "to": "elasticache",
+          "payload": "PUBLISH/SUBSCRIBE + presence GET/SET",
+          "protocol": "Redis protocol (TLS)"
+        },
+        {
+          "from": "fargate",
+          "to": "dynamo",
+          "payload": "chat message PutItem / Query",
+          "protocol": "HTTPS (AWS SDK)"
+        },
+        {
+          "from": "fargate",
+          "to": "s3_assets",
+          "payload": "pre-signed URL generation / media PUT",
+          "protocol": "HTTPS"
+        },
+        {
+          "from": "fargate",
+          "to": "nat_gw",
+          "payload": "outbound AWS API calls (private subnet egress)",
+          "protocol": "HTTPS"
+        },
+        {
+          "from": "fargate",
+          "to": "cw_logs",
+          "payload": "structured JSON logs + X-Ray segments",
+          "protocol": "HTTPS"
+        },
+        {
+          "from": "fargate",
+          "to": "xray",
+          "payload": "trace segments",
+          "protocol": "HTTPS (X-Ray SDK)"
+        },
+        {
+          "from": "fargate",
+          "to": "secrets",
+          "payload": "fetch credentials at task start",
+          "protocol": "HTTPS (AWS SDK)"
+        },
+        {
+          "from": "cw_logs",
+          "to": "cw_dashboard",
+          "payload": "metrics and log insights",
+          "protocol": "CloudWatch internal"
+        },
+        {
+          "from": "r53",
+          "to": "cloudfront",
+          "payload": "DNS A record with health-check failover",
+          "protocol": "DNS"
+        },
+        {
+          "from": "fargate",
+          "to": "sqs_fanout",
+          "payload": "outbound chat message envelope (JSON)",
+          "protocol": "HTTPS (SQS SDK)"
+        },
+        {
+          "from": "sqs_fanout",
+          "to": "fargate",
+          "payload": "fan-out message delivery to subscriber tasks",
+          "protocol": "HTTPS (SQS long-poll)"
+        },
+        {
+          "from": "sqs_fanout",
+          "to": "dlq",
+          "payload": "failed message after max receives",
+          "protocol": "SQS internal"
+        },
+        {
+          "from": "fargate",
+          "to": "eventbridge",
+          "payload": "room/presence lifecycle events",
+          "protocol": "HTTPS (EventBridge SDK)"
+        }
+      ],
+      "delta": [
+        "Single NAT GW → one NAT Gateway per AZ (eliminates cross-AZ egress failure blast radius)",
+        "ElastiCache single-region → Global Datastore (cross-region pub/sub replication)",
+        "DynamoDB on-demand → Global Tables (active-active multi-region message replication + PITR)",
+        "Added Route 53 health-checked DNS failover across regions",
+        "Added SQS FIFO fan-out queue per room with DLQ + idempotent consumer (guaranteed delivery over pure Redis Pub/Sub)",
+        "Added EventBridge bus for room/presence lifecycle events enabling future fan-out consumers",
+        "Fargate min warm task count set to absorb sub-minute spikes auto-scaling cannot catch",
+        "CloudWatch upgraded to anomaly detection + SLO burn-rate alarms; SNS → PagerDuty escalation"
+      ],
+      "tradeoffs": [
+        "Per-AZ NAT Gateways increase fixed egress cost proportionally to AZ count",
+        "Global Tables + Global Datastore add significant replication cost vs single-region",
+        "SQS FIFO fan-out introduces ~ms delivery latency vs pure in-process Redis Pub/Sub",
+        "Most complex operational surface — justified only at mission-critical / multi-region DR requirement"
+      ],
+      "costDrivers": [
+        {
+          "service": "CloudFront",
+          "unit": "$/GB transferred",
+          "estimateRange": "$0.043–$0.425/mo",
+          "note": "Data transfer out to internet, first 10TB/month tier (North America). First 1TB/month is free."
+        },
+        {
+          "service": "CloudFront",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.075–$0.750/mo",
+          "note": "HTTPS requests ($0.0075 per 10,000). North America/Europe."
+        },
+        {
+          "service": "DynamoDB",
+          "unit": "per 1k read units",
+          "estimateRange": "$0.013–$0.125/mo",
+          "note": "On-demand read request units ($0.125 per 1M RRU). 1 RRU = 1 strongly-consistent read up to 4KB."
+        },
+        {
+          "service": "DynamoDB",
+          "unit": "per 1k write units",
+          "estimateRange": "$0.063–$0.625/mo",
+          "note": "On-demand write request units ($0.625 per 1M WRU). 1 WRU = 1 write up to 1KB."
+        },
+        {
+          "service": "S3",
+          "unit": "$/GB-month",
+          "estimateRange": "$0.230–$2.30/mo",
+          "note": "S3 Standard storage, first 50TB/month tier."
+        },
+        {
+          "service": "S3",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.500–$5.00/mo",
+          "note": "PUT/COPY/POST/LIST requests per 1,000. GET/SELECT requests are ~$0.0004 per 1,000."
+        },
+        {
+          "service": "CloudWatch Logs",
+          "unit": "$/GB ingested",
+          "estimateRange": "$0.010–$0.100/mo",
+          "note": "CloudWatch Logs ingestion $0.50/GB (first 10GB/mo free in some accounts). Archival storage is cheaper; Insights queries extra."
+        },
+        {
+          "service": "SNS",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.050–$0.500/mo",
+          "note": "Standard topic API requests ($0.50 per 1M). Delivery (HTTP/SMS/email) priced separately."
+        },
+        {
+          "service": "Fargate",
+          "unit": "$/GB-hr",
+          "estimateRange": "$19.47–$38.94/mo",
+          "note": "Assumed-throughput estimate: per GB memory-hour (Linux/x86). Total = memoryGB x hours."
+        },
+        {
+          "service": "Fargate",
+          "unit": "$/vCPU-hr",
+          "estimateRange": "$88.65–$177.30/mo",
+          "note": "Assumed-throughput estimate: per vCPU-hour (Linux/x86). Total = vCPU x hours."
+        },
+        {
+          "service": "ElastiCache",
+          "unit": "$/hr",
+          "estimateRange": "$448.95–$897.90/mo",
+          "note": "Assumed-throughput estimate: cache.r6g.large on-demand (us-east-1). Cost = instance count × running hours; storage/IO billed separately, multi-AZ via the tier multiplier.",
+          "instanceType": "cache.r6g.large"
+        },
+        {
+          "service": "NAT Gateway",
+          "unit": "$/GB processed",
+          "estimateRange": "$0.022–$0.225/mo",
+          "note": "Per GB processed. Forced by the private-subnet data-tier default (security baseline no-public-data-tier); the most common budget surprise."
+        },
+        {
+          "service": "NAT Gateway",
+          "unit": "$/hr",
+          "estimateRange": "$98.55–$197.10/mo",
+          "note": "Per NAT gateway-hour (always-on, ~$32.40/month per AZ before data processing)."
+        },
+        {
+          "service": "X-Ray",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.500–$5.00/mo",
+          "note": "X-Ray traces: $5.00 per 1M traces recorded (first 100k/mo free)."
+        },
+        {
+          "service": "SQS",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.040–$0.400/mo",
+          "note": "Standard queue requests ($0.40 per 1M). First 1M/month free. FIFO is $0.50 per 1M."
+        },
+        {
+          "service": "EventBridge",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.100–$1.00/mo",
+          "note": "Custom event-bus events: $1.00 per 1M events published. Pipes/schema registry priced separately."
+        },
+        {
+          "service": "Data Transfer",
+          "unit": "$/GB cross-AZ",
+          "estimateRange": "$0.0050–$0.050/mo",
+          "note": "Required by the private-subnet security default (no public data tier) — the most common budget surprise. Inter-AZ data transfer, charged $0.01/GB in each direction."
+        },
+        {
+          "service": "Data Transfer",
+          "unit": "$/GB internet egress",
+          "estimateRange": "$0.045–$0.450/mo",
+          "note": "Required by the private-subnet security default (no public data tier) — the most common budget surprise. Data transfer out to internet, first 10TB/month tier. First 100GB/month is free."
+        }
+      ]
+    }
+  ],
+  "keyDecisions": [
+    {
+      "decision": "Compute model for WebSocket connection tier",
+      "chosen": "Always-on container (Fargate at balanced/resilient; single EC2 at budget)",
+      "alternativesConsidered": [
+        "Lambda WebSocket via API Gateway WebSocket API",
+        "EKS (Kubernetes)"
+      ],
+      "rationale": "Persistent TCP connections require always-on, long-lived processes; Lambda's execution model and cold-start latency break real-time chat semantics (Performance Efficiency + Reliability)."
+    },
+    {
+      "decision": "Budget tier shape — single box vs managed stack",
+      "chosen": "Single EC2 (t4g.small) running Docker Compose: WebSocket server + self-managed Redis bound to localhost",
+      "alternativesConsidered": [
+        "Fargate + ElastiCache + RDS + NAT (balanced shape)",
+        "Lambda + API Gateway WebSocket API + DynamoDB"
+      ],
+      "rationale": "At budget scale a single public-subnet EC2 eliminates the ~$100+/mo always-on NAT + ALB + Fargate + ElastiCache floor while preserving the correct persistent-connection topology (Cost Optimization)."
+    },
+    {
+      "decision": "Message fan-out mechanism",
+      "chosen": "Redis Pub/Sub (budget/balanced) → SQS per-room queue fan-out (resilient)",
+      "alternativesConsidered": [
+        "SNS topic per room",
+        "EventBridge bus",
+        "Kafka/MSK"
+      ],
+      "rationale": "Redis Pub/Sub is already in the stack and gives sub-ms in-process fan-out; SQS fan-out added only at resilient tier where multi-region durability and DLQ guarantees matter (Reliability + Cost Optimization)."
+    },
+    {
+      "decision": "Persistent message store",
+      "chosen": "DynamoDB on-demand (chat messages + sessions)",
+      "alternativesConsidered": [
+        "RDS Postgres",
+        "Aurora Serverless v2",
+        "MongoDB Atlas"
+      ],
+      "rationale": "DynamoDB on-demand absorbs bursty write spikes without provisioning, scales horizontally, and needs no VPC, keeping the data tier simple and eliminating NAT at budget (Performance Efficiency + Cost Optimization)."
+    },
+    {
+      "decision": "WebSocket edge termination",
+      "chosen": "NLB (Network Load Balancer) at balanced/resilient — NOT ALB",
+      "alternativesConsidered": [
+        "ALB with sticky sessions",
+        "CloudFront WebSocket support",
+        "Direct EC2 public IP"
+      ],
+      "rationale": "NLB passes TCP/TLS directly to Fargate tasks preserving persistent WebSocket connections without HTTP-layer rewriting; ALB HTTP/2 layer can interfere with long-lived upgrade flows (Reliability + Performance Efficiency)."
+    },
+    {
+      "decision": "Presence and hot-data caching",
+      "chosen": "ElastiCache Redis (Valkey/Redis-compatible) — separate cluster at balanced/resilient, self-managed on-box at budget",
+      "alternativesConsidered": [
+        "DynamoDB TTL items for presence",
+        "In-process memory per container"
+      ],
+      "rationale": "Redis delivers sub-ms presence lookups and pub/sub fan-out; in-process memory breaks with multiple Fargate tasks, and DynamoDB TTL has second-level granularity too coarse for real-time presence (Performance Efficiency)."
+    }
+  ],
+  "securityFloor": [
+    "Encrypt all data at rest (KMS / service-native SSE), preferring customer-managed keys.",
+    "Enforce TLS in transit everywhere; terminate HTTPS at the edge and reject plaintext.",
+    "Least-privilege IAM: scoped per-service roles, no wildcards, no long-lived access keys.",
+    "Enable S3 Block Public Access account-wide so no bucket or object can be made public.",
+    "Keep the data tier private: VPC-bound stores in private subnets with no public route; managed/serverless stores (DynamoDB/S3) are already private via IAM and need no VPC or NAT.",
+    "Store secrets in AWS Secrets Manager / SSM Parameter Store — never in code or images.",
+    "Front public endpoints with CloudFront + AWS WAF (managed + rate-based rules); Shield Standard for L3/L4.",
+    "Enable CloudTrail plus S3/CloudFront/ALB access logs and VPC Flow Logs for audit."
+  ],
+  "recommendedTier": "balanced",
+  "recommendationRationale": ""
+}
