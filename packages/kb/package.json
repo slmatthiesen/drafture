@@ -7,6 +7,7 @@
   "exports": {
     ".": "./src/index.ts",
     "./security-baselines.json": "./security-baselines.json",
+    "./terraform-wireup-rules.json": "./terraform-wireup-rules.json",
     "./reference-architectures.json": "./reference-architectures.json",
     "./pricing-facts.seed.json": "./pricing-facts.seed.json",
     "./instance-prices.seed.json": "./instance-prices.seed.json",

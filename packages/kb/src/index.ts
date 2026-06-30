@@ -16,6 +16,26 @@ export interface SecurityBaseline {
 }
 
 /**
+ * Implementation-level Terraform "wire-up" rule: the consequence a resource
+ * implies but a model routinely omits (a CMK with no key policy, an ACM cert with
+ * no validation resource, …). The security baselines state the POLICY ("encrypt
+ * at rest"); these state the runtime consequence ("a CMK encrypting Logs needs a
+ * key policy granting the Logs principal"). `terraform plan` stays green on the
+ * omission, so without these the gap is invisible until deploy.
+ *
+ * Rendered into the generateConfig system prompt (`llm/configPrompt.ts`) and
+ * checked post-generation (`routes/config.ts` `detectWireupGaps`).
+ */
+export interface TerraformWireupRule {
+  id: string;
+  /** The required consequence, phrased as "resource X ⇒ you must also do Y". */
+  rule: string;
+  /** The runtime failure mode this prevents (plan stays green; fails at runtime). */
+  rationale: string;
+  source: string;
+}
+
+/**
  * A curated, static glossary term surfaced as a hover tooltip in the UI (no LLM).
  * Deterministic product knowledge — version-controlled here, served read-only.
  */

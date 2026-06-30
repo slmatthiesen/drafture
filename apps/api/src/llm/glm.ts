@@ -18,6 +18,7 @@ import type { Config } from "../config.js";
 import { GeneratedWireSchema, ClarificationSchema, reconstructTiers } from "../schema/architecture.js";
 import type { GeneratedArchitecture, Clarification, GeneratedTier } from "../schema/architecture.js";
 import { architectureToolSchema, clarificationToolSchema } from "./schema-utils.js";
+import { renderTerraformWireupRules } from "./configPrompt.js";
 import { ProviderError } from "./provider.js";
 import type {
   GenerateOptions,
@@ -192,7 +193,7 @@ export class GlmProvider implements LlmProvider {
       model: this.settings.model,
       max_tokens: maxTokens,
       messages: [
-        { role: "system", content: CONFIG_SYSTEM },
+        { role: "system", content: CONFIG_SYSTEM + "\n\n" + renderTerraformWireupRules() },
         { role: "user", content: buildConfigInput(tier) },
       ],
       thinking: THINKING_OFF,
