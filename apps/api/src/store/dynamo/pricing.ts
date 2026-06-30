@@ -98,7 +98,12 @@ export class DynamoPricingStore implements PricingStore {
       DeleteRequest: { Key: { pk: it.pk as string, sk: it.sk as string } },
     }));
     const puts = records.map((r) => ({ PutRequest: { Item: toItem(r) } }));
-    for (const batch of chunk([...deletes, ...puts], 25)) {
+    // Deletes then puts in SEPARATE batches: a single BatchWrite cannot contain both a
+    // Delete and a Put for the same key (a re-replace of the same month reuses keys).
+    for (const batch of chunk(deletes, 25)) {
+      await this.deps.doc.send(new BatchWriteCommand({ RequestItems: { [this.table]: batch } }));
+    }
+    for (const batch of chunk(puts, 25)) {
       await this.deps.doc.send(new BatchWriteCommand({ RequestItems: { [this.table]: batch } }));
     }
   }

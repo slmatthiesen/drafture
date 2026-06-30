@@ -106,12 +106,15 @@ export class DynamoSpendLedger implements SpendLedger {
                   TableName: this.table,
                   Key: { pk: this.counterKey(day) },
                   UpdateExpression: "SET spentToday = spentToday + :p, version = version + :one",
-                  ConditionExpression: "version = :v AND spentToday + :p <= :ceil",
+                  // DynamoDB forbids arithmetic in a ConditionExpression, so the ceiling
+                  // check is rewritten `spentToday + p <= ceil` ⟺ `spentToday <= ceil - p`
+                  // with the RHS precomputed. The SET (arithmetic allowed there) still adds :p.
+                  ConditionExpression: "version = :v AND spentToday <= :maxAllowed",
                   ExpressionAttributeValues: {
                     ":p": provisionalUsd,
                     ":one": 1,
                     ":v": cur.version,
-                    ":ceil": ceilingUsd,
+                    ":maxAllowed": ceilingUsd - provisionalUsd,
                   },
                 },
               },
