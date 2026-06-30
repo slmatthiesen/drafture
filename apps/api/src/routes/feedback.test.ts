@@ -19,7 +19,7 @@ async function buildHarness(
   configOverrides: Record<string, string> = {},
 ): Promise<{ app: FastifyInstance; ctx: AppContext; stores: Stores }> {
   const stores = createStores(openTempDb());
-  const ctx = buildAppContext(testConfig(configOverrides), { stores });
+  const ctx = await buildAppContext(testConfig(configOverrides), { stores });
   const app = Fastify({ logger: false, trustProxy: true });
   await registerApiRoutes(app, ctx);
   return { app, ctx, stores };
@@ -52,7 +52,7 @@ describe("POST /api/feedback", () => {
       region: ctx.config.DEFAULT_REGION,
     });
     // Seed the cache exactly as /api/generate would after a real generation.
-    stores.responseCache.set(promptHash, JSON.stringify({ recommendedTier: "balanced", tiers: [] }));
+    await stores.responseCache.set(promptHash, JSON.stringify({ recommendedTier: "balanced", tiers: [] }));
 
     const res = await app.inject({
       method: "POST",
@@ -61,7 +61,7 @@ describe("POST /api/feedback", () => {
     });
     expect(res.statusCode).toBe(200);
 
-    const entry = stores.feedback.listByRating(-1, 10)[0]!;
+    const entry = (await stores.feedback.listByRating(-1, 10))[0]!;
     expect(entry.promptHash).toBe(promptHash);
     expect(entry.recommendedTier).toBe("balanced");
     expect(entry.body).toContain('"balanced"');
@@ -73,8 +73,8 @@ describe("POST /api/feedback", () => {
     const body = { description: "x", round: 2 };
     await app.inject({ method: "POST", url: "/api/feedback", payload: { ...body, rating: 1 } });
     await app.inject({ method: "POST", url: "/api/feedback", payload: { ...body, rating: -1 } });
-    expect(stores.feedback.listByRating(1, 10)).toHaveLength(0);
-    expect(stores.feedback.listByRating(-1, 10)).toHaveLength(1);
+    expect(await stores.feedback.listByRating(1, 10)).toHaveLength(0);
+    expect(await stores.feedback.listByRating(-1, 10)).toHaveLength(1);
     await app.close();
   });
 

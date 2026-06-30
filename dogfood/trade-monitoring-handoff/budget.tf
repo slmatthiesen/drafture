@@ -74,151 +74,6 @@ locals {
 }
 
 # =============================================================================
-# KMS KEYS
-# =============================================================================
-
-# General-purpose CMK — S3 buckets, EBS volumes, Secrets Manager.
-resource "aws_kms_key" "main" {
-  description             = "budget main CMK — S3, EBS, Secrets Manager"
-  enable_key_rotation     = true
-  deletion_window_in_days = 30
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Sid = "RootAccountFullAccess"
-        Effect = "Allow"
-        Principal = {
-          AWS = "arn:${local.partition}:iam::${local.account_id}:root"
-        }
-        Action = "kms:*"
-        Resource = "*"
-      },
-      {
-        Sid = "AllowSecretsManager"
-        Effect = "Allow"
-        Principal = {
-          Service = "secretsmanager.amazonaws.com"
-        }
-        Action = [
-          "kms:Decrypt",
-          "kms:GenerateDataKey*",
-          "kms:CreateGrant",
-          "kms:DescribeKey"
-        ]
-        Resource = "*"
-      }
-    ]
-  })
-}
-
-resource "aws_kms_alias" "main" {
-  name          = "alias/budget-main"
-  target_key_id = aws_kms_key.main.key_id
-}
-
-# CloudWatch Logs CMK — the Logs service principal MUST be granted, keyed off
-# the LITERAL region (not ${local.region}), or PutLogEvents fails at runtime.
-resource "aws_kms_key" "cw_logs" {
-  description             = "budget CloudWatch Logs CMK"
-  enable_key_rotation     = true
-  deletion_window_in_days = 30
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Sid = "RootAccountFullAccess"
-        Effect = "Allow"
-        Principal = {
-          AWS = "arn:${local.partition}:iam::${local.account_id}:root"
-        }
-        Action = "kms:*"
-        Resource = "*"
-      },
-      {
-        Sid = "AllowCloudWatchLogs"
-        Effect = "Allow"
-        Principal = {
-          Service = "logs.us-east-1.amazonaws.com"
-        }
-        Action = [
-          "kms:Encrypt",
-          "kms:Decrypt",
-          "kms:ReEncrypt*",
-          "kms:GenerateDataKey*",
-          "kms:DescribeKey"
-        ]
-        Resource = "*"
-        Condition = {
-          ArnLike = {
-            "kms:EncryptionContext:aws:logs:arn" = "arn:${local.partition}:logs:us-east-1:${local.account_id}:*"
-          }
-        }
-      }
-    ]
-  })
-}
-
-resource "aws_kms_alias" "cw_logs" {
-  name          = "alias/budget-cw-logs"
-  target_key_id = aws_kms_key.cw_logs.key_id
-}
-
-# SNS CMK — a CloudWatch alarm publishing to an encrypted topic needs BOTH the
-# cloudwatch and sns service principals, or alarm publish fails at runtime.
-resource "aws_kms_key" "sns" {
-  description             = "budget SNS ops-alert CMK"
-  enable_key_rotation     = true
-  deletion_window_in_days = 30
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Sid = "RootAccountFullAccess"
-        Effect = "Allow"
-        Principal = {
-          AWS = "arn:${local.partition}:iam::${local.account_id}:root"
-        }
-        Action = "kms:*"
-        Resource = "*"
-      },
-      {
-        Sid = "AllowCloudWatchAlarms"
-        Effect = "Allow"
-        Principal = {
-          Service = "cloudwatch.amazonaws.com"
-        }
-        Action = [
-          "kms:Decrypt",
-          "kms:GenerateDataKey*"
-        ]
-        Resource = "*"
-      },
-      {
-        Sid = "AllowSNSService"
-        Effect = "Allow"
-        Principal = {
-          Service = "sns.amazonaws.com"
-        }
-        Action = [
-          "kms:Decrypt",
-          "kms:GenerateDataKey*"
-        ]
-        Resource = "*"
-      }
-    ]
-  })
-}
-
-resource "aws_kms_alias" "sns" {
-  name          = "alias/budget-sns"
-  target_key_id = aws_kms_key.sns.key_id
-}
-
-# =============================================================================
 # IAM
 # =============================================================================
 
@@ -279,15 +134,6 @@ resource "aws_iam_role_policy" "streams_lambda_inline" {
           aws_s3_bucket.s3_datalake.arn,
           "${aws_s3_bucket.s3_datalake.arn}/*"
         ]
-      },
-      {
-        Sid = "KMSDecryptMain"
-        Effect = "Allow"
-        Action = [
-          "kms:Decrypt",
-          "kms:GenerateDataKey*"
-        ]
-        Resource = aws_kms_key.main.arn
       }
     ]
   })
@@ -345,15 +191,6 @@ resource "aws_iam_role_policy" "ingest_lambda_inline" {
           "sqs:GetQueueUrl"
         ]
         Resource = aws_sqs_queue.sqs_fanout.arn
-      },
-      {
-        Sid = "KMSDecryptMain"
-        Effect = "Allow"
-        Action = [
-          "kms:Decrypt",
-          "kms:GenerateDataKey*"
-        ]
-        Resource = aws_kms_key.main.arn
       }
     ]
   })
@@ -372,8 +209,7 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "s3_datalake" {
   bucket = aws_s3_bucket.s3_datalake.id
   rule {
     apply_server_side_encryption_by_default {
-      sse_algorithm     = "aws:kms"
-      kms_master_key_id = aws_kms_key.main.arn
+      sse_algorithm     = "AES256"
     }
     bucket_key_enabled = true
   }
@@ -424,7 +260,6 @@ resource "aws_s3_bucket_policy" "s3_datalake" {
 # OMITTED — a null rotation_lambda_arn is invalid (rule: secretsmanager-rotation-lambda).
 resource "aws_secretsmanager_secret" "secrets" {
   name       = "budget/secrets"
-  kms_key_id = aws_kms_key.main.arn
 }
 
 resource "aws_secretsmanager_secret_version" "secrets" {
@@ -460,7 +295,7 @@ resource "aws_lambda_function" "dispatch_lambda" {
 resource "aws_cloudwatch_log_group" "dispatch_lambda" {
   name              = "/aws/lambda/budget-dispatch-lambda"
   retention_in_days = 30
-  kms_key_id        = aws_kms_key.cw_logs.arn
+  # at-rest via the AWS-managed CloudWatch Logs key (budget floor; a customer CMK is the balanced+ step-up)
 }
 
 # =============================================================================
@@ -488,7 +323,7 @@ resource "aws_lambda_function" "streams_lambda" {
 resource "aws_cloudwatch_log_group" "streams_lambda" {
   name              = "/aws/lambda/budget-streams-lambda"
   retention_in_days = 30
-  kms_key_id        = aws_kms_key.cw_logs.arn
+  # at-rest via the AWS-managed CloudWatch Logs key (budget floor; a customer CMK is the balanced+ step-up)
 }
 
 # =============================================================================
@@ -517,7 +352,7 @@ resource "aws_lambda_function" "ingest_lambda" {
 resource "aws_cloudwatch_log_group" "ingest_lambda" {
   name              = "/aws/lambda/budget-ingest-lambda"
   retention_in_days = 30
-  kms_key_id        = aws_kms_key.cw_logs.arn
+  # at-rest via the AWS-managed CloudWatch Logs key (budget floor; a customer CMK is the balanced+ step-up)
 }
 
 # =============================================================================
@@ -526,7 +361,7 @@ resource "aws_cloudwatch_log_group" "ingest_lambda" {
 
 resource "aws_sns_topic" "sns_alert" {
   name              = "budget-sns-alert"
-  kms_master_key_id = aws_kms_key.sns.arn
+  kms_master_key_id = "alias/aws/sns"
 }
 
 resource "aws_sns_topic_policy" "sns_alert" {
@@ -586,7 +421,7 @@ resource "aws_sns_topic_subscription" "sns_alert_email" {
 resource "aws_cloudwatch_log_group" "cw_logs" {
   name              = "/budget/app"
   retention_in_days = 30
-  kms_key_id        = aws_kms_key.cw_logs.arn
+  # at-rest via the AWS-managed CloudWatch Logs key (budget floor; a customer CMK is the balanced+ step-up)
 }
 
 # =============================================================================
@@ -635,78 +470,6 @@ resource "aws_cloudwatch_metric_alarm" "streams_lambda_errors" {
 # =============================================================================
 # CLOUDFRONT
 # =============================================================================
-
-resource "aws_wafv2_web_acl" "cf_waf" {
-  provider    = aws.us_east_1
-  name        = "budget-cf-waf"
-  scope       = "CLOUDFRONT"
-  default_action {
-    allow {}
-  }
-
-  rule {
-    name     = "AWSManagedRulesCommonRuleSet"
-    priority = 1
-    override_action {
-      none {}
-    }
-    statement {
-      managed_rule_group_statement {
-        name        = "AWSManagedRulesCommonRuleSet"
-        vendor_name = "AWS"
-      }
-    }
-    visibility_config {
-      cloudwatch_metrics_enabled = true
-      metric_name                = "AWSManagedRulesCommonRuleSet"
-      sampled_requests_enabled   = true
-    }
-  }
-
-  rule {
-    name     = "AWSManagedRulesKnownBadInputsRuleSet"
-    priority = 2
-    override_action {
-      none {}
-    }
-    statement {
-      managed_rule_group_statement {
-        name        = "AWSManagedRulesKnownBadInputsRuleSet"
-        vendor_name = "AWS"
-      }
-    }
-    visibility_config {
-      cloudwatch_metrics_enabled = true
-      metric_name                = "AWSManagedRulesKnownBadInputsRuleSet"
-      sampled_requests_enabled   = true
-    }
-  }
-
-  rule {
-    name     = "RateLimit"
-    priority = 3
-    action {
-      block {}
-    }
-    statement {
-      rate_based_statement {
-        limit              = 2000
-        aggregate_key_type = "IP"
-      }
-    }
-    visibility_config {
-      cloudwatch_metrics_enabled = true
-      metric_name                = "RateLimit"
-      sampled_requests_enabled   = true
-    }
-  }
-
-  visibility_config {
-    cloudwatch_metrics_enabled = true
-    metric_name                = "budget-cf-waf"
-    sampled_requests_enabled   = true
-  }
-}
 
 resource "aws_acm_certificate" "cf_waf" {
   provider          = aws.us_east_1
@@ -789,7 +552,6 @@ resource "aws_cloudfront_distribution" "cf_waf" {
   http_version        = "http2and3"
   default_root_object = "index.html"
   price_class         = "PriceClass_100"
-  web_acl_id          = aws_wafv2_web_acl.cf_waf.arn
   aliases             = [var.domain_name]
 
   # API Gateway (HTTP API) origin over a custom domain with a TLS cert (NOT a raw AWS DNS name — rule cloudfront-origin-tls).
@@ -899,7 +661,7 @@ resource "aws_s3_bucket_policy" "cloudtrail_logs" {
 resource "aws_cloudwatch_log_group" "cloudtrail" {
   name              = "/aws/cloudtrail/budget"
   retention_in_days = 90
-  kms_key_id        = aws_kms_key.cw_logs.arn
+  # at-rest via the AWS-managed CloudWatch Logs key (budget floor; a customer CMK is the balanced+ step-up)
 }
 
 data "aws_iam_policy_document" "cloudtrail_assume" {
@@ -938,7 +700,7 @@ resource "aws_iam_role_policy" "cloudtrail_cw" {
 resource "aws_cloudtrail" "cloudtrail" {
   name                          = "budget-trail"
   s3_bucket_name                = aws_s3_bucket.cloudtrail_logs.bucket
-  is_multi_region_trail         = true
+  is_multi_region_trail         = false
   enable_log_file_validation    = true
   include_global_service_events = true
   cloud_watch_logs_group_arn    = "${aws_cloudwatch_log_group.cloudtrail.arn}:*"
@@ -958,7 +720,7 @@ resource "aws_apigatewayv2_api" "apigw" {
 resource "aws_cloudwatch_log_group" "apigw" {
   name              = "/aws/apigw/budget-apigw"
   retention_in_days = 30
-  kms_key_id        = aws_kms_key.cw_logs.arn
+  # at-rest via the AWS-managed CloudWatch Logs key (budget floor; a customer CMK is the balanced+ step-up)
 }
 
 resource "aws_apigatewayv2_stage" "apigw" {
@@ -1008,10 +770,6 @@ resource "aws_dynamodb_table" "dynamo" {
   attribute {
     name = "id"
     type = "S"
-  }
-  server_side_encryption {
-    enabled     = true
-    kms_key_arn = aws_kms_key.main.arn
   }
   point_in_time_recovery {
     enabled = true

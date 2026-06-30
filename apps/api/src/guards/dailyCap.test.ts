@@ -16,18 +16,18 @@ async function appWith(preHandler: ReturnType<typeof makeDailyCap>["preHandler"]
 }
 
 describe("dailyCap", () => {
-  it("checkIpCap rejects once the IP is at the limit", () => {
+  it("checkIpCap rejects once the IP is at the limit", async () => {
     const cap = makeDailyCap(stores.spendLedger, { maxPerDay: 2 });
-    expect(cap.checkIpCap("1.1.1.1").ok).toBe(true);
-    cap.recordIpGeneration("1.1.1.1");
-    cap.recordIpGeneration("1.1.1.1");
-    expect(cap.checkIpCap("1.1.1.1").ok).toBe(false);
-    expect(cap.checkIpCap("1.1.1.1").countToday).toBe(2);
+    expect((await cap.checkIpCap("1.1.1.1")).ok).toBe(true);
+    await cap.recordIpGeneration("1.1.1.1");
+    await cap.recordIpGeneration("1.1.1.1");
+    expect((await cap.checkIpCap("1.1.1.1")).ok).toBe(false);
+    expect((await cap.checkIpCap("1.1.1.1")).countToday).toBe(2);
   });
 
   it("preHandler 429s an IP at the cap; other IPs unaffected", async () => {
     const cap = makeDailyCap(stores.spendLedger, { maxPerDay: 1 });
-    cap.recordIpGeneration("1.1.1.1");
+    await cap.recordIpGeneration("1.1.1.1");
     const app = await appWith(cap.preHandler);
 
     const blocked = await app.inject({
@@ -47,14 +47,14 @@ describe("dailyCap", () => {
     await app.close();
   });
 
-  it("a cache hit does NOT consume the cap (record is not called)", () => {
+  it("a cache hit does NOT consume the cap (record is not called)", async () => {
     // Simulating U9's contract: on a cache hit the route must skip recordIpGeneration.
     const cap = makeDailyCap(stores.spendLedger, { maxPerDay: 1 });
     // 5 "requests" that all hit cache → no record calls → cap never consumed.
     for (let i = 0; i < 5; i++) {
-      expect(cap.checkIpCap("1.1.1.1").ok).toBe(true);
+      expect((await cap.checkIpCap("1.1.1.1")).ok).toBe(true);
       // (no recordIpGeneration — cached path)
     }
-    expect(cap.checkIpCap("1.1.1.1").ok).toBe(true);
+    expect((await cap.checkIpCap("1.1.1.1")).ok).toBe(true);
   });
 });

@@ -111,7 +111,7 @@ describe("researchMissingTopics", () => {
     expect(doc.source).toContain("docs.aws.amazon.com");
 
     // Persisted and retrievable for the next request.
-    expect(memory.get("file-uploads")?.id).toBe(doc.id);
+    expect((await memory.get("file-uploads"))?.id).toBe(doc.id);
     // Each call reported to the spend ledger.
     expect(spends).toEqual([100]);
   });
@@ -126,7 +126,7 @@ describe("researchMissingTopics", () => {
     const description = "Users sign up and sign in to their accounts.";
 
     // Round 1: the auth topic is a miss → research + quarantine it.
-    const first = assembleGrounding({ description, memory });
+    const first = await assembleGrounding({ description, memory });
     expect(first.missingTopics).toContain("authentication");
     await researchMissingTopics({
       topics: first.missingTopics,
@@ -137,7 +137,7 @@ describe("researchMissingTopics", () => {
     expect(client.calls.length).toBe(1);
 
     // Round 2: the topic now has a memory hit → no longer missing → no new call.
-    const second = assembleGrounding({ description, memory });
+    const second = await assembleGrounding({ description, memory });
     expect(second.missingTopics).not.toContain("authentication");
     expect(second.memoryHits.length).toBeGreaterThan(0);
 
@@ -164,7 +164,7 @@ describe("researchMissingTopics", () => {
 
     expect(client.calls.length).toBe(0);
     expect(summary).toEqual({ researched: [], persisted: [], failures: [], calls: 0 });
-    expect(memory.listPending()).toEqual([]);
+    expect(await memory.listPending()).toEqual([]);
   });
 
   it("a server-tool error result block degrades gracefully and still returns (error)", async () => {
@@ -181,7 +181,7 @@ describe("researchMissingTopics", () => {
     expect(client.calls.length).toBe(1);
     expect(summary.persisted).toEqual([]);
     expect(summary.failures).toEqual(["file-uploads"]);
-    expect(memory.listPending()).toEqual([]);
+    expect(await memory.listPending()).toEqual([]);
   });
 
   it("a thrown failure/timeout degrades gracefully and still returns (error)", async () => {
@@ -217,7 +217,7 @@ describe("researchMissingTopics", () => {
     expect(summary.researched).toEqual(["file-uploads", "authentication"]);
     expect(summary.persisted).toHaveLength(2);
     // The third topic is left untouched for a later request.
-    expect(memory.get("notifications")).toBeUndefined();
+    expect(await memory.get("notifications")).toBeUndefined();
   });
 
   it("researched facts are verified:false, surface via listPending, and the CLI store ops promote/reject (R7/R9)", async () => {
@@ -233,17 +233,17 @@ describe("researchMissingTopics", () => {
     const id = summary.persisted[0]!.id;
 
     // Surfaced as pending (what list-pending-facts prints).
-    const pending = memory.listPending();
+    const pending = await memory.listPending();
     expect(pending.map((d) => d.id)).toContain(id);
     expect(pending.every((d) => d.verified === false)).toBe(true);
 
     // verify-fact <id> → trusted, no longer pending.
-    expect(memory.setVerified(id, true)).toBe(true);
-    expect(memory.listPending()).toEqual([]);
-    expect(memory.getById(id)?.verified).toBe(true);
+    expect(await memory.setVerified(id, true)).toBe(true);
+    expect(await memory.listPending()).toEqual([]);
+    expect((await memory.getById(id))?.verified).toBe(true);
 
     // verify-fact --reject <id> → deleted.
-    expect(memory.delete(id)).toBe(true);
-    expect(memory.getById(id)).toBeUndefined();
+    expect(await memory.delete(id)).toBe(true);
+    expect(await memory.getById(id)).toBeUndefined();
   });
 });

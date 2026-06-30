@@ -1,9 +1,13 @@
 # DRAFTURE — agent handoff brief (READ THIS FIRST)
 
-> Source: regenerated from this pack's `prompt.txt` + `answers.json` through the improved
-> Drafture pipeline (tier-delta + wire-up rules + 13-property completeness gate, gate PASS
-> 13/13) · model claude-sonnet-4-6 · tier: **budget** · region: us-east-1 · 2026-06-29
-> Siblings in this pack: `budget.tf` (reference Terraform), `design.json` (full design body).
+> Source: design from this pack's `prompt.txt` + `answers.json` through the Drafture pipeline
+> (tier-delta + wire-up rules + 15-property completeness/cost-honest gate) · model
+> claude-sonnet-4-6 · tier: **budget** · region: us-east-1 · `.tf` re-emitted 2026-06-30 under
+> the TIERED SECURITY FLOOR (docs/plans/2026-06-30-005).
+> Siblings in this pack: `budget.tf` (57 resources — the lean **free** security floor),
+> `balanced.tf` (65 — adds the paid floor), `resilient.tf` (70 — + multi-region trail) —
+> reference Terraform for all three tiers, emitted deterministically from `design.json`,
+> `detectWireupGaps()` = 0 and `terraform validate`-clean on each.
 
 This pack is an **agent-ready build plan**, not a finished stack. Drafture did the
 judgment-heavy first 80% (architecture, sizing, security floor, cost). Your job is the
@@ -46,20 +50,41 @@ These were deliberate. If you "helpfully" add them back, you undo a call the use
   eval synchronous with the webhook response.
 - **No compliance regime.** No PII / regulated data → no HIPAA/PCI scope. Don't invent one.
 
-## 3. Security floor (non-negotiable — preserve all of these)
+## 3. Security floor — TIERED (budget = cheapest CORRECT; preserve the free floor)
 
-TLS everywhere (terminate HTTPS at CloudFront) · KMS/SSE at rest (DynamoDB SSE, S3 SSE,
-KMS-backed CloudWatch Logs) · least-privilege IAM per service, no wildcards · S3 Block
-Public Access on every bucket · CloudFront + WAF (managed rules + rate-based) in front of
-the public endpoint · CloudTrail audit trail. `budget.tf` already models these — keep them
-when you refactor.
+This is a **none-sensitivity** workload (no PII/regulated data), so `budget.tf` carries the
+**FREE structural floor** and DEFERS paid enterprise security up the robustness ladder — the
+same way it defers NAT/ALB/multi-AZ. Keep the free floor; the paid items are a one-line add
+when traffic/threats justify them.
+
+**Budget free floor (in `budget.tf`, all $0):** TLS everywhere (HTTPS terminated at
+CloudFront) · at-rest encryption with **AWS-managed keys** (DynamoDB default SSE, S3 SSE-S3
+`AES256`, SQS managed SSE, `alias/aws/sns`) · least-privilege IAM per service, no wildcards ·
+S3 Block Public Access on every bucket · **CloudFront + Shield Standard** (free, automatic
+L3/L4) in front of the public endpoint · **single-region CloudTrail** audit trail.
+
+**Paid floor — DEFERRED to `balanced.tf` / `resilient.tf` (NOT in budget):** an **AWS WAF web
+ACL** (managed rules + rate-based, L7, ~$8/mo) → attach with a one-line `web_acl_id` ·
+**customer-managed KMS CMKs** (auditable rotation) replacing the AWS-managed keys ·
+**multi-region CloudTrail** + Flow Logs (resilient). To harden, copy those resources from
+`balanced.tf` — or just deploy `balanced.tf`.
+
+> Note: a few budget resources are still NAMED `cf_waf` (e.g. `aws_acm_certificate.cf_waf`)
+> because the design node is called that — there is **no WAF resource in `budget.tf`**, just
+> the legacy node id. Cosmetic; rename freely.
+
+> **If this workload ever takes regulated/sensitive data,** the paid floor becomes
+> correct-required and belongs in budget too — regenerate with the data-sensitivity intake
+> answer set to "Regulated", and Drafture pulls WAF + CMKs + the multi-region trail back into
+> the budget tier automatically.
 
 ## 4. What you MUST do to make `budget.tf` apply-ready
 
 This `budget.tf` is now emitted by the **deterministic Terraform emitter** (from the typed
 graph, not an LLM), so the infra-wiring gaps are structurally closed: the API Gateway
-`auto_deploy` stage, the CloudFront-logs S3 delivery ACL, and the KMS-key-policy grants for
-CloudWatch Logs are all emitted alongside the resources that need them. Reference-only still
+`auto_deploy` stage and the CloudFront-logs S3 delivery ACL are emitted alongside the
+resources that need them (at balanced+, the customer-CMK key policies ride with them too).
+Reference-only still
 — the remaining work the agent owns is **application code and adoption**, not infra wiring:
 
 - **No real Lambda handlers.** The Lambdas point at placeholder zips that don't exist.

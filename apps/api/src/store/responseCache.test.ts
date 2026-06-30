@@ -40,27 +40,27 @@ describe("SqliteResponseCache", () => {
     cache = new SqliteResponseCache(db, clock);
   });
 
-  it("returns a hit within TTL", () => {
-    cache.set("h1", "{body}");
-    const hit = cache.get("h1", TTL);
+  it("returns a hit within TTL", async () => {
+    await cache.set("h1", "{body}");
+    const hit = await cache.get("h1", TTL);
     expect(hit).toEqual({ promptHash: "h1", body: "{body}", createdAt: 10_000 });
   });
 
-  it("returns undefined for an unknown hash", () => {
-    expect(cache.get("missing", TTL)).toBeUndefined();
+  it("returns undefined for an unknown hash", async () => {
+    expect(await cache.get("missing", TTL)).toBeUndefined();
   });
 
-  it("returns undefined once now - createdAt exceeds TTL", () => {
-    cache.set("h1", "{body}");
+  it("returns undefined once now - createdAt exceeds TTL", async () => {
+    await cache.set("h1", "{body}");
     clock.advance(TTL + 1);
-    expect(cache.get("h1", TTL)).toBeUndefined();
+    expect(await cache.get("h1", TTL)).toBeUndefined();
   });
 
-  it("set overwrites body and refreshes createdAt", () => {
-    cache.set("h1", "old");
+  it("set overwrites body and refreshes createdAt", async () => {
+    await cache.set("h1", "old");
     clock.advance(500);
-    cache.set("h1", "new");
-    const hit = cache.get("h1", TTL);
+    await cache.set("h1", "new");
+    const hit = await cache.get("h1", TTL);
     expect(hit?.body).toBe("new");
     expect(hit?.createdAt).toBe(10_500);
   });

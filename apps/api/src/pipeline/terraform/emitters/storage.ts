@@ -34,8 +34,11 @@ export function emitS3(node: ArchitectureNode, ctx: EmitCtx): HclBlock[] {
       `  bucket = aws_s3_bucket.${tf}.id`,
       `  rule {`,
       `    apply_server_side_encryption_by_default {`,
-      `      sse_algorithm     = "aws:kms"`,
-      `      kms_master_key_id = aws_kms_key.main.arn`,
+      // Budget floor: SSE-S3 (AES256, AWS-managed, free, still encrypted at rest).
+      // Balanced+/compliance: a customer-managed CMK for auditable rotation.
+      ...(ctx.paidSecurity
+        ? [`      sse_algorithm     = "aws:kms"`, `      kms_master_key_id = aws_kms_key.main.arn`]
+        : [`      sse_algorithm     = "AES256"`]),
       `    }`,
       `    bucket_key_enabled = true`,
       `  }`,
@@ -107,7 +110,8 @@ export function emitSecrets(node: ArchitectureNode, ctx: EmitCtx): HclBlock[] {
         `# OMITTED — a null rotation_lambda_arn is invalid (rule: secretsmanager-rotation-lambda).`,
         `resource "aws_secretsmanager_secret" "${tf}" {`,
         `  name       = "${ctx.prefix}/${tf.replace(/_/g, "-")}"`,
-        `  kms_key_id = aws_kms_key.main.arn`,
+        // Budget floor: the AWS-managed aws/secretsmanager key (free). Balanced+: a CMK.
+        ...(ctx.paidSecurity ? [`  kms_key_id = aws_kms_key.main.arn`] : []),
         `}`,
         ``,
         `resource "aws_secretsmanager_secret_version" "${tf}" {`,

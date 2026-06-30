@@ -42,9 +42,9 @@ async function main(): Promise<void> {
   const pending: Pending[] = [];
 
   // Approved generations — embed the full prompt (description + intake answers).
-  for (const summary of stores.generations.listApproved(10_000)) {
-    if (!force && stores.designVectors.hasForModel(summary.id, embedder.model)) continue;
-    const rec = stores.generations.getById(summary.id);
+  for (const summary of await stores.generations.listApproved(10_000)) {
+    if (!force && (await stores.designVectors.hasForModel(summary.id, embedder.model))) continue;
+    const rec = await stores.generations.getById(summary.id);
     if (!rec) continue;
     pending.push({
       id: rec.id,
@@ -55,8 +55,8 @@ async function main(): Promise<void> {
   }
 
   // Curated runs — the seeded showcase designs (prompt only; no stored intake answers).
-  for (const summary of stores.curated.list()) {
-    if (!force && stores.designVectors.hasForModel(summary.id, embedder.model)) continue;
+  for (const summary of await stores.curated.list()) {
+    if (!force && (await stores.designVectors.hasForModel(summary.id, embedder.model))) continue;
     pending.push({
       id: summary.id,
       source: "curated",
@@ -66,7 +66,7 @@ async function main(): Promise<void> {
   }
 
   if (pending.length === 0) {
-    console.log(`Nothing to embed — corpus is up to date (${stores.designVectors.count(embedder.model)} designs under ${embedder.model}).`);
+    console.log(`Nothing to embed — corpus is up to date (${await stores.designVectors.count(embedder.model)} designs under ${embedder.model}).`);
     db.close();
     return;
   }
@@ -77,10 +77,10 @@ async function main(): Promise<void> {
     const p = pending[i]!;
     const vector = vectors[i];
     if (!vector) continue;
-    stores.designVectors.upsert({ id: p.id, source: p.source, promptHash: p.promptHash, text: p.text, vector, model: embedder.model });
+    await stores.designVectors.upsert({ id: p.id, source: p.source, promptHash: p.promptHash, text: p.text, vector, model: embedder.model });
   }
 
-  console.log(`Done. Corpus now holds ${stores.designVectors.count(embedder.model)} design(s) under ${embedder.model}.`);
+  console.log(`Done. Corpus now holds ${await stores.designVectors.count(embedder.model)} design(s) under ${embedder.model}.`);
   db.close();
 }
 

@@ -1,0 +1,1351 @@
+{
+  "assumptions": [
+    "Traffic ~<50k/month (not specified) — serverless-no-VPC budget tier is appropriate; no always-on NAT/ALB/instance needed",
+    "No compliance regime specified (e.g. PCI) — no cardholder data stored, payment tokenization assumed upstream",
+    "Downtime tolerance not specified — budget=single-AZ serverless, balanced=multi-AZ managed, resilient=cross-region DR",
+    "Order payload is JSON; fulfillment is async and retryable; checkout response is synchronous acknowledgment only",
+    "Alerting destination is email (budget), Slack (balanced), PagerDuty (resilient)",
+    "Cost estimates are on-demand list prices for us-east-1, presented as ranges over assumed monthly volumes. They exclude the AWS Free Tier, Savings Plans, Reserved Instances, and negotiated discounts.",
+    "Assumed traffic ~100k–1M requests/month, applied equally to all three tiers (tiers differ by robustness, not traffic). Set \"expected monthly visitors\" in intake to change it."
+  ],
+  "clarificationsUsed": [
+    "Matched reference: Queue-Based Async Processing — SQS decouples checkout ingest from fulfillment workers",
+    "Burst handling: SQS buffering + DynamoDB on-demand + Lambda reserved concurrency all trivially in core"
+  ],
+  "tiers": [
+    {
+      "name": "budget",
+      "summary": "Fully serverless-no-VPC: API Gateway → checkout Lambda → SQS → fulfillment Lambda → DynamoDB. ~$0 idle floor. Single-AZ data path (DynamoDB is regionally durable by default). Observability via CloudWatch alarms → SNS → email.",
+      "nodes": [
+        {
+          "id": "cf",
+          "awsService": "CloudFront",
+          "role": "edge CDN + WAF",
+          "security": [
+            "TLS",
+            "WAF managed rules",
+            "rate-based rule",
+            "Shield Standard",
+            "access logging"
+          ]
+        },
+        {
+          "id": "apigw",
+          "awsService": "API Gateway",
+          "role": "checkout REST endpoint",
+          "security": [
+            "TLS",
+            "resource policy",
+            "throttling 1000 rps",
+            "least-priv role"
+          ]
+        },
+        {
+          "id": "checkout_fn",
+          "awsService": "Lambda",
+          "role": "checkout ingest handler",
+          "security": [
+            "least-priv role",
+            "reserved concurrency 100",
+            "Secrets Manager ref",
+            "X-Ray traced"
+          ]
+        },
+        {
+          "id": "order_queue",
+          "awsService": "SQS",
+          "role": "order work queue",
+          "security": [
+            "SSE-KMS",
+            "DLQ",
+            "visibility timeout 30s",
+            "maxReceiveCount 3"
+          ]
+        },
+        {
+          "id": "order_dlq",
+          "awsService": "SQS",
+          "role": "fulfillment dead-letter queue",
+          "security": [
+            "SSE-KMS",
+            "alarm on depth > 0"
+          ]
+        },
+        {
+          "id": "fulfill_fn",
+          "awsService": "Lambda",
+          "role": "fulfillment worker",
+          "security": [
+            "least-priv role",
+            "reserved concurrency 50",
+            "idempotent consumer",
+            "X-Ray traced"
+          ]
+        },
+        {
+          "id": "orders_table",
+          "awsService": "DynamoDB",
+          "role": "order + delivery records",
+          "security": [
+            "SSE-KMS CMK",
+            "on-demand capacity",
+            "PITR enabled",
+            "least-priv role"
+          ]
+        },
+        {
+          "id": "ses",
+          "awsService": "SES",
+          "role": "transactional email sender",
+          "security": [
+            "TLS",
+            "least-priv role",
+            "bounce/complaint events"
+          ]
+        },
+        {
+          "id": "cw_logs",
+          "awsService": "CloudWatch Logs",
+          "role": "centralized log sink",
+          "security": [
+            "retention 30d",
+            "KMS encrypted"
+          ]
+        },
+        {
+          "id": "cw_alarms",
+          "awsService": "CloudWatch",
+          "role": "golden-signal alarms",
+          "security": [
+            "latency",
+            "error rate",
+            "DLQ depth",
+            "throttles"
+          ]
+        },
+        {
+          "id": "ops_sns",
+          "awsService": "SNS",
+          "role": "ops alert topic",
+          "security": [
+            "SSE",
+            "least-priv publish"
+          ]
+        },
+        {
+          "id": "ops_email",
+          "awsService": "SES",
+          "role": "on-call email subscription",
+          "security": [
+            "TLS"
+          ]
+        },
+        {
+          "id": "cloudtrail",
+          "awsService": "CloudTrail",
+          "role": "audit trail",
+          "security": [
+            "management + data events",
+            "S3 log bucket SSE-KMS",
+            "integrity validation"
+          ]
+        }
+      ],
+      "edges": [
+        {
+          "from": "client",
+          "to": "cf",
+          "payload": "HTTPS checkout POST / status GET",
+          "protocol": "HTTPS"
+        },
+        {
+          "from": "cf",
+          "to": "apigw",
+          "payload": "forwarded HTTPS request",
+          "protocol": "HTTPS"
+        },
+        {
+          "from": "apigw",
+          "to": "checkout_fn",
+          "payload": "order JSON payload",
+          "protocol": "Lambda invoke"
+        },
+        {
+          "from": "checkout_fn",
+          "to": "order_queue",
+          "payload": "order JSON message",
+          "protocol": "SQS SendMessage"
+        },
+        {
+          "from": "checkout_fn",
+          "to": "orders_table",
+          "payload": "order record (status=PENDING)",
+          "protocol": "DynamoDB PutItem (conditional)"
+        },
+        {
+          "from": "order_queue",
+          "to": "fulfill_fn",
+          "payload": "order JSON message",
+          "protocol": "SQS event trigger"
+        },
+        {
+          "from": "order_queue",
+          "to": "order_dlq",
+          "payload": "poison order message (maxReceiveCount exceeded)",
+          "protocol": "SQS redrive"
+        },
+        {
+          "from": "fulfill_fn",
+          "to": "orders_table",
+          "payload": "order update (status=FULFILLED, delivery record)",
+          "protocol": "DynamoDB UpdateItem (conditional on orderId)"
+        },
+        {
+          "from": "fulfill_fn",
+          "to": "ses",
+          "payload": "order confirmation email request",
+          "protocol": "HTTPS"
+        },
+        {
+          "from": "ses",
+          "to": "orders_table",
+          "payload": "delivery event (bounce/complaint/delivered)",
+          "protocol": "SES event → Lambda → DynamoDB"
+        },
+        {
+          "from": "checkout_fn",
+          "to": "cw_logs",
+          "payload": "structured ingest logs",
+          "protocol": "CloudWatch Logs API"
+        },
+        {
+          "from": "fulfill_fn",
+          "to": "cw_logs",
+          "payload": "structured fulfillment logs",
+          "protocol": "CloudWatch Logs API"
+        },
+        {
+          "from": "cw_logs",
+          "to": "cw_alarms",
+          "payload": "metric filters (errors, latency, throttles)",
+          "protocol": "CloudWatch Metrics"
+        },
+        {
+          "from": "order_dlq",
+          "to": "cw_alarms",
+          "payload": "DLQ depth metric",
+          "protocol": "CloudWatch Metrics"
+        },
+        {
+          "from": "cw_alarms",
+          "to": "ops_sns",
+          "payload": "alarm state change notification",
+          "protocol": "SNS Publish"
+        },
+        {
+          "from": "ops_sns",
+          "to": "ops_email",
+          "payload": "alert email",
+          "protocol": "HTTPS/SMTP"
+        }
+      ],
+      "delta": [
+        "Baseline: fully serverless-no-VPC — no always-on NAT, ALB, or instance; ~$0 idle floor",
+        "SQS standard queue decouples checkout ingest from fulfillment; DLQ + redrive after 3 failures",
+        "DynamoDB on-demand absorbs checkout write spikes without pre-provisioning",
+        "Lambda reserved concurrency (checkout=100, fulfillment=50) controls burst drain rate",
+        "Fulfillment idempotency: conditional UpdateItem on orderId prevents double-fulfillment on redelivery",
+        "Outbox pattern: PENDING written at checkout, FULFILLED written at fulfillment, SES delivery event flips record — observable and retryable",
+        "CloudWatch alarms on error rate, latency, DLQ depth → SNS → email on-call notification"
+      ],
+      "tradeoffs": [
+        "No multi-AZ compute redundancy (Lambda is regional but single invocation path); DynamoDB is regionally durable",
+        "No read replica or caching layer — repeated order-status reads hit DynamoDB directly",
+        "SES delivery events routed via Lambda (simple but adds a small hop); no dedicated notification microservice",
+        "Observability: logs + key alarms only; no distributed tracing dashboard or SLO alarms"
+      ],
+      "costDrivers": [
+        {
+          "service": "CloudFront",
+          "unit": "$/GB transferred",
+          "estimateRange": "$0.043–$0.425/mo",
+          "note": "Data transfer out to internet, first 10TB/month tier (North America). First 1TB/month is free."
+        },
+        {
+          "service": "CloudFront",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.075–$0.750/mo",
+          "note": "HTTPS requests ($0.0075 per 10,000). North America/Europe."
+        },
+        {
+          "service": "API Gateway",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.350–$3.50/mo",
+          "note": "REST API on-demand ($3.50 per 1M, first 333M tier). HTTP API is cheaper (~$0.001 per 1k / $1.00 per 1M)."
+        },
+        {
+          "service": "Lambda",
+          "unit": "$/GB-second",
+          "estimateRange": "$0.167–$1.67/mo",
+          "note": "Compute duration: $0.0000166667 per GB-second (x86). Multiply by memoryGB x durationSeconds per invocation."
+        },
+        {
+          "service": "Lambda",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.020–$0.200/mo",
+          "note": "On-demand list price ($0.20 per 1M requests). Excludes Free Tier."
+        },
+        {
+          "service": "SQS",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.040–$0.400/mo",
+          "note": "Standard queue requests ($0.40 per 1M). First 1M/month free. FIFO is $0.50 per 1M."
+        },
+        {
+          "service": "DynamoDB",
+          "unit": "per 1k read units",
+          "estimateRange": "$0.013–$0.125/mo",
+          "note": "On-demand read request units ($0.125 per 1M RRU). 1 RRU = 1 strongly-consistent read up to 4KB."
+        },
+        {
+          "service": "DynamoDB",
+          "unit": "per 1k write units",
+          "estimateRange": "$0.063–$0.625/mo",
+          "note": "On-demand write request units ($0.625 per 1M WRU). 1 WRU = 1 write up to 1KB."
+        },
+        {
+          "service": "SES",
+          "unit": "per 1k requests",
+          "estimateRange": "$10.00–$100.00/mo",
+          "note": "Email send: $0.10 per 1,000 emails (content). Attachment/data transfer billed separately."
+        },
+        {
+          "service": "CloudWatch Logs",
+          "unit": "$/GB ingested",
+          "estimateRange": "$0.010–$0.100/mo",
+          "note": "CloudWatch Logs ingestion $0.50/GB (first 10GB/mo free in some accounts). Archival storage is cheaper; Insights queries extra."
+        },
+        {
+          "service": "SNS",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.050–$0.500/mo",
+          "note": "Standard topic API requests ($0.50 per 1M). Delivery (HTTP/SMS/email) priced separately."
+        }
+      ]
+    },
+    {
+      "name": "balanced",
+      "summary": "Adds SQS FIFO option for ordering guarantees, SNS fan-out to decouple fulfillment side-effects, enhanced observability (X-Ray Service Map + CloudWatch dashboard + Slack alerts), and DynamoDB global table preparation (same region, multi-AZ implicit). Reserved concurrency tuned up.",
+      "nodes": [
+        {
+          "id": "cf",
+          "awsService": "CloudFront",
+          "role": "edge CDN + WAF",
+          "security": [
+            "TLS",
+            "WAF managed rules",
+            "rate-based rule",
+            "Shield Standard",
+            "access logging"
+          ]
+        },
+        {
+          "id": "apigw",
+          "awsService": "API Gateway",
+          "role": "checkout REST endpoint",
+          "security": [
+            "TLS",
+            "resource policy",
+            "throttling 1000 rps",
+            "least-priv role"
+          ]
+        },
+        {
+          "id": "checkout_fn",
+          "awsService": "Lambda",
+          "role": "checkout ingest handler",
+          "security": [
+            "least-priv role",
+            "reserved concurrency 300",
+            "Secrets Manager ref",
+            "X-Ray traced"
+          ]
+        },
+        {
+          "id": "order_queue",
+          "awsService": "SQS",
+          "role": "order work queue",
+          "security": [
+            "SSE-KMS",
+            "DLQ",
+            "visibility timeout 30s",
+            "maxReceiveCount 3"
+          ]
+        },
+        {
+          "id": "order_dlq",
+          "awsService": "SQS",
+          "role": "fulfillment dead-letter queue",
+          "security": [
+            "SSE-KMS",
+            "alarm on depth > 0"
+          ]
+        },
+        {
+          "id": "fulfill_fn",
+          "awsService": "Lambda",
+          "role": "fulfillment worker",
+          "security": [
+            "least-priv role",
+            "reserved concurrency 150",
+            "idempotent consumer",
+            "X-Ray traced"
+          ]
+        },
+        {
+          "id": "orders_table",
+          "awsService": "DynamoDB",
+          "role": "order + delivery records",
+          "security": [
+            "SSE-KMS CMK",
+            "on-demand capacity",
+            "PITR enabled",
+            "least-priv role"
+          ]
+        },
+        {
+          "id": "ses",
+          "awsService": "SES",
+          "role": "transactional email sender",
+          "security": [
+            "TLS",
+            "least-priv role",
+            "bounce/complaint events"
+          ]
+        },
+        {
+          "id": "cw_logs",
+          "awsService": "CloudWatch Logs",
+          "role": "centralized log sink",
+          "security": [
+            "retention 30d",
+            "KMS encrypted"
+          ]
+        },
+        {
+          "id": "cw_alarms",
+          "awsService": "CloudWatch",
+          "role": "golden-signal alarms",
+          "security": [
+            "latency",
+            "error rate",
+            "DLQ depth",
+            "throttles"
+          ]
+        },
+        {
+          "id": "ops_sns",
+          "awsService": "SNS",
+          "role": "ops alert topic",
+          "security": [
+            "SSE",
+            "least-priv publish"
+          ]
+        },
+        {
+          "id": "ops_email",
+          "awsService": "SES",
+          "role": "on-call email subscription",
+          "security": [
+            "TLS"
+          ]
+        },
+        {
+          "id": "cloudtrail",
+          "awsService": "CloudTrail",
+          "role": "audit trail",
+          "security": [
+            "management + data events",
+            "S3 log bucket SSE-KMS",
+            "integrity validation"
+          ]
+        },
+        {
+          "id": "fulfill_sns",
+          "awsService": "SNS",
+          "role": "fulfillment event fan-out",
+          "security": [
+            "SSE-KMS",
+            "least-priv publish",
+            "DLQ per subscription"
+          ]
+        },
+        {
+          "id": "notif_fn",
+          "awsService": "Lambda",
+          "role": "notification dispatcher",
+          "security": [
+            "least-priv role",
+            "idempotent consumer",
+            "reserved concurrency 30",
+            "X-Ray traced"
+          ]
+        },
+        {
+          "id": "inventory_fn",
+          "awsService": "Lambda",
+          "role": "inventory update worker",
+          "security": [
+            "least-priv role",
+            "idempotent consumer",
+            "reserved concurrency 30",
+            "X-Ray traced"
+          ]
+        },
+        {
+          "id": "cw_dashboard",
+          "awsService": "CloudWatch",
+          "role": "ops dashboard (golden signals)",
+          "security": [
+            "read-only IAM",
+            "retention 90d"
+          ]
+        },
+        {
+          "id": "xray",
+          "awsService": "AWS X-Ray",
+          "role": "distributed trace aggregator",
+          "security": [
+            "least-priv role",
+            "encryption at rest"
+          ]
+        },
+        {
+          "id": "ops_slack",
+          "awsService": "SNS",
+          "role": "Slack webhook subscription",
+          "security": [
+            "HTTPS endpoint",
+            "least-priv publish"
+          ]
+        }
+      ],
+      "edges": [
+        {
+          "from": "client",
+          "to": "cf",
+          "payload": "HTTPS checkout POST / status GET",
+          "protocol": "HTTPS"
+        },
+        {
+          "from": "cf",
+          "to": "apigw",
+          "payload": "forwarded HTTPS request",
+          "protocol": "HTTPS"
+        },
+        {
+          "from": "apigw",
+          "to": "checkout_fn",
+          "payload": "order JSON payload",
+          "protocol": "Lambda invoke"
+        },
+        {
+          "from": "checkout_fn",
+          "to": "order_queue",
+          "payload": "order JSON message",
+          "protocol": "SQS SendMessage"
+        },
+        {
+          "from": "checkout_fn",
+          "to": "orders_table",
+          "payload": "order record (status=PENDING)",
+          "protocol": "DynamoDB PutItem (conditional)"
+        },
+        {
+          "from": "order_queue",
+          "to": "fulfill_fn",
+          "payload": "order JSON message",
+          "protocol": "SQS event trigger"
+        },
+        {
+          "from": "order_queue",
+          "to": "order_dlq",
+          "payload": "poison order message (maxReceiveCount exceeded)",
+          "protocol": "SQS redrive"
+        },
+        {
+          "from": "fulfill_fn",
+          "to": "orders_table",
+          "payload": "order update (status=FULFILLED, delivery record)",
+          "protocol": "DynamoDB UpdateItem (conditional on orderId)"
+        },
+        {
+          "from": "ses",
+          "to": "orders_table",
+          "payload": "delivery event (bounce/complaint/delivered)",
+          "protocol": "SES event → Lambda → DynamoDB"
+        },
+        {
+          "from": "checkout_fn",
+          "to": "cw_logs",
+          "payload": "structured ingest logs",
+          "protocol": "CloudWatch Logs API"
+        },
+        {
+          "from": "fulfill_fn",
+          "to": "cw_logs",
+          "payload": "structured fulfillment logs",
+          "protocol": "CloudWatch Logs API"
+        },
+        {
+          "from": "cw_logs",
+          "to": "cw_alarms",
+          "payload": "metric filters (errors, latency, throttles)",
+          "protocol": "CloudWatch Metrics"
+        },
+        {
+          "from": "order_dlq",
+          "to": "cw_alarms",
+          "payload": "DLQ depth metric",
+          "protocol": "CloudWatch Metrics"
+        },
+        {
+          "from": "cw_alarms",
+          "to": "ops_sns",
+          "payload": "alarm state change notification",
+          "protocol": "SNS Publish"
+        },
+        {
+          "from": "ops_sns",
+          "to": "ops_email",
+          "payload": "alert email",
+          "protocol": "HTTPS/SMTP"
+        },
+        {
+          "from": "fulfill_fn",
+          "to": "fulfill_sns",
+          "payload": "OrderFulfilled event JSON",
+          "protocol": "SNS Publish"
+        },
+        {
+          "from": "fulfill_sns",
+          "to": "notif_fn",
+          "payload": "OrderFulfilled event (notification sub)",
+          "protocol": "SQS event trigger"
+        },
+        {
+          "from": "fulfill_sns",
+          "to": "inventory_fn",
+          "payload": "OrderFulfilled event (inventory sub)",
+          "protocol": "SQS event trigger"
+        },
+        {
+          "from": "notif_fn",
+          "to": "ses",
+          "payload": "order confirmation email request",
+          "protocol": "HTTPS"
+        },
+        {
+          "from": "xray",
+          "to": "cw_dashboard",
+          "payload": "trace segments + service map",
+          "protocol": "X-Ray API"
+        },
+        {
+          "from": "cw_alarms",
+          "to": "ops_slack",
+          "payload": "critical alarm state change",
+          "protocol": "HTTPS webhook"
+        }
+      ],
+      "delta": [
+        "SNS fan-out: fulfill_fn publishes OrderFulfilled; notif_fn + inventory_fn subscribe independently — decoupled side-effects",
+        "Each SNS subscription backed by its own SQS queue + DLQ for per-consumer retry isolation",
+        "X-Ray Service Map enabled across all Lambdas for distributed tracing",
+        "CloudWatch dashboard added for golden-signal visibility",
+        "Slack webhook added to ops_sns for critical alarm path alongside email",
+        "Lambda reserved concurrency scaled up (checkout=300, fulfillment=150) for higher sustained load",
+        "DynamoDB remains on-demand (multi-AZ durable by default in region)"
+      ],
+      "tradeoffs": [
+        "Higher Lambda concurrency limits increase cost at sustained load vs budget",
+        "SNS + two subscriber queues add operational surface vs single queue; justified by fan-out isolation",
+        "Still single-region; no cross-region failover or replica",
+        "No provisioned concurrency — cold starts possible under sudden burst (acceptable at <500k/mo)"
+      ],
+      "costDrivers": [
+        {
+          "service": "CloudFront",
+          "unit": "$/GB transferred",
+          "estimateRange": "$0.043–$0.425/mo",
+          "note": "Data transfer out to internet, first 10TB/month tier (North America). First 1TB/month is free."
+        },
+        {
+          "service": "CloudFront",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.075–$0.750/mo",
+          "note": "HTTPS requests ($0.0075 per 10,000). North America/Europe."
+        },
+        {
+          "service": "API Gateway",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.350–$3.50/mo",
+          "note": "REST API on-demand ($3.50 per 1M, first 333M tier). HTTP API is cheaper (~$0.001 per 1k / $1.00 per 1M)."
+        },
+        {
+          "service": "Lambda",
+          "unit": "$/GB-second",
+          "estimateRange": "$0.167–$1.67/mo",
+          "note": "Compute duration: $0.0000166667 per GB-second (x86). Multiply by memoryGB x durationSeconds per invocation."
+        },
+        {
+          "service": "Lambda",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.020–$0.200/mo",
+          "note": "On-demand list price ($0.20 per 1M requests). Excludes Free Tier."
+        },
+        {
+          "service": "SQS",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.040–$0.400/mo",
+          "note": "Standard queue requests ($0.40 per 1M). First 1M/month free. FIFO is $0.50 per 1M."
+        },
+        {
+          "service": "DynamoDB",
+          "unit": "per 1k read units",
+          "estimateRange": "$0.013–$0.125/mo",
+          "note": "On-demand read request units ($0.125 per 1M RRU). 1 RRU = 1 strongly-consistent read up to 4KB."
+        },
+        {
+          "service": "DynamoDB",
+          "unit": "per 1k write units",
+          "estimateRange": "$0.063–$0.625/mo",
+          "note": "On-demand write request units ($0.625 per 1M WRU). 1 WRU = 1 write up to 1KB."
+        },
+        {
+          "service": "SES",
+          "unit": "per 1k requests",
+          "estimateRange": "$10.00–$100.00/mo",
+          "note": "Email send: $0.10 per 1,000 emails (content). Attachment/data transfer billed separately."
+        },
+        {
+          "service": "CloudWatch Logs",
+          "unit": "$/GB ingested",
+          "estimateRange": "$0.010–$0.100/mo",
+          "note": "CloudWatch Logs ingestion $0.50/GB (first 10GB/mo free in some accounts). Archival storage is cheaper; Insights queries extra."
+        },
+        {
+          "service": "SNS",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.050–$0.500/mo",
+          "note": "Standard topic API requests ($0.50 per 1M). Delivery (HTTP/SMS/email) priced separately."
+        },
+        {
+          "service": "X-Ray",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.500–$5.00/mo",
+          "note": "X-Ray traces: $5.00 per 1M traces recorded (first 100k/mo free)."
+        }
+      ]
+    },
+    {
+      "name": "resilient",
+      "summary": "Adds DynamoDB Global Tables (multi-region replication), EventBridge for cross-service event bus, SQS FIFO for ordered fulfillment, Lambda provisioned concurrency to eliminate cold starts, anomaly detection alarms, SLO alarms, and PagerDuty escalation. Active-active ingest in two regions behind Route 53 latency routing.",
+      "nodes": [
+        {
+          "id": "cf",
+          "awsService": "CloudFront",
+          "role": "edge CDN + WAF",
+          "security": [
+            "TLS",
+            "WAF managed rules",
+            "rate-based rule",
+            "Shield Standard",
+            "access logging"
+          ]
+        },
+        {
+          "id": "apigw",
+          "awsService": "API Gateway",
+          "role": "checkout REST endpoint",
+          "security": [
+            "TLS",
+            "resource policy",
+            "throttling 1000 rps",
+            "least-priv role"
+          ]
+        },
+        {
+          "id": "checkout_fn",
+          "awsService": "Lambda",
+          "role": "checkout ingest handler",
+          "security": [
+            "least-priv role",
+            "provisioned concurrency 50",
+            "Secrets Manager ref",
+            "X-Ray traced"
+          ]
+        },
+        {
+          "id": "order_queue",
+          "awsService": "SQS",
+          "role": "order work queue (FIFO)",
+          "security": [
+            "SSE-KMS",
+            "DLQ",
+            "FIFO dedup",
+            "visibility timeout 30s",
+            "maxReceiveCount 3"
+          ]
+        },
+        {
+          "id": "order_dlq",
+          "awsService": "SQS",
+          "role": "fulfillment dead-letter queue",
+          "security": [
+            "SSE-KMS",
+            "alarm on depth > 0"
+          ]
+        },
+        {
+          "id": "fulfill_fn",
+          "awsService": "Lambda",
+          "role": "fulfillment worker",
+          "security": [
+            "least-priv role",
+            "provisioned concurrency 25",
+            "idempotent consumer",
+            "X-Ray traced"
+          ]
+        },
+        {
+          "id": "orders_table",
+          "awsService": "DynamoDB",
+          "role": "order records (Global Table)",
+          "security": [
+            "SSE-KMS CMK",
+            "Global Tables multi-region",
+            "PITR enabled",
+            "least-priv role"
+          ]
+        },
+        {
+          "id": "ses",
+          "awsService": "SES",
+          "role": "transactional email sender",
+          "security": [
+            "TLS",
+            "least-priv role",
+            "bounce/complaint events"
+          ]
+        },
+        {
+          "id": "cw_logs",
+          "awsService": "CloudWatch Logs",
+          "role": "centralized log sink",
+          "security": [
+            "retention 30d",
+            "KMS encrypted"
+          ]
+        },
+        {
+          "id": "cw_alarms",
+          "awsService": "CloudWatch",
+          "role": "golden-signal alarms",
+          "security": [
+            "latency",
+            "error rate",
+            "DLQ depth",
+            "throttles"
+          ]
+        },
+        {
+          "id": "ops_sns",
+          "awsService": "SNS",
+          "role": "ops alert topic",
+          "security": [
+            "SSE",
+            "least-priv publish"
+          ]
+        },
+        {
+          "id": "ops_email",
+          "awsService": "SES",
+          "role": "on-call email subscription",
+          "security": [
+            "TLS"
+          ]
+        },
+        {
+          "id": "cloudtrail",
+          "awsService": "CloudTrail",
+          "role": "audit trail",
+          "security": [
+            "management + data events",
+            "S3 log bucket SSE-KMS",
+            "integrity validation"
+          ]
+        },
+        {
+          "id": "fulfill_sns",
+          "awsService": "SNS",
+          "role": "fulfillment event fan-out",
+          "security": [
+            "SSE-KMS",
+            "least-priv publish",
+            "DLQ per subscription"
+          ]
+        },
+        {
+          "id": "notif_fn",
+          "awsService": "Lambda",
+          "role": "notification dispatcher",
+          "security": [
+            "least-priv role",
+            "idempotent consumer",
+            "reserved concurrency 30",
+            "X-Ray traced"
+          ]
+        },
+        {
+          "id": "inventory_fn",
+          "awsService": "Lambda",
+          "role": "inventory update worker",
+          "security": [
+            "least-priv role",
+            "idempotent consumer",
+            "reserved concurrency 30",
+            "X-Ray traced"
+          ]
+        },
+        {
+          "id": "cw_dashboard",
+          "awsService": "CloudWatch",
+          "role": "ops dashboard (golden signals)",
+          "security": [
+            "read-only IAM",
+            "retention 90d"
+          ]
+        },
+        {
+          "id": "xray",
+          "awsService": "AWS X-Ray",
+          "role": "distributed trace aggregator",
+          "security": [
+            "least-priv role",
+            "encryption at rest"
+          ]
+        },
+        {
+          "id": "ops_slack",
+          "awsService": "SNS",
+          "role": "Slack webhook subscription",
+          "security": [
+            "HTTPS endpoint",
+            "least-priv publish"
+          ]
+        },
+        {
+          "id": "r53",
+          "awsService": "Route 53",
+          "role": "latency-based global routing",
+          "security": [
+            "health checks",
+            "failover policy",
+            "DNSSEC"
+          ]
+        },
+        {
+          "id": "cf_secondary",
+          "awsService": "CloudFront",
+          "role": "secondary region edge",
+          "security": [
+            "TLS",
+            "WAF managed rules",
+            "rate-based rule",
+            "Shield Advanced",
+            "access logging"
+          ]
+        },
+        {
+          "id": "apigw_secondary",
+          "awsService": "API Gateway",
+          "role": "secondary region checkout endpoint",
+          "security": [
+            "TLS",
+            "resource policy",
+            "throttling 1000 rps",
+            "least-priv role"
+          ]
+        },
+        {
+          "id": "eb_bus",
+          "awsService": "EventBridge",
+          "role": "cross-service event bus",
+          "security": [
+            "SSE-KMS",
+            "resource policy",
+            "least-priv publish",
+            "archive + replay"
+          ]
+        },
+        {
+          "id": "ops_pagerduty",
+          "awsService": "SNS",
+          "role": "PagerDuty escalation endpoint",
+          "security": [
+            "HTTPS endpoint",
+            "least-priv publish"
+          ]
+        },
+        {
+          "id": "cw_anomaly",
+          "awsService": "CloudWatch",
+          "role": "anomaly detection + SLO alarms",
+          "security": [
+            "SLO error budget alarms",
+            "anomaly band alarms"
+          ]
+        }
+      ],
+      "edges": [
+        {
+          "from": "client",
+          "to": "cf",
+          "payload": "HTTPS checkout POST / status GET",
+          "protocol": "HTTPS"
+        },
+        {
+          "from": "cf",
+          "to": "apigw",
+          "payload": "forwarded HTTPS request",
+          "protocol": "HTTPS"
+        },
+        {
+          "from": "apigw",
+          "to": "checkout_fn",
+          "payload": "order JSON payload",
+          "protocol": "Lambda invoke"
+        },
+        {
+          "from": "checkout_fn",
+          "to": "order_queue",
+          "payload": "order JSON message",
+          "protocol": "SQS SendMessage"
+        },
+        {
+          "from": "checkout_fn",
+          "to": "orders_table",
+          "payload": "order record (status=PENDING)",
+          "protocol": "DynamoDB PutItem (conditional)"
+        },
+        {
+          "from": "order_queue",
+          "to": "fulfill_fn",
+          "payload": "order JSON message",
+          "protocol": "SQS event trigger"
+        },
+        {
+          "from": "order_queue",
+          "to": "order_dlq",
+          "payload": "poison order message (maxReceiveCount exceeded)",
+          "protocol": "SQS redrive"
+        },
+        {
+          "from": "fulfill_fn",
+          "to": "orders_table",
+          "payload": "order update (status=FULFILLED, delivery record)",
+          "protocol": "DynamoDB UpdateItem (conditional on orderId)"
+        },
+        {
+          "from": "ses",
+          "to": "orders_table",
+          "payload": "delivery event (bounce/complaint/delivered)",
+          "protocol": "SES event → Lambda → DynamoDB"
+        },
+        {
+          "from": "checkout_fn",
+          "to": "cw_logs",
+          "payload": "structured ingest logs",
+          "protocol": "CloudWatch Logs API"
+        },
+        {
+          "from": "fulfill_fn",
+          "to": "cw_logs",
+          "payload": "structured fulfillment logs",
+          "protocol": "CloudWatch Logs API"
+        },
+        {
+          "from": "cw_logs",
+          "to": "cw_alarms",
+          "payload": "metric filters (errors, latency, throttles)",
+          "protocol": "CloudWatch Metrics"
+        },
+        {
+          "from": "order_dlq",
+          "to": "cw_alarms",
+          "payload": "DLQ depth metric",
+          "protocol": "CloudWatch Metrics"
+        },
+        {
+          "from": "cw_alarms",
+          "to": "ops_sns",
+          "payload": "alarm state change notification",
+          "protocol": "SNS Publish"
+        },
+        {
+          "from": "ops_sns",
+          "to": "ops_email",
+          "payload": "alert email",
+          "protocol": "HTTPS/SMTP"
+        },
+        {
+          "from": "fulfill_sns",
+          "to": "notif_fn",
+          "payload": "OrderFulfilled event (notification sub)",
+          "protocol": "SQS event trigger"
+        },
+        {
+          "from": "fulfill_sns",
+          "to": "inventory_fn",
+          "payload": "OrderFulfilled event (inventory sub)",
+          "protocol": "SQS event trigger"
+        },
+        {
+          "from": "notif_fn",
+          "to": "ses",
+          "payload": "order confirmation email request",
+          "protocol": "HTTPS"
+        },
+        {
+          "from": "xray",
+          "to": "cw_dashboard",
+          "payload": "trace segments + service map",
+          "protocol": "X-Ray API"
+        },
+        {
+          "from": "cw_alarms",
+          "to": "ops_slack",
+          "payload": "critical alarm state change",
+          "protocol": "HTTPS webhook"
+        },
+        {
+          "from": "client",
+          "to": "r53",
+          "payload": "DNS query for checkout API",
+          "protocol": "DNS"
+        },
+        {
+          "from": "r53",
+          "to": "cf",
+          "payload": "primary region traffic",
+          "protocol": "HTTPS"
+        },
+        {
+          "from": "r53",
+          "to": "cf_secondary",
+          "payload": "secondary region traffic (latency/failover)",
+          "protocol": "HTTPS"
+        },
+        {
+          "from": "cf_secondary",
+          "to": "apigw_secondary",
+          "payload": "forwarded HTTPS request",
+          "protocol": "HTTPS"
+        },
+        {
+          "from": "apigw_secondary",
+          "to": "checkout_fn",
+          "payload": "order JSON payload",
+          "protocol": "Lambda invoke"
+        },
+        {
+          "from": "fulfill_fn",
+          "to": "eb_bus",
+          "payload": "OrderFulfilled event JSON",
+          "protocol": "EventBridge PutEvents"
+        },
+        {
+          "from": "eb_bus",
+          "to": "notif_fn",
+          "payload": "OrderFulfilled event (notification rule)",
+          "protocol": "EventBridge → SQS → Lambda"
+        },
+        {
+          "from": "eb_bus",
+          "to": "inventory_fn",
+          "payload": "OrderFulfilled event (inventory rule)",
+          "protocol": "EventBridge → SQS → Lambda"
+        },
+        {
+          "from": "cw_anomaly",
+          "to": "ops_sns",
+          "payload": "anomaly / SLO breach alarm",
+          "protocol": "SNS Publish"
+        },
+        {
+          "from": "ops_sns",
+          "to": "ops_pagerduty",
+          "payload": "P1 incident escalation",
+          "protocol": "HTTPS webhook"
+        }
+      ],
+      "delta": [
+        "Active-active multi-region: Route 53 latency routing + health checks across two CloudFront + API Gateway + Lambda stacks",
+        "DynamoDB Global Tables: multi-region replication replaces single-region on-demand table",
+        "SQS standard → FIFO: ordered fulfillment with dedup ID; prevents out-of-order double-fulfillment across regions",
+        "EventBridge replaces SNS fan-out: archive + replay capability for event replay after outage; rules decouple consumers",
+        "Lambda provisioned concurrency (checkout=50, fulfill=25): eliminates cold-start latency tail under burst",
+        "CloudWatch anomaly detection + SLO error-budget alarms added alongside threshold alarms",
+        "PagerDuty escalation endpoint added to ops_sns for P1 incidents; Slack remains for warnings",
+        "Shield Advanced on both CloudFront distributions for DDoS response + cost protection"
+      ],
+      "tradeoffs": [
+        "Global Tables + FIFO SQS + EventBridge + provisioned concurrency significantly increase cost vs balanced",
+        "Active-active multi-region adds operational complexity (conflict resolution policy on Global Tables must be defined)",
+        "EventBridge has slightly higher latency than direct SNS for fan-out; justified by archive/replay for DR",
+        "Provisioned concurrency wastes capacity during off-peak; consider scheduled scaling for predictable traffic patterns"
+      ],
+      "costDrivers": [
+        {
+          "service": "CloudFront",
+          "unit": "$/GB transferred",
+          "estimateRange": "$0.043–$0.425/mo",
+          "note": "Data transfer out to internet, first 10TB/month tier (North America). First 1TB/month is free."
+        },
+        {
+          "service": "CloudFront",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.075–$0.750/mo",
+          "note": "HTTPS requests ($0.0075 per 10,000). North America/Europe."
+        },
+        {
+          "service": "API Gateway",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.350–$3.50/mo",
+          "note": "REST API on-demand ($3.50 per 1M, first 333M tier). HTTP API is cheaper (~$0.001 per 1k / $1.00 per 1M)."
+        },
+        {
+          "service": "Lambda",
+          "unit": "$/GB-second",
+          "estimateRange": "$0.167–$1.67/mo",
+          "note": "Compute duration: $0.0000166667 per GB-second (x86). Multiply by memoryGB x durationSeconds per invocation."
+        },
+        {
+          "service": "Lambda",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.020–$0.200/mo",
+          "note": "On-demand list price ($0.20 per 1M requests). Excludes Free Tier."
+        },
+        {
+          "service": "SQS",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.040–$0.400/mo",
+          "note": "Standard queue requests ($0.40 per 1M). First 1M/month free. FIFO is $0.50 per 1M."
+        },
+        {
+          "service": "DynamoDB",
+          "unit": "per 1k read units",
+          "estimateRange": "$0.013–$0.125/mo",
+          "note": "On-demand read request units ($0.125 per 1M RRU). 1 RRU = 1 strongly-consistent read up to 4KB."
+        },
+        {
+          "service": "DynamoDB",
+          "unit": "per 1k write units",
+          "estimateRange": "$0.063–$0.625/mo",
+          "note": "On-demand write request units ($0.625 per 1M WRU). 1 WRU = 1 write up to 1KB."
+        },
+        {
+          "service": "SES",
+          "unit": "per 1k requests",
+          "estimateRange": "$10.00–$100.00/mo",
+          "note": "Email send: $0.10 per 1,000 emails (content). Attachment/data transfer billed separately."
+        },
+        {
+          "service": "CloudWatch Logs",
+          "unit": "$/GB ingested",
+          "estimateRange": "$0.010–$0.100/mo",
+          "note": "CloudWatch Logs ingestion $0.50/GB (first 10GB/mo free in some accounts). Archival storage is cheaper; Insights queries extra."
+        },
+        {
+          "service": "SNS",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.050–$0.500/mo",
+          "note": "Standard topic API requests ($0.50 per 1M). Delivery (HTTP/SMS/email) priced separately."
+        },
+        {
+          "service": "X-Ray",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.500–$5.00/mo",
+          "note": "X-Ray traces: $5.00 per 1M traces recorded (first 100k/mo free)."
+        },
+        {
+          "service": "EventBridge",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.100–$1.00/mo",
+          "note": "Custom event-bus events: $1.00 per 1M events published. Pipes/schema registry priced separately."
+        }
+      ]
+    }
+  ],
+  "keyDecisions": [
+    {
+      "decision": "Compute model for checkout ingest and fulfillment worker",
+      "chosen": "Lambda behind API Gateway (serverless-no-VPC)",
+      "alternativesConsidered": [
+        "Fargate + ALB + ECS",
+        "EC2 ASG behind ALB"
+      ],
+      "rationale": "Cost optimization + reliability: ~$0 idle floor, scales to burst automatically, no always-on NAT/ALB/instance bill at <50k/mo traffic."
+    },
+    {
+      "decision": "Primary datastore for order records",
+      "chosen": "DynamoDB on-demand",
+      "alternativesConsidered": [
+        "Aurora Serverless v2 (Postgres)",
+        "RDS Postgres single-AZ"
+      ],
+      "rationale": "Performance efficiency + cost: on-demand capacity absorbs checkout spikes without pre-provisioning; no VPC/NAT required; key-based order lookup fits the access pattern."
+    },
+    {
+      "decision": "Async decoupling mechanism between checkout and fulfillment",
+      "chosen": "SQS standard queue with DLQ",
+      "alternativesConsidered": [
+        "SNS direct invoke",
+        "EventBridge pipe",
+        "Kinesis Data Streams"
+      ],
+      "rationale": "Reliability: SQS at-least-once delivery with configurable visibility timeout and DLQ is the lowest-complexity durable buffer; idempotent consumer handles redelivery."
+    },
+    {
+      "decision": "Idempotency for fulfillment worker",
+      "chosen": "DynamoDB conditional write on orderId (idempotency key)",
+      "alternativesConsidered": [
+        "Lambda Powertools idempotency utility (DynamoDB-backed)",
+        "SQS FIFO dedup ID"
+      ],
+      "rationale": "Reliability: a conditional PutItem on orderId makes fulfillment processing exactly-once even under SQS redelivery, with no extra service dependency."
+    },
+    {
+      "decision": "Order status notification to end user",
+      "chosen": "SES transactional email + per-order DynamoDB delivery record (outbox pattern)",
+      "alternativesConsidered": [
+        "SNS email subscription",
+        "bare SES fire-and-forget"
+      ],
+      "rationale": "Reliability: outbox (write pending→publish→flip delivered) gives observable, retryable delivery status and prevents silent loss on exactly-once billing transitions."
+    }
+  ],
+  "securityFloor": [
+    "Encrypt all data at rest (KMS / service-native SSE), preferring customer-managed keys.",
+    "Enforce TLS in transit everywhere; terminate HTTPS at the edge and reject plaintext.",
+    "Least-privilege IAM: scoped per-service roles, no wildcards, no long-lived access keys.",
+    "Enable S3 Block Public Access account-wide so no bucket or object can be made public.",
+    "Keep the data tier private: VPC-bound stores in private subnets with no public route; managed/serverless stores (DynamoDB/S3) are already private via IAM and need no VPC or NAT.",
+    "Store secrets in AWS Secrets Manager / SSM Parameter Store — never in code or images.",
+    "Front public endpoints with CloudFront + AWS WAF (managed + rate-based rules); Shield Standard for L3/L4.",
+    "Enable CloudTrail plus S3/CloudFront/ALB access logs and VPC Flow Logs for audit."
+  ],
+  "recommendedTier": "balanced",
+  "recommendationRationale": ""
+}

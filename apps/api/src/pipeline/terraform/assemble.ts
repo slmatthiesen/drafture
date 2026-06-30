@@ -91,8 +91,11 @@ const sectionHeading = (section: string): string =>
   `# ${section.toUpperCase()}\n` +
   `# =============================================================================`;
 
-export function assembleTier(tier: Tier, opts: { region: string }): AssembledTerraform {
-  const ctx = buildCtx(tier, opts.region);
+export function assembleTier(
+  tier: Tier,
+  opts: { region: string; compliance?: boolean },
+): AssembledTerraform {
+  const ctx = buildCtx(tier, opts.region, opts.compliance);
 
   const blocks: HclBlock[] = [...emitBaseline(ctx), ...emitNetwork(ctx)];
   const unsupported: string[] = [];

@@ -46,7 +46,7 @@ async function buildHarness(fake: Fake, configOverrides: Record<string, string> 
   const stores = createStores(openTempDb());
   const lines: string[] = [];
   const sink: TelemetrySink = (line) => lines.push(line);
-  const ctx = buildAppContext(testConfig(configOverrides), { provider: fake.provider, stores, telemetrySink: sink });
+  const ctx = await buildAppContext(testConfig(configOverrides), { provider: fake.provider, stores, telemetrySink: sink });
   const app = Fastify({ logger: false, trustProxy: true });
   await registerApiRoutes(app, ctx);
   return { app, lines };

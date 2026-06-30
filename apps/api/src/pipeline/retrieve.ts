@@ -79,7 +79,7 @@ export async function retrieveSimilarDesigns(input: {
   }
 
   const topK = Math.max(config.SEMANTIC_GROUND_TOPK, 1);
-  const matches = stores.designVectors.search(queryVector, embedder.model, topK);
+  const matches = await stores.designVectors.search(queryVector, embedder.model, topK);
   if (matches.length === 0) return EMPTY;
 
   const topSimilarity = matches[0]?.similarity ?? 0;
@@ -87,7 +87,7 @@ export async function retrieveSimilarDesigns(input: {
   // Instant serve: the single closest design, only if it clears RETURN_THRESHOLD.
   if (topSimilarity >= config.SEMANTIC_RETURN_THRESHOLD) {
     const best = matches[0]!;
-    const design = loadDesign(stores, best.id, best.source, best.similarity);
+    const design = await loadDesign(stores, best.id, best.source, best.similarity);
     if (design) return { instant: design, exemplars: [], topSimilarity };
     // Body unreadable (deleted/corrupt) — fall through to grounding/normal gen.
   }
@@ -97,25 +97,25 @@ export async function retrieveSimilarDesigns(input: {
   for (const m of matches) {
     if (m.similarity < config.SEMANTIC_GROUND_THRESHOLD) break; // sorted desc — rest are further
     if (m.similarity >= config.SEMANTIC_RETURN_THRESHOLD) continue; // would have been an instant hit
-    const design = loadDesign(stores, m.id, m.source, m.similarity);
+    const design = await loadDesign(stores, m.id, m.source, m.similarity);
     if (design) exemplars.push(design);
   }
   return { instant: null, exemplars, topSimilarity };
 }
 
-function loadDesign(
+async function loadDesign(
   stores: RetrieveStores,
   id: string,
   source: DesignSource,
   similarity: number,
-): SimilarDesign | null {
+): Promise<SimilarDesign | null> {
   try {
     if (source === "curated") {
-      const run = stores.curated.get(id);
+      const run = await stores.curated.get(id);
       if (!run) return null;
       return { id, source, title: run.title, prompt: run.prompt, body: JSON.parse(run.body), similarity };
     }
-    const rec = stores.generations.getById(id);
+    const rec = await stores.generations.getById(id);
     if (!rec || rec.status !== "approved") return null; // never serve a non-public design
     return { id, source, prompt: rec.description, body: JSON.parse(rec.body), similarity };
   } catch {

@@ -32,8 +32,8 @@ const designBody = (tag: string) =>
   });
 
 /** Seed an APPROVED generation + its embedding vector. Returns the id. */
-function seedApproved(stores: Stores, desc: string, vector: number[]): string {
-  const { id } = stores.generations.upsert({
+async function seedApproved(stores: Stores, desc: string, vector: number[]): Promise<string> {
+  const { id } = await stores.generations.upsert({
     promptHash: `ph-${desc}`,
     description: desc,
     answers: [],
@@ -44,8 +44,8 @@ function seedApproved(stores: Stores, desc: string, vector: number[]): string {
     body: designBody(desc),
     clientIp: "1.1.1.1",
   });
-  stores.generations.setStatus(id, "approved");
-  stores.designVectors.upsert({ id, source: "generation", promptHash: `ph-${desc}`, text: desc, vector, model: MODEL });
+  await stores.generations.setStatus(id, "approved");
+  await stores.designVectors.upsert({ id, source: "generation", promptHash: `ph-${desc}`, text: desc, vector, model: MODEL });
   return id;
 }
 
@@ -59,7 +59,7 @@ describe("retrieveSimilarDesigns", () => {
   });
 
   it("serves an instant hit when the nearest design clears RETURN_THRESHOLD", async () => {
-    const id = seedApproved(stores, "a notification system", [1, 0, 0]);
+    const id = await seedApproved(stores, "a notification system", [1, 0, 0]);
     const res = await retrieveSimilarDesigns({
       embedder: fakeEmbedder({ "send me alerts": [1, 0, 0] }), // identical → cosine 1
       stores,
@@ -73,7 +73,7 @@ describe("retrieveSimilarDesigns", () => {
   });
 
   it("returns exemplars (not an instant hit) when similarity is in the grounding band", async () => {
-    seedApproved(stores, "a notification system", [1, 0, 0]);
+    await seedApproved(stores, "a notification system", [1, 0, 0]);
     // cosine([0.85, 0.5267, 0], [1,0,0]) ≈ 0.85 → in [0.82, 0.93)
     const res = await retrieveSimilarDesigns({
       embedder: fakeEmbedder({ "an alerting pipeline": [0.85, 0.5267, 0] }),
@@ -89,7 +89,7 @@ describe("retrieveSimilarDesigns", () => {
   });
 
   it("returns nothing when the nearest design is below GROUND_THRESHOLD", async () => {
-    seedApproved(stores, "a notification system", [1, 0, 0]);
+    await seedApproved(stores, "a notification system", [1, 0, 0]);
     const res = await retrieveSimilarDesigns({
       embedder: fakeEmbedder({ "a video transcoder": [0.5, 0.866, 0] }), // cosine 0.5
       stores,
@@ -102,8 +102,8 @@ describe("retrieveSimilarDesigns", () => {
   });
 
   it("never serves a design that is no longer approved", async () => {
-    const id = seedApproved(stores, "a notification system", [1, 0, 0]);
-    stores.generations.setStatus(id, "hidden"); // crowd-downvoted out of the gallery
+    const id = await seedApproved(stores, "a notification system", [1, 0, 0]);
+    await stores.generations.setStatus(id, "hidden"); // crowd-downvoted out of the gallery
     const res = await retrieveSimilarDesigns({
       embedder: fakeEmbedder({ "send me alerts": [1, 0, 0] }),
       stores,
@@ -116,13 +116,13 @@ describe("retrieveSimilarDesigns", () => {
   });
 
   it("degrades to no retrieval when there is no embedder", async () => {
-    seedApproved(stores, "a notification system", [1, 0, 0]);
+    await seedApproved(stores, "a notification system", [1, 0, 0]);
     const res = await retrieveSimilarDesigns({ embedder: null, stores, config: cfg(), description: "x", answers: [] });
     expect(res).toEqual({ instant: null, exemplars: [], topSimilarity: 0 });
   });
 
   it("is non-fatal on an embedding error (falls through to a normal generation)", async () => {
-    seedApproved(stores, "a notification system", [1, 0, 0]);
+    await seedApproved(stores, "a notification system", [1, 0, 0]);
     const failing: EmbeddingProvider = {
       model: MODEL,
       embed: async () => {
@@ -134,8 +134,8 @@ describe("retrieveSimilarDesigns", () => {
     expect(res.exemplars).toHaveLength(0);
   });
 
-  it("renderExemplars produces a dense reference block with decisions + tiers", () => {
-    seedApproved(stores, "a notification system", [0.85, 0.5267, 0]);
+  it("renderExemplars produces a dense reference block with decisions + tiers", async () => {
+    await seedApproved(stores, "a notification system", [0.85, 0.5267, 0]);
     const out = renderExemplars([
       { id: "x", source: "generation", prompt: "a notification system", body: JSON.parse(designBody("notif")), similarity: 0.85 },
     ]);

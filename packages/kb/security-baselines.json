@@ -1,58 +1,102 @@
 [
   {
     "id": "encrypt-at-rest",
-    "rule": "Encrypt all data at rest using AWS KMS or service-native SSE (S3 SSE-KMS, EBS/RDS/DynamoDB encryption); prefer customer-managed keys for auditable rotation.",
-    "rationale": "Default at-rest encryption protects data if storage media or snapshots are exposed and is required by most compliance baselines.",
-    "summary": "Encrypt all data at rest (KMS / service-native SSE), preferring customer-managed keys.",
-    "source": "https://docs.aws.amazon.com/wellarchitected/latest/security-pillar/protecting-data-at-rest.html"
+    "rule": "Encrypt all data at rest: turn on service-native SSE everywhere (S3 SSE-S3 / SSE-KMS with the AWS-managed key, EBS/RDS/DynamoDB default encryption). This free, AWS-managed-key encryption is the budget floor; a customer-managed CMK (auditable rotation, per-service key policy) is a balanced+ enhancement.",
+    "rationale": "Default at-rest encryption protects data if storage media or snapshots are exposed and is required by most compliance baselines. The AWS-managed key satisfies the baseline at $0; customer-managed CMKs add rotation control and audit at ~$1/key/mo — a robustness step-up, not the floor.",
+    "summary": "Encrypt all data at rest with service-native SSE (AWS-managed keys); customer-managed CMKs are a balanced+ step-up.",
+    "source": "https://docs.aws.amazon.com/wellarchitected/latest/security-pillar/protecting-data-at-rest.html",
+    "tierFloor": "budget",
+    "enhancements": [
+      {
+        "id": "customer-managed-cmk",
+        "tierFloor": "balanced",
+        "summary": "Customer-managed KMS CMKs (per-service key policies, auditable rotation) replacing AWS-managed keys.",
+        "escalatesUnderCompliance": true,
+        "monthlyUsd": [1, 3]
+      }
+    ]
   },
   {
     "id": "encrypt-in-transit",
     "rule": "Enforce TLS for every connection and reject plaintext: terminate HTTPS at CloudFront/ALB/API Gateway and deny non-TLS access with an aws:SecureTransport: false bucket/endpoint policy.",
     "rationale": "TLS-only transport prevents eavesdropping and tampering on data in motion, including between the edge and origin.",
     "summary": "Enforce TLS in transit everywhere; terminate HTTPS at the edge and reject plaintext.",
-    "source": "https://docs.aws.amazon.com/wellarchitected/latest/security-pillar/protecting-data-in-transit.html"
+    "source": "https://docs.aws.amazon.com/wellarchitected/latest/security-pillar/protecting-data-in-transit.html",
+    "tierFloor": "budget"
   },
   {
     "id": "least-privilege-iam",
     "rule": "Grant least-privilege IAM: scoped per-service roles with no wildcard (*) actions/resources, no long-lived access keys, and short-lived role credentials for workloads.",
     "rationale": "Minimal, scoped permissions limit the blast radius of a compromised credential and remove standing long-lived secrets.",
     "summary": "Least-privilege IAM: scoped per-service roles, no wildcards, no long-lived access keys.",
-    "source": "https://docs.aws.amazon.com/IAM/latest/UserGuide/best-practices.html"
+    "source": "https://docs.aws.amazon.com/IAM/latest/UserGuide/best-practices.html",
+    "tierFloor": "budget"
   },
   {
     "id": "s3-block-public-access",
     "rule": "Enable S3 Block Public Access at the account level (and per bucket) so no bucket or object can be made public by ACL or policy.",
     "rationale": "Account-level Block Public Access is the single highest-value guard against the most common AWS data-leak: an accidentally public bucket.",
     "summary": "Enable S3 Block Public Access account-wide so no bucket or object can be made public.",
-    "source": "https://docs.aws.amazon.com/AmazonS3/latest/userguide/access-control-block-public-access.html"
+    "source": "https://docs.aws.amazon.com/AmazonS3/latest/userguide/access-control-block-public-access.html",
+    "tierFloor": "budget"
   },
   {
     "id": "no-public-data-tier",
     "rule": "Keep the data tier off the public internet. Three shapes satisfy this: (a) a SEPARATE VPC-bound store (RDS, ElastiCache, OpenSearch) goes in a private subnet with no public IP or internet route, reached only from app-tier security groups; (b) a managed/serverless store (DynamoDB, S3, Aurora Serverless) is already private — reached over the AWS network via IAM/endpoint policies — and needs NO VPC or NAT gateway, so do not place it in a subnet; (c) a store CO-LOCATED as a process on the app instance (e.g. self-managed Postgres bound to localhost) is not a separate network tier — it is already private behind the host's security group and needs NO private subnet or NAT. Choose the cheapest shape the design's robustness tier justifies; private-subnet + NAT is shape (a) only.",
     "rationale": "Keeping the data tier off the public internet removes direct attack surface. The private subnet is one way to achieve that, not the only way: managed/serverless stores get it from IAM + endpoint policies, and a localhost-bound store on the app box gets it from not being network-exposed at all — so forcing either into a private subnet only adds an always-on NAT bill for no security gain.",
     "summary": "Keep the data tier private: VPC-bound stores in private subnets with no public route; managed/serverless stores (DynamoDB/S3) are already private via IAM and need no VPC or NAT.",
-    "source": "https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_VPC.WorkingWithRDSInstanceinaVPC.html"
+    "source": "https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_VPC.WorkingWithRDSInstanceinaVPC.html",
+    "tierFloor": "budget"
   },
   {
     "id": "secrets-manager",
-    "rule": "Store credentials, API keys, and connection strings in AWS Secrets Manager or SSM Parameter Store (SecureString); never in code, env files in the image, or plaintext config.",
-    "rationale": "Centralized secret storage gives rotation, fine-grained access, and audit, and keeps secrets out of source control and images.",
-    "summary": "Store secrets in AWS Secrets Manager / SSM Parameter Store — never in code or images.",
-    "source": "https://docs.aws.amazon.com/secretsmanager/latest/userguide/intro.html"
+    "rule": "Store credentials, API keys, and connection strings in a managed secret store — never in code, env files in the image, or plaintext config. SSM Parameter Store (SecureString) gives encrypted storage + fine-grained IAM at $0 and is the budget floor; AWS Secrets Manager (managed rotation, ~$0.40/secret/mo) is a balanced+ enhancement when automatic rotation is required.",
+    "rationale": "Centralized secret storage gives fine-grained access and audit and keeps secrets out of source control and images. SSM Parameter Store SecureString satisfies that for free; Secrets Manager adds managed rotation — a robustness step-up, or a budget control under compliance.",
+    "summary": "Store secrets in SSM Parameter Store (SecureString) — never in code or images; Secrets Manager rotation is a balanced+ step-up.",
+    "source": "https://docs.aws.amazon.com/secretsmanager/latest/userguide/intro.html",
+    "tierFloor": "budget",
+    "enhancements": [
+      {
+        "id": "secrets-manager-rotation",
+        "tierFloor": "balanced",
+        "summary": "AWS Secrets Manager with managed rotation, replacing SSM Parameter Store SecureString.",
+        "escalatesUnderCompliance": true,
+        "monthlyUsd": [0.4, 2]
+      }
+    ]
   },
   {
     "id": "edge-protection",
-    "rule": "Front public endpoints with CloudFront plus AWS WAF (managed rule groups + a rate-based rule); AWS Shield Standard applies automatically for L3/L4 DDoS.",
-    "rationale": "An edge WAF with managed and rate-based rules blocks common exploits and volumetric abuse before they reach the origin.",
-    "summary": "Front public endpoints with CloudFront + AWS WAF (managed + rate-based rules); Shield Standard for L3/L4.",
-    "source": "https://docs.aws.amazon.com/waf/latest/developerguide/what-is-aws-waf.html"
+    "rule": "Front public endpoints with CloudFront; AWS Shield Standard applies automatically for L3/L4 DDoS at $0 and CloudFront/API Gateway give basic rate-limiting — that is the budget floor. An AWS WAF web ACL (managed rule groups + a rate-based rule) adds L7 filtering and is a balanced+ enhancement attached with a one-line web_acl_id.",
+    "rationale": "CloudFront + Shield Standard removes direct origin exposure and absorbs volumetric L3/L4 abuse for free. An edge WAF adds L7 managed/rate rules — worth it once there is traffic or threats to filter, and a trivial retrofit (~$8/mo + attach), so it rides the robustness ladder, or enters budget under compliance.",
+    "summary": "Front public endpoints with CloudFront + Shield Standard (free L3/L4); an AWS WAF web ACL (L7 managed + rate rules) is a balanced+ step-up.",
+    "source": "https://docs.aws.amazon.com/waf/latest/developerguide/what-is-aws-waf.html",
+    "tierFloor": "budget",
+    "enhancements": [
+      {
+        "id": "waf-web-acl",
+        "tierFloor": "balanced",
+        "summary": "AWS WAF web ACL (AWS managed rule groups + a rate-based rule) fronting CloudFront/ALB.",
+        "escalatesUnderCompliance": true,
+        "monthlyUsd": [6, 12]
+      }
+    ]
   },
   {
     "id": "audit-and-access-logging",
-    "rule": "Enable CloudTrail (management + relevant data events) and turn on access logging for S3, CloudFront, ALB, and VPC Flow Logs.",
-    "rationale": "Comprehensive audit and access logs are required to detect, investigate, and prove what happened during an incident.",
-    "summary": "Enable CloudTrail plus S3/CloudFront/ALB access logs and VPC Flow Logs for audit.",
-    "source": "https://docs.aws.amazon.com/awscloudtrail/latest/userguide/cloudtrail-user-guide.html"
+    "rule": "Enable CloudTrail and turn on access logging. A single-region CloudTrail trail → S3 captures the account's management events (the first trail's management events are free) and is the budget floor. A multi-region trail with CloudWatch Logs delivery plus S3/CloudFront/ALB access logs and VPC Flow Logs is a balanced/resilient enhancement.",
+    "rationale": "Audit and access logs are required to detect, investigate, and prove what happened during an incident. A single-region management-event trail covers the floor at ~$0; multi-region delivery, log-group integration, and Flow Logs broaden coverage as a robustness step-up, or a compliance requirement.",
+    "summary": "Enable a single-region CloudTrail → S3 (free management events) for audit; multi-region trail + CW-Logs delivery + access/Flow Logs is a balanced/resilient step-up.",
+    "source": "https://docs.aws.amazon.com/awscloudtrail/latest/userguide/cloudtrail-user-guide.html",
+    "tierFloor": "budget",
+    "enhancements": [
+      {
+        "id": "multi-region-trail",
+        "tierFloor": "resilient",
+        "summary": "Multi-region CloudTrail + CloudWatch Logs delivery, S3/CloudFront/ALB access logs, and VPC Flow Logs.",
+        "escalatesUnderCompliance": true,
+        "monthlyUsd": [2, 10]
+      }
+    ]
   }
 ]

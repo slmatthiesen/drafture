@@ -27,7 +27,7 @@ async function buildHarness(): Promise<{ app: FastifyInstance; stores: Stores }>
   const stores = createStores(openTempDb());
   // No provider override needed: the designs GET never calls the model. The real
   // provider is constructed but idle (the test ANTHROPIC_API_KEY is never used).
-  const ctx = buildAppContext(testConfig(), { stores });
+  const ctx = await buildAppContext(testConfig(), { stores });
   const app = Fastify({ logger: false, trustProxy: true });
   await registerApiRoutes(app, ctx);
   return { app, stores };
@@ -40,11 +40,11 @@ describe("designs routes — GET /api/designs/:id", () => {
 
   beforeEach(async () => {
     ({ app, stores } = await buildHarness());
-    ({ id } = stores.generations.upsert(genInput("hash1")));
+    ({ id } = await stores.generations.upsert(genInput("hash1")));
   });
 
   it("returns the parsed design + prompt for an approved id", async () => {
-    stores.generations.setStatus(id, "approved");
+    await stores.generations.setStatus(id, "approved");
     const res = await app.inject({ method: "GET", url: `/api/designs/${id}` });
     expect(res.statusCode).toBe(200);
     const body = res.json();
@@ -67,7 +67,7 @@ describe("designs routes — GET /api/designs/:id", () => {
   });
 
   it("404s for a hidden design (community-removed — never public)", async () => {
-    stores.generations.setStatus(id, "hidden");
+    await stores.generations.setStatus(id, "hidden");
     const res = await app.inject({ method: "GET", url: `/api/designs/${id}` });
     expect(res.statusCode).toBe(404);
     await app.close();
@@ -83,11 +83,11 @@ describe("designs routes — GET /api/designs (community gallery list)", () => {
   });
 
   it("lists only approved designs — pending and hidden are excluded", async () => {
-    const approved = stores.generations.upsert(genInput("h-approved"));
-    const pending = stores.generations.upsert(genInput("h-pending"));
-    const hidden = stores.generations.upsert(genInput("h-hidden"));
-    stores.generations.setStatus(approved.id, "approved");
-    stores.generations.setStatus(hidden.id, "hidden");
+    const approved = await stores.generations.upsert(genInput("h-approved"));
+    const pending = await stores.generations.upsert(genInput("h-pending"));
+    const hidden = await stores.generations.upsert(genInput("h-hidden"));
+    await stores.generations.setStatus(approved.id, "approved");
+    await stores.generations.setStatus(hidden.id, "hidden");
     // `pending` is left in its default pending status.
 
     const res = await app.inject({ method: "GET", url: "/api/designs" });
@@ -103,8 +103,8 @@ describe("designs routes — GET /api/designs (community gallery list)", () => {
     const empty = await app.inject({ method: "GET", url: "/api/designs" });
     expect(empty.json().designs).toEqual([]);
 
-    const { id } = stores.generations.upsert(genInput("h-summary"));
-    stores.generations.setStatus(id, "approved");
+    const { id } = await stores.generations.upsert(genInput("h-summary"));
+    await stores.generations.setStatus(id, "approved");
     const res = await app.inject({ method: "GET", url: "/api/designs" });
     const design = res.json().designs[0];
     expect(design).toMatchObject({

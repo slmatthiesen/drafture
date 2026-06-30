@@ -51,7 +51,7 @@ export async function registerFeedbackRoute(app: FastifyInstance, ctx: AppContex
   );
 }
 
-function handleFeedback(ctx: AppContext, req: FastifyRequest, reply: FastifyReply): unknown {
+async function handleFeedback(ctx: AppContext, req: FastifyRequest, reply: FastifyReply): Promise<unknown> {
   const body = req.body as FeedbackBody;
   const ip = clientIp(req);
 
@@ -69,7 +69,7 @@ function handleFeedback(ctx: AppContext, req: FastifyRequest, reply: FastifyRepl
   // Snapshot the rated output while it's still cached so review survives cache TTL.
   let recommendedTier = "unknown";
   let bodyJson: string | null = null;
-  const cached = ctx.stores.responseCache.get(promptHash, ctx.config.RESPONSE_CACHE_TTL_MS);
+  const cached = await ctx.stores.responseCache.get(promptHash, ctx.config.RESPONSE_CACHE_TTL_MS);
   if (cached) {
     bodyJson = cached.body;
     try {
@@ -80,7 +80,7 @@ function handleFeedback(ctx: AppContext, req: FastifyRequest, reply: FastifyRepl
     }
   }
 
-  const entry = ctx.stores.feedback.upsert({
+  const entry = await ctx.stores.feedback.upsert({
     promptHash,
     description: body.description,
     answers: body.answers ?? [],

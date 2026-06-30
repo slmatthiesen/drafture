@@ -24,20 +24,20 @@ export interface DailyCapCheck {
 
 export interface DailyCap {
   /** Read-only: ok=false when this IP has already used its daily allotment. */
-  checkIpCap(ip: string): DailyCapCheck;
+  checkIpCap(ip: string): Promise<DailyCapCheck>;
   /** Count a generation that will actually run (call AFTER the cache-miss decision). */
-  recordIpGeneration(ip: string): number;
+  recordIpGeneration(ip: string): Promise<number>;
   /** preHandler form of `checkIpCap` keyed by the clientIp helper. */
   preHandler: preHandlerHookHandler;
 }
 
 export function makeDailyCap(ledger: SpendLedger, cfg: DailyCapConfig): DailyCap {
-  function checkIpCap(ip: string): DailyCapCheck {
-    const countToday = ledger.ipCountToday(ip);
+  async function checkIpCap(ip: string): Promise<DailyCapCheck> {
+    const countToday = await ledger.ipCountToday(ip);
     return { ok: countToday < cfg.maxPerDay, countToday, max: cfg.maxPerDay };
   }
 
-  function recordIpGeneration(ip: string): number {
+  async function recordIpGeneration(ip: string): Promise<number> {
     return ledger.incrementIpCount(ip);
   }
 
@@ -45,7 +45,7 @@ export function makeDailyCap(ledger: SpendLedger, cfg: DailyCapConfig): DailyCap
     req: FastifyRequest,
     reply: FastifyReply,
   ) => {
-    const { ok, countToday, max } = checkIpCap(clientIp(req));
+    const { ok, countToday, max } = await checkIpCap(clientIp(req));
     if (!ok) {
       return reply.code(429).send({
         error: "daily_cap_reached",

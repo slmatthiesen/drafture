@@ -89,16 +89,16 @@ export interface SeedSummary {
 }
 
 /** Seed the curated KB into the stores. Idempotent — safe to call on every boot. */
-export function seedKnowledgeBase(stores: SeedableStores): SeedSummary {
+export async function seedKnowledgeBase(stores: SeedableStores): Promise<SeedSummary> {
   const baselines = securityBaselines as SecurityBaseline[];
   const patterns = referenceArchitectures as ReferenceArchitecture[];
   const facts = pricingFacts as PricingFact[];
 
-  for (const b of baselines) stores.memory.upsert(baselineToDoc(b));
-  for (const p of patterns) stores.memory.upsert(patternToDoc(p));
+  for (const b of baselines) await stores.memory.upsert(baselineToDoc(b));
+  for (const p of patterns) await stores.memory.upsert(patternToDoc(p));
 
   for (const [region, records] of groupByRegion(facts.map(factToRecord))) {
-    stores.pricing.replaceMonth(region, SEED_PRICING_MONTH, records);
+    await stores.pricing.replaceMonth(region, SEED_PRICING_MONTH, records);
   }
 
   return {

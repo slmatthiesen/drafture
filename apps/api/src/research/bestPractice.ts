@@ -258,7 +258,7 @@ export async function researchMissingTopics(options: ResearchOptions): Promise<R
     }
 
     const now = Date.now();
-    const doc = memory.upsert({
+    const doc = await memory.upsert({
       id: randomUUID(),
       topic,
       fact: fact.fact,

@@ -7,7 +7,7 @@
  * general-purpose CMK and enable point-in-time recovery by default.
  */
 import type { ArchitectureNode } from "../../../schema/architecture.js";
-import { ref, type EmitCtx } from "../context.js";
+import { cwLogsKmsLine, ref, type EmitCtx } from "../context.js";
 import { type HclBlock, jsonencode, policyDoc, raw } from "../hcl.js";
 
 const indentPolicy = (json: string): string =>
@@ -38,10 +38,11 @@ export function emitDynamo(node: ArchitectureNode, ctx: EmitCtx): HclBlock[] {
     `    name = "id"`,
     `    type = "S"`,
     `  }`,
-    `  server_side_encryption {`,
-    `    enabled     = true`,
-    `    kms_key_arn = aws_kms_key.main.arn`,
-    `  }`,
+    // Budget floor: DynamoDB's default AWS-owned-key encryption (free, no block needed).
+    // Balanced+/compliance: a customer-managed CMK for auditable rotation.
+    ...(ctx.paidSecurity
+      ? [`  server_side_encryption {`, `    enabled     = true`, `    kms_key_arn = aws_kms_key.main.arn`, `  }`]
+      : []),
     `  point_in_time_recovery {`,
     `    enabled = true`,
     `  }`,
@@ -117,7 +118,7 @@ export function emitApiGateway(node: ArchitectureNode, ctx: EmitCtx): HclBlock[]
         `resource "aws_cloudwatch_log_group" "${tf}" {`,
         `  name              = "/aws/apigw/${ctx.prefix}-${dash(tf)}"`,
         `  retention_in_days = 30`,
-        `  kms_key_id        = aws_kms_key.cw_logs.arn`,
+        ...cwLogsKmsLine(ctx),
         `}`,
         ``,
         `resource "aws_apigatewayv2_stage" "${tf}" {`,

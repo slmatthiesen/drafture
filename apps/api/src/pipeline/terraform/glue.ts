@@ -164,7 +164,11 @@ export function edgeIamStatements(node: ArchitectureNode, ctx: EmitCtx): Jsonish
     }
   }
 
-  if (needsKmsMain) {
+  // Only when the tier emits the customer-managed `main` CMK (balanced+/compliance). At
+  // the budget floor the data is encrypted with AWS-managed keys, which authorize use
+  // via the service + caller IAM and need no explicit kms grant — and the CMK resource
+  // isn't emitted, so referencing it would break `terraform validate`.
+  if (needsKmsMain && ctx.paidSecurity) {
     statements.push({
       Sid: "KMSDecryptMain",
       Effect: "Allow",

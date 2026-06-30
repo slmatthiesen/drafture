@@ -47,8 +47,8 @@ const ROUTE = "/api/designs";
 const LIST_LIMIT = 200;
 
 export async function registerDesignsRoutes(app: FastifyInstance, ctx: AppContext): Promise<void> {
-  app.get(ROUTE, { preHandler: [ctx.guards.accessGate] }, (_req, reply) => {
-    return reply.code(200).send({ designs: ctx.stores.generations.listApproved(LIST_LIMIT) });
+  app.get(ROUTE, { preHandler: [ctx.guards.accessGate] }, async (_req, reply) => {
+    return reply.code(200).send({ designs: await ctx.stores.generations.listApproved(LIST_LIMIT) });
   });
 
   app.get(
@@ -67,9 +67,9 @@ export async function registerDesignsRoutes(app: FastifyInstance, ctx: AppContex
   );
 }
 
-function handleGet(ctx: AppContext, req: FastifyRequest, reply: FastifyReply): unknown {
+async function handleGet(ctx: AppContext, req: FastifyRequest, reply: FastifyReply): Promise<unknown> {
   const { id } = req.params as { id: string };
-  const record = ctx.stores.generations.getById(id);
+  const record = await ctx.stores.generations.getById(id);
   // Pending/hidden designs are not public — same 404 as a missing id so the gate
   // can't be probed to learn which ids exist in the review queue.
   if (!record || record.status !== "approved") {
@@ -85,12 +85,12 @@ function handleGet(ctx: AppContext, req: FastifyRequest, reply: FastifyReply): u
   });
 }
 
-function handleVote(ctx: AppContext, req: FastifyRequest, reply: FastifyReply): unknown {
+async function handleVote(ctx: AppContext, req: FastifyRequest, reply: FastifyReply): Promise<unknown> {
   const { id } = req.params as { id: string };
   const { value } = req.body as VoteBody;
   const voter = clientIp(req);
 
-  const result = ctx.stores.generations.vote(id, voter, value, ctx.config.GENERATION_HIDE_NET_VOTES);
+  const result = await ctx.stores.generations.vote(id, voter, value, ctx.config.GENERATION_HIDE_NET_VOTES);
   if (!result) return reply.code(404).send({ error: "not_found", message: "Unknown generation." });
   return reply.code(200).send(result);
 }

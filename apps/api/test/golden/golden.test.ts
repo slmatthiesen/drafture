@@ -31,6 +31,7 @@ import {
   graphHasNoOrphanNodes,
   readPathWhenUiImplied,
   budgetTierIsCostHonest,
+  budgetHasNoPaidSecurityFloor,
 } from "./properties.js";
 
 const PASS_RATE_FLOOR = 0.9;
@@ -60,18 +61,21 @@ describe("property checkers on the known-good result", () => {
       primaryDatastoreReachable,
       graphHasNoOrphanNodes,
       readPathWhenUiImplied,
+      budgetTierIsCostHonest,
+      budgetHasNoPaidSecurityFloor,
     ]) {
       const r = property(good);
       expect(r.ok, `${r.name}: ${r.reason}`).toBe(true);
     }
   });
 
-  it("the aggregator reports ok with all thirteen gated properties green", () => {
+  it("the aggregator reports ok with all fifteen gated properties green", () => {
     const agg = runAllProperties(good);
     expect(agg.ok).toBe(true);
-    // readPathWhenUiImplied is warn-only (not in ALL_PROPERTIES yet), so the gate
-    // holds thirteen, not the fourteen exported checkers.
-    expect(agg.results).toHaveLength(13);
+    // The cost-honest pair (budgetTierIsCostHonest + budgetHasNoPaidSecurityFloor) are now
+    // gated; readPathWhenUiImplied stays warn-only, so the gate holds fifteen of the
+    // sixteen exported checkers.
+    expect(agg.results).toHaveLength(15);
     expect(agg.results.every((r) => r.ok)).toBe(true);
   });
 });

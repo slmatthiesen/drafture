@@ -30,28 +30,42 @@ export class SqliteCuratedStore implements CuratedStore {
     private readonly clock: Clock = systemClock,
   ) {}
 
-  list(): CuratedRunSummary[] {
+  async list(): Promise<CuratedRunSummary[]> {
     // Body is read (not returned) only to derive the one-line tech blurb; 4 rows, so
     // parsing per call is negligible and keeps the gallery card self-describing.
+    // hidden=0 only: a suppressed seed design leaves the gallery (and, via get()
+    // returning undefined, the deep-link + RAG read paths too).
     const rows = this.db
       .prepare(
         `SELECT id, title, prompt, body, upvotes, downvotes, created_at
          FROM curated_runs
+         WHERE hidden = 0
          ORDER BY (upvotes - downvotes) DESC, created_at DESC`,
       )
       .all() as RunRow[];
     return rows.map((r) => ({ ...toSummary(r), tech: deriveTech(r.body) }));
   }
 
-  get(id: string): CuratedRun | undefined {
-    const row = this.db.prepare(`SELECT * FROM curated_runs WHERE id = ?`).get(id) as
+  async get(id: string): Promise<CuratedRun | undefined> {
+    // A hidden run is invisible everywhere it could be served — the deep-link route
+    // and `retrieve.loadDesign` both go through get(), mirroring how a non-approved
+    // generation is filtered out of retrieval.
+    const row = this.db.prepare(`SELECT * FROM curated_runs WHERE id = ? AND hidden = 0`).get(id) as
       | RunRow
       | undefined;
     if (!row) return undefined;
     return { ...toSummary(row), tech: deriveTech(row.body), body: row.body };
   }
 
-  upsert(run: { id: string; title: string; prompt: string; body: string }): void {
+  /** Suppress (or restore) a curated run. Returns false for an unknown id. */
+  async setHidden(id: string, hidden: boolean): Promise<boolean> {
+    const res = this.db
+      .prepare(`UPDATE curated_runs SET hidden = ? WHERE id = ?`)
+      .run(hidden ? 1 : 0, id);
+    return res.changes > 0;
+  }
+
+  async upsert(run: { id: string; title: string; prompt: string; body: string }): Promise<void> {
     // Replace content but KEEP the existing vote counters on conflict — re-seeding a
     // run shouldn't reset the community signal it has accumulated.
     this.db
@@ -66,7 +80,7 @@ export class SqliteCuratedStore implements CuratedStore {
       .run({ ...run, createdAt: this.clock.now() });
   }
 
-  vote(id: string, voter: string, value: 1 | -1): CuratedVoteResult | undefined {
+  async vote(id: string, voter: string, value: 1 | -1): Promise<CuratedVoteResult | undefined> {
     const tx = this.db.transaction((): CuratedVoteResult | undefined => {
       const exists = this.db.prepare(`SELECT 1 FROM curated_runs WHERE id = ?`).get(id);
       if (!exists) return undefined;

@@ -134,7 +134,18 @@ export function emitBaseline(ctx: EmitCtx): HclBlock[] {
     ].join("\n"),
   });
 
-  // --- KMS: general-purpose CMK (S3, EBS, Secrets) ---
+  // --- KMS customer-managed CMKs (S3/EBS/Secrets, CloudWatch Logs, SNS) ---
+  // PAID security floor (~$1/key/mo): a balanced+ step-up, OR budget under compliance.
+  // The budget tier (none-sensitivity) encrypts at rest with FREE AWS-managed keys
+  // (SSE-S3 / aws/ebs / aws/secretsmanager / aws/sns), so no CMK is emitted and the
+  // consuming resources reference the managed key — keeping budget on the lean floor.
+  if (ctx.paidSecurity) emitCustomerCmks(ctx, blocks);
+
+  return blocks;
+}
+
+function emitCustomerCmks(ctx: EmitCtx, blocks: HclBlock[]): void {
+  const p = ctx.prefix;
   const rootStmt = {
     Sid: "RootAccountFullAccess",
     Effect: "Allow",
@@ -258,8 +269,6 @@ export function emitBaseline(ctx: EmitCtx): HclBlock[] {
       ].join("\n"),
     });
   }
-
-  return blocks;
 }
 
 /** Re-indent a multi-line jsonencode(...) so nested lines sit under the `policy =`. */

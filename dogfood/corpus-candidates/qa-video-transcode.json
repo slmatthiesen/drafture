@@ -1,0 +1,1592 @@
+{
+  "assumptions": [
+    "Traffic assumed ~<50k uploads/month (no intake answer provided) — Lambda + DynamoDB on-demand is right-sized for this volume",
+    "Downtime tolerance assumed moderate — single-AZ budget, multi-AZ balanced, cross-region resilient",
+    "No compliance regime stated — standard AWS security baseline applied",
+    "Videos assumed up to ~5GB; S3 multipart upload used for large files",
+    "Notification channel assumed email (SES); Slack/PagerDuty added at resilient tier",
+    "Transcoded output stored in S3; input and output buckets are separate for least-privilege scoping",
+    "MediaConvert chosen as managed transcoder — no self-hosted FFmpeg needed at any tier",
+    "Cost estimates are on-demand list prices for us-east-1, presented as ranges over assumed monthly volumes. They exclude the AWS Free Tier, Savings Plans, Reserved Instances, and negotiated discounts.",
+    "Assumed traffic ~100k–1M requests/month, applied equally to all three tiers (tiers differ by robustness, not traffic). Set \"expected monthly visitors\" in intake to change it."
+  ],
+  "clarificationsUsed": [],
+  "tiers": [
+    {
+      "name": "budget",
+      "summary": "Serverless-no-VPC: pre-signed S3 upload → SQS-buffered MediaConvert dispatch → DynamoDB job tracking → SES notification. Zero idle cost; scales to concurrent jobs without fleet management.",
+      "nodes": [
+        {
+          "id": "cdn",
+          "awsService": "CloudFront",
+          "role": "edge + WAF front door",
+          "security": [
+            "WAF managed rules",
+            "rate-based rule",
+            "TLS only",
+            "Shield Standard",
+            "access logging"
+          ]
+        },
+        {
+          "id": "api_gw",
+          "awsService": "API Gateway (HTTP API)",
+          "role": "REST ingest endpoint",
+          "security": [
+            "TLS",
+            "IAM/JWT authorizer",
+            "throttling 500 rps",
+            "least-priv role"
+          ]
+        },
+        {
+          "id": "presign_fn",
+          "awsService": "Lambda",
+          "role": "pre-signed URL issuer",
+          "security": [
+            "least-priv role",
+            "KMS key access scoped to input bucket",
+            "reserved concurrency 50"
+          ]
+        },
+        {
+          "id": "input_bucket",
+          "awsService": "S3",
+          "role": "raw video intake",
+          "security": [
+            "SSE-KMS",
+            "block public access",
+            "versioning",
+            "lifecycle → Glacier 30d",
+            "event notification on s3:ObjectCreated"
+          ]
+        },
+        {
+          "id": "ingest_queue",
+          "awsService": "SQS",
+          "role": "upload event buffer",
+          "security": [
+            "SSE-KMS",
+            "DLQ attached",
+            "visibility timeout 300s",
+            "least-priv access policy"
+          ]
+        },
+        {
+          "id": "ingest_dlq",
+          "awsService": "SQS",
+          "role": "ingest dead-letter queue",
+          "security": [
+            "SSE-KMS",
+            "least-priv access policy"
+          ]
+        },
+        {
+          "id": "dispatch_fn",
+          "awsService": "Lambda",
+          "role": "transcode job dispatcher",
+          "security": [
+            "least-priv role",
+            "idempotent consumer",
+            "reserved concurrency 20",
+            "DLQ on async invocation"
+          ]
+        },
+        {
+          "id": "mediaconvert",
+          "awsService": "AWS Elemental MediaConvert",
+          "role": "managed video transcoder",
+          "security": [
+            "least-priv IAM role",
+            "KMS output encryption",
+            "queue-based job isolation"
+          ]
+        },
+        {
+          "id": "output_bucket",
+          "awsService": "S3",
+          "role": "transcoded video store",
+          "security": [
+            "SSE-KMS",
+            "block public access",
+            "separate least-priv bucket policy",
+            "CloudFront OAC only"
+          ]
+        },
+        {
+          "id": "job_table",
+          "awsService": "DynamoDB",
+          "role": "job state tracker",
+          "security": [
+            "SSE-KMS CMK",
+            "on-demand capacity",
+            "conditional writes (idempotent)",
+            "TTL 30d"
+          ]
+        },
+        {
+          "id": "completion_fn",
+          "awsService": "Lambda",
+          "role": "completion event handler",
+          "security": [
+            "least-priv role",
+            "idempotent consumer",
+            "reserved concurrency 20"
+          ]
+        },
+        {
+          "id": "ses",
+          "awsService": "Amazon SES",
+          "role": "transactional email notifier",
+          "security": [
+            "DKIM/SPF",
+            "TLS",
+            "bounce/complaint event publishing",
+            "least-priv send role"
+          ]
+        },
+        {
+          "id": "notify_table",
+          "awsService": "DynamoDB",
+          "role": "delivery status outbox",
+          "security": [
+            "SSE-KMS CMK",
+            "on-demand capacity",
+            "conditional writes"
+          ]
+        },
+        {
+          "id": "cw_logs",
+          "awsService": "CloudWatch Logs",
+          "role": "centralized structured logs",
+          "security": [
+            "KMS encrypted",
+            "90d retention",
+            "least-priv resource policy"
+          ]
+        },
+        {
+          "id": "cw_alarms",
+          "awsService": "CloudWatch Alarms",
+          "role": "golden-signal alarms",
+          "security": [
+            "least-priv role"
+          ]
+        },
+        {
+          "id": "ops_sns",
+          "awsService": "SNS",
+          "role": "ops alert fanout",
+          "security": [
+            "TLS",
+            "least-priv access policy"
+          ]
+        },
+        {
+          "id": "xray",
+          "awsService": "AWS X-Ray",
+          "role": "distributed tracing",
+          "security": [
+            "least-priv role"
+          ]
+        },
+        {
+          "id": "cloudtrail",
+          "awsService": "CloudTrail",
+          "role": "API audit trail",
+          "security": [
+            "log file validation",
+            "S3 SSE-KMS",
+            "management + data events"
+          ]
+        }
+      ],
+      "edges": [
+        {
+          "from": "client",
+          "to": "cdn",
+          "payload": "HTTPS upload/API requests",
+          "protocol": "HTTPS"
+        },
+        {
+          "from": "cdn",
+          "to": "api_gw",
+          "payload": "authenticated API requests",
+          "protocol": "HTTPS"
+        },
+        {
+          "from": "api_gw",
+          "to": "presign_fn",
+          "payload": "presign request (filename, content-type)",
+          "protocol": "HTTPS/Lambda invoke"
+        },
+        {
+          "from": "presign_fn",
+          "to": "client",
+          "payload": "pre-signed S3 PUT URL",
+          "protocol": "HTTPS response"
+        },
+        {
+          "from": "client",
+          "to": "input_bucket",
+          "payload": "raw video bytes (multipart PUT)",
+          "protocol": "HTTPS"
+        },
+        {
+          "from": "input_bucket",
+          "to": "ingest_queue",
+          "payload": "s3:ObjectCreated event (key, size)",
+          "protocol": "S3 Event Notification"
+        },
+        {
+          "from": "ingest_queue",
+          "to": "dispatch_fn",
+          "payload": "SQS message (S3 key, job metadata)",
+          "protocol": "SQS trigger"
+        },
+        {
+          "from": "ingest_queue",
+          "to": "ingest_dlq",
+          "payload": "failed messages after 3 retries",
+          "protocol": "SQS redrive"
+        },
+        {
+          "from": "dispatch_fn",
+          "to": "job_table",
+          "payload": "job record (jobId, status=QUEUED)",
+          "protocol": "DynamoDB PutItem (conditional)"
+        },
+        {
+          "from": "dispatch_fn",
+          "to": "mediaconvert",
+          "payload": "CreateJob request (input S3 URI, output preset)",
+          "protocol": "HTTPS/API"
+        },
+        {
+          "from": "mediaconvert",
+          "to": "output_bucket",
+          "payload": "transcoded video files",
+          "protocol": "S3 PUT (internal)"
+        },
+        {
+          "from": "mediaconvert",
+          "to": "completion_fn",
+          "payload": "job COMPLETE/ERROR event",
+          "protocol": "EventBridge (MediaConvert event)"
+        },
+        {
+          "from": "completion_fn",
+          "to": "job_table",
+          "payload": "status update (COMPLETE/ERROR, output URI)",
+          "protocol": "DynamoDB UpdateItem (conditional)"
+        },
+        {
+          "from": "completion_fn",
+          "to": "notify_table",
+          "payload": "delivery record (pending, userId, jobId)",
+          "protocol": "DynamoDB PutItem (conditional)"
+        },
+        {
+          "from": "completion_fn",
+          "to": "ses",
+          "payload": "send email (user address, output link)",
+          "protocol": "HTTPS/SES API"
+        },
+        {
+          "from": "ses",
+          "to": "notify_table",
+          "payload": "delivery/bounce/complaint event",
+          "protocol": "SES event → Lambda → DynamoDB"
+        },
+        {
+          "from": "dispatch_fn",
+          "to": "cw_logs",
+          "payload": "structured logs (jobId, status)",
+          "protocol": "CloudWatch Logs API"
+        },
+        {
+          "from": "completion_fn",
+          "to": "cw_logs",
+          "payload": "structured logs (completion event)",
+          "protocol": "CloudWatch Logs API"
+        },
+        {
+          "from": "cw_logs",
+          "to": "cw_alarms",
+          "payload": "metric filters (error rate, DLQ depth, duration)",
+          "protocol": "CloudWatch Metrics"
+        },
+        {
+          "from": "cw_alarms",
+          "to": "ops_sns",
+          "payload": "alarm state change notification",
+          "protocol": "SNS publish"
+        },
+        {
+          "from": "ops_sns",
+          "to": "client",
+          "payload": "ops email alert",
+          "protocol": "Email/HTTPS subscription"
+        },
+        {
+          "from": "dispatch_fn",
+          "to": "xray",
+          "payload": "trace segments",
+          "protocol": "X-Ray SDK"
+        },
+        {
+          "from": "completion_fn",
+          "to": "xray",
+          "payload": "trace segments",
+          "protocol": "X-Ray SDK"
+        }
+      ],
+      "delta": [
+        "Baseline: fully serverless-no-VPC — zero always-on compute cost",
+        "Pre-signed URL pattern keeps binary video out of Lambda/API Gateway data path",
+        "SQS ingest buffer + DLQ handles upload burst without dropping events",
+        "DynamoDB on-demand absorbs parallel completion write spikes",
+        "MediaConvert per-minute billing — zero idle transcoder cost",
+        "SES outbox pattern: delivery record written before send, flipped on ack",
+        "Single-AZ implicit (Lambda/DynamoDB/SQS are regional; S3 is always 3-AZ)",
+        "CloudWatch alarms on: DLQ depth, Lambda error rate, MediaConvert job failures → SNS email"
+      ],
+      "tradeoffs": [
+        "No reserved Lambda concurrency provisioning — cold starts possible under sudden burst",
+        "No multi-region DR — regional service outage affects all tiers of the stack",
+        "SES delivery retries are eventual — notification may lag minutes under bounce/retry",
+        "DLQ messages require manual redrive or monitoring action to recover",
+        "Single ops SNS topic emails only — no on-call escalation path"
+      ],
+      "costDrivers": [
+        {
+          "service": "CloudFront",
+          "unit": "$/GB transferred",
+          "estimateRange": "$0.043–$0.425/mo",
+          "note": "Data transfer out to internet, first 10TB/month tier (North America). First 1TB/month is free."
+        },
+        {
+          "service": "CloudFront",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.075–$0.750/mo",
+          "note": "HTTPS requests ($0.0075 per 10,000). North America/Europe."
+        },
+        {
+          "service": "Lambda",
+          "unit": "$/GB-second",
+          "estimateRange": "$0.167–$1.67/mo",
+          "note": "Compute duration: $0.0000166667 per GB-second (x86). Multiply by memoryGB x durationSeconds per invocation."
+        },
+        {
+          "service": "Lambda",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.020–$0.200/mo",
+          "note": "On-demand list price ($0.20 per 1M requests). Excludes Free Tier."
+        },
+        {
+          "service": "S3",
+          "unit": "$/GB-month",
+          "estimateRange": "$0.230–$2.30/mo",
+          "note": "S3 Standard storage, first 50TB/month tier."
+        },
+        {
+          "service": "S3",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.500–$5.00/mo",
+          "note": "PUT/COPY/POST/LIST requests per 1,000. GET/SELECT requests are ~$0.0004 per 1,000."
+        },
+        {
+          "service": "SQS",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.040–$0.400/mo",
+          "note": "Standard queue requests ($0.40 per 1M). First 1M/month free. FIFO is $0.50 per 1M."
+        },
+        {
+          "service": "DynamoDB",
+          "unit": "per 1k read units",
+          "estimateRange": "$0.013–$0.125/mo",
+          "note": "On-demand read request units ($0.125 per 1M RRU). 1 RRU = 1 strongly-consistent read up to 4KB."
+        },
+        {
+          "service": "DynamoDB",
+          "unit": "per 1k write units",
+          "estimateRange": "$0.063–$0.625/mo",
+          "note": "On-demand write request units ($0.625 per 1M WRU). 1 WRU = 1 write up to 1KB."
+        },
+        {
+          "service": "SES",
+          "unit": "per 1k requests",
+          "estimateRange": "$10.00–$100.00/mo",
+          "note": "Email send: $0.10 per 1,000 emails (content). Attachment/data transfer billed separately."
+        },
+        {
+          "service": "CloudWatch Logs",
+          "unit": "$/GB ingested",
+          "estimateRange": "$0.010–$0.100/mo",
+          "note": "CloudWatch Logs ingestion $0.50/GB (first 10GB/mo free in some accounts). Archival storage is cheaper; Insights queries extra."
+        },
+        {
+          "service": "SNS",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.050–$0.500/mo",
+          "note": "Standard topic API requests ($0.50 per 1M). Delivery (HTTP/SMS/email) priced separately."
+        },
+        {
+          "service": "X-Ray",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.500–$5.00/mo",
+          "note": "X-Ray traces: $5.00 per 1M traces recorded (first 100k/mo free)."
+        }
+      ]
+    },
+    {
+      "name": "balanced",
+      "summary": "Adds Lambda provisioned concurrency, SQS FIFO option for ordered jobs, CloudWatch dashboards + X-Ray tracing on all paths, Slack alerting on critical alarms, and explicit MediaConvert queue prioritization. Still single-region; all services remain serverless-no-VPC.",
+      "nodes": [
+        {
+          "id": "cdn",
+          "awsService": "CloudFront",
+          "role": "edge + WAF front door",
+          "security": [
+            "WAF managed rules",
+            "rate-based rule",
+            "TLS only",
+            "Shield Standard",
+            "access logging"
+          ]
+        },
+        {
+          "id": "api_gw",
+          "awsService": "API Gateway (HTTP API)",
+          "role": "REST ingest endpoint",
+          "security": [
+            "TLS",
+            "IAM/JWT authorizer",
+            "throttling 500 rps",
+            "least-priv role"
+          ]
+        },
+        {
+          "id": "presign_fn",
+          "awsService": "Lambda",
+          "role": "pre-signed URL issuer",
+          "security": [
+            "least-priv role",
+            "KMS key access scoped to input bucket",
+            "reserved concurrency 50"
+          ]
+        },
+        {
+          "id": "input_bucket",
+          "awsService": "S3",
+          "role": "raw video intake",
+          "security": [
+            "SSE-KMS",
+            "block public access",
+            "versioning",
+            "lifecycle → Glacier 30d",
+            "event notification on s3:ObjectCreated"
+          ]
+        },
+        {
+          "id": "ingest_queue",
+          "awsService": "SQS",
+          "role": "upload event buffer",
+          "security": [
+            "SSE-KMS",
+            "DLQ attached",
+            "visibility timeout 300s",
+            "least-priv access policy"
+          ]
+        },
+        {
+          "id": "ingest_dlq",
+          "awsService": "SQS",
+          "role": "ingest dead-letter queue",
+          "security": [
+            "SSE-KMS",
+            "least-priv access policy"
+          ]
+        },
+        {
+          "id": "dispatch_fn",
+          "awsService": "Lambda",
+          "role": "transcode job dispatcher",
+          "security": [
+            "least-priv role",
+            "idempotent consumer",
+            "provisioned concurrency 5",
+            "DLQ on async invocation"
+          ]
+        },
+        {
+          "id": "mediaconvert",
+          "awsService": "AWS Elemental MediaConvert",
+          "role": "managed video transcoder",
+          "security": [
+            "least-priv IAM role",
+            "KMS output encryption",
+            "queue-based job isolation"
+          ]
+        },
+        {
+          "id": "output_bucket",
+          "awsService": "S3",
+          "role": "transcoded video store",
+          "security": [
+            "SSE-KMS",
+            "block public access",
+            "separate least-priv bucket policy",
+            "CloudFront OAC only"
+          ]
+        },
+        {
+          "id": "job_table",
+          "awsService": "DynamoDB",
+          "role": "job state tracker",
+          "security": [
+            "SSE-KMS CMK",
+            "on-demand capacity",
+            "conditional writes (idempotent)",
+            "TTL 30d"
+          ]
+        },
+        {
+          "id": "completion_fn",
+          "awsService": "Lambda",
+          "role": "completion event handler",
+          "security": [
+            "least-priv role",
+            "idempotent consumer",
+            "provisioned concurrency 5"
+          ]
+        },
+        {
+          "id": "ses",
+          "awsService": "Amazon SES",
+          "role": "transactional email notifier",
+          "security": [
+            "DKIM/SPF",
+            "TLS",
+            "bounce/complaint event publishing",
+            "least-priv send role"
+          ]
+        },
+        {
+          "id": "notify_table",
+          "awsService": "DynamoDB",
+          "role": "delivery status outbox",
+          "security": [
+            "SSE-KMS CMK",
+            "on-demand capacity",
+            "conditional writes"
+          ]
+        },
+        {
+          "id": "cw_logs",
+          "awsService": "CloudWatch Logs",
+          "role": "centralized structured logs",
+          "security": [
+            "KMS encrypted",
+            "90d retention",
+            "least-priv resource policy"
+          ]
+        },
+        {
+          "id": "cw_alarms",
+          "awsService": "CloudWatch Alarms",
+          "role": "golden-signal alarms",
+          "security": [
+            "least-priv role"
+          ]
+        },
+        {
+          "id": "ops_sns",
+          "awsService": "SNS",
+          "role": "ops alert fanout",
+          "security": [
+            "TLS",
+            "least-priv access policy"
+          ]
+        },
+        {
+          "id": "xray",
+          "awsService": "AWS X-Ray",
+          "role": "distributed tracing",
+          "security": [
+            "least-priv role"
+          ]
+        },
+        {
+          "id": "cloudtrail",
+          "awsService": "CloudTrail",
+          "role": "API audit trail",
+          "security": [
+            "log file validation",
+            "S3 SSE-KMS",
+            "management + data events"
+          ]
+        },
+        {
+          "id": "cw_dashboard",
+          "awsService": "CloudWatch Dashboards",
+          "role": "ops golden-signal dashboard",
+          "security": [
+            "least-priv read role"
+          ]
+        },
+        {
+          "id": "slack_webhook",
+          "awsService": "Lambda",
+          "role": "Slack alert forwarder",
+          "security": [
+            "least-priv role",
+            "Secrets Manager webhook URL",
+            "TLS"
+          ]
+        },
+        {
+          "id": "mc_priority_queue",
+          "awsService": "AWS Elemental MediaConvert",
+          "role": "priority transcode queue",
+          "security": [
+            "least-priv IAM role",
+            "KMS output encryption",
+            "queue-based job isolation"
+          ]
+        }
+      ],
+      "edges": [
+        {
+          "from": "client",
+          "to": "cdn",
+          "payload": "HTTPS upload/API requests",
+          "protocol": "HTTPS"
+        },
+        {
+          "from": "cdn",
+          "to": "api_gw",
+          "payload": "authenticated API requests",
+          "protocol": "HTTPS"
+        },
+        {
+          "from": "api_gw",
+          "to": "presign_fn",
+          "payload": "presign request (filename, content-type)",
+          "protocol": "HTTPS/Lambda invoke"
+        },
+        {
+          "from": "presign_fn",
+          "to": "client",
+          "payload": "pre-signed S3 PUT URL",
+          "protocol": "HTTPS response"
+        },
+        {
+          "from": "client",
+          "to": "input_bucket",
+          "payload": "raw video bytes (multipart PUT)",
+          "protocol": "HTTPS"
+        },
+        {
+          "from": "input_bucket",
+          "to": "ingest_queue",
+          "payload": "s3:ObjectCreated event (key, size)",
+          "protocol": "S3 Event Notification"
+        },
+        {
+          "from": "ingest_queue",
+          "to": "dispatch_fn",
+          "payload": "SQS message (S3 key, job metadata)",
+          "protocol": "SQS trigger"
+        },
+        {
+          "from": "ingest_queue",
+          "to": "ingest_dlq",
+          "payload": "failed messages after 3 retries",
+          "protocol": "SQS redrive"
+        },
+        {
+          "from": "dispatch_fn",
+          "to": "job_table",
+          "payload": "job record (jobId, status=QUEUED)",
+          "protocol": "DynamoDB PutItem (conditional)"
+        },
+        {
+          "from": "dispatch_fn",
+          "to": "mediaconvert",
+          "payload": "CreateJob request (input S3 URI, output preset)",
+          "protocol": "HTTPS/API"
+        },
+        {
+          "from": "mediaconvert",
+          "to": "output_bucket",
+          "payload": "transcoded video files",
+          "protocol": "S3 PUT (internal)"
+        },
+        {
+          "from": "mediaconvert",
+          "to": "completion_fn",
+          "payload": "job COMPLETE/ERROR event",
+          "protocol": "EventBridge (MediaConvert event)"
+        },
+        {
+          "from": "completion_fn",
+          "to": "job_table",
+          "payload": "status update (COMPLETE/ERROR, output URI)",
+          "protocol": "DynamoDB UpdateItem (conditional)"
+        },
+        {
+          "from": "completion_fn",
+          "to": "notify_table",
+          "payload": "delivery record (pending, userId, jobId)",
+          "protocol": "DynamoDB PutItem (conditional)"
+        },
+        {
+          "from": "completion_fn",
+          "to": "ses",
+          "payload": "send email (user address, output link)",
+          "protocol": "HTTPS/SES API"
+        },
+        {
+          "from": "ses",
+          "to": "notify_table",
+          "payload": "delivery/bounce/complaint event",
+          "protocol": "SES event → Lambda → DynamoDB"
+        },
+        {
+          "from": "dispatch_fn",
+          "to": "cw_logs",
+          "payload": "structured logs (jobId, status)",
+          "protocol": "CloudWatch Logs API"
+        },
+        {
+          "from": "completion_fn",
+          "to": "cw_logs",
+          "payload": "structured logs (completion event)",
+          "protocol": "CloudWatch Logs API"
+        },
+        {
+          "from": "cw_logs",
+          "to": "cw_alarms",
+          "payload": "metric filters (error rate, DLQ depth, duration)",
+          "protocol": "CloudWatch Metrics"
+        },
+        {
+          "from": "cw_alarms",
+          "to": "ops_sns",
+          "payload": "alarm state change notification",
+          "protocol": "SNS publish"
+        },
+        {
+          "from": "ops_sns",
+          "to": "client",
+          "payload": "ops email alert",
+          "protocol": "Email/HTTPS subscription"
+        },
+        {
+          "from": "dispatch_fn",
+          "to": "xray",
+          "payload": "trace segments",
+          "protocol": "X-Ray SDK"
+        },
+        {
+          "from": "completion_fn",
+          "to": "xray",
+          "payload": "trace segments",
+          "protocol": "X-Ray SDK"
+        },
+        {
+          "from": "ops_sns",
+          "to": "slack_webhook",
+          "payload": "alarm notification payload",
+          "protocol": "SNS → Lambda invoke"
+        },
+        {
+          "from": "slack_webhook",
+          "to": "client",
+          "payload": "Slack message (alarm detail)",
+          "protocol": "HTTPS webhook"
+        },
+        {
+          "from": "cw_logs",
+          "to": "cw_dashboard",
+          "payload": "metrics (latency, errors, DLQ depth)",
+          "protocol": "CloudWatch Metrics"
+        },
+        {
+          "from": "dispatch_fn",
+          "to": "mc_priority_queue",
+          "payload": "high-priority CreateJob request",
+          "protocol": "HTTPS/API"
+        }
+      ],
+      "delta": [
+        "Lambda provisioned concurrency (5) on dispatch + completion — eliminates cold-start burst lag",
+        "MediaConvert priority queue added — separates premium/standard job lanes",
+        "CloudWatch Dashboard added — golden signals (error rate, queue depth, job duration) visible in one pane",
+        "Slack alerting via SNS → Lambda forwarder — critical alarms reach on-call channel instantly",
+        "X-Ray tracing enabled across full async path (presign → dispatch → completion)"
+      ],
+      "tradeoffs": [
+        "Provisioned concurrency adds a small always-on Lambda cost even at zero traffic",
+        "Still single-region — no failover if a regional AWS service degrades",
+        "MediaConvert priority queue requires job classification logic in dispatch_fn",
+        "Slack webhook URL is a secret requiring rotation discipline"
+      ],
+      "costDrivers": [
+        {
+          "service": "CloudFront",
+          "unit": "$/GB transferred",
+          "estimateRange": "$0.043–$0.425/mo",
+          "note": "Data transfer out to internet, first 10TB/month tier (North America). First 1TB/month is free."
+        },
+        {
+          "service": "CloudFront",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.075–$0.750/mo",
+          "note": "HTTPS requests ($0.0075 per 10,000). North America/Europe."
+        },
+        {
+          "service": "Lambda",
+          "unit": "$/GB-second",
+          "estimateRange": "$0.167–$1.67/mo",
+          "note": "Compute duration: $0.0000166667 per GB-second (x86). Multiply by memoryGB x durationSeconds per invocation."
+        },
+        {
+          "service": "Lambda",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.020–$0.200/mo",
+          "note": "On-demand list price ($0.20 per 1M requests). Excludes Free Tier."
+        },
+        {
+          "service": "S3",
+          "unit": "$/GB-month",
+          "estimateRange": "$0.230–$2.30/mo",
+          "note": "S3 Standard storage, first 50TB/month tier."
+        },
+        {
+          "service": "S3",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.500–$5.00/mo",
+          "note": "PUT/COPY/POST/LIST requests per 1,000. GET/SELECT requests are ~$0.0004 per 1,000."
+        },
+        {
+          "service": "SQS",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.040–$0.400/mo",
+          "note": "Standard queue requests ($0.40 per 1M). First 1M/month free. FIFO is $0.50 per 1M."
+        },
+        {
+          "service": "DynamoDB",
+          "unit": "per 1k read units",
+          "estimateRange": "$0.013–$0.125/mo",
+          "note": "On-demand read request units ($0.125 per 1M RRU). 1 RRU = 1 strongly-consistent read up to 4KB."
+        },
+        {
+          "service": "DynamoDB",
+          "unit": "per 1k write units",
+          "estimateRange": "$0.063–$0.625/mo",
+          "note": "On-demand write request units ($0.625 per 1M WRU). 1 WRU = 1 write up to 1KB."
+        },
+        {
+          "service": "SES",
+          "unit": "per 1k requests",
+          "estimateRange": "$10.00–$100.00/mo",
+          "note": "Email send: $0.10 per 1,000 emails (content). Attachment/data transfer billed separately."
+        },
+        {
+          "service": "CloudWatch Logs",
+          "unit": "$/GB ingested",
+          "estimateRange": "$0.010–$0.100/mo",
+          "note": "CloudWatch Logs ingestion $0.50/GB (first 10GB/mo free in some accounts). Archival storage is cheaper; Insights queries extra."
+        },
+        {
+          "service": "SNS",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.050–$0.500/mo",
+          "note": "Standard topic API requests ($0.50 per 1M). Delivery (HTTP/SMS/email) priced separately."
+        },
+        {
+          "service": "X-Ray",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.500–$5.00/mo",
+          "note": "X-Ray traces: $5.00 per 1M traces recorded (first 100k/mo free)."
+        }
+      ]
+    },
+    {
+      "name": "resilient",
+      "summary": "Adds cross-region active-passive DR: S3 Cross-Region Replication to a DR bucket, DynamoDB Global Tables for job/notify state, EventBridge cross-region event routing, Route 53 health-check failover, and PagerDuty escalation on SLO alarms.",
+      "nodes": [
+        {
+          "id": "cdn",
+          "awsService": "CloudFront",
+          "role": "edge + WAF front door",
+          "security": [
+            "WAF managed rules",
+            "rate-based rule",
+            "TLS only",
+            "Shield Standard",
+            "access logging"
+          ]
+        },
+        {
+          "id": "api_gw",
+          "awsService": "API Gateway (HTTP API)",
+          "role": "REST ingest endpoint",
+          "security": [
+            "TLS",
+            "IAM/JWT authorizer",
+            "throttling 500 rps",
+            "least-priv role"
+          ]
+        },
+        {
+          "id": "presign_fn",
+          "awsService": "Lambda",
+          "role": "pre-signed URL issuer",
+          "security": [
+            "least-priv role",
+            "KMS key access scoped to input bucket",
+            "reserved concurrency 50"
+          ]
+        },
+        {
+          "id": "input_bucket",
+          "awsService": "S3",
+          "role": "raw video intake",
+          "security": [
+            "SSE-KMS",
+            "block public access",
+            "versioning",
+            "lifecycle → Glacier 30d",
+            "event notification on s3:ObjectCreated"
+          ]
+        },
+        {
+          "id": "ingest_queue",
+          "awsService": "SQS",
+          "role": "upload event buffer",
+          "security": [
+            "SSE-KMS",
+            "DLQ attached",
+            "visibility timeout 300s",
+            "least-priv access policy"
+          ]
+        },
+        {
+          "id": "ingest_dlq",
+          "awsService": "SQS",
+          "role": "ingest dead-letter queue",
+          "security": [
+            "SSE-KMS",
+            "least-priv access policy"
+          ]
+        },
+        {
+          "id": "dispatch_fn",
+          "awsService": "Lambda",
+          "role": "transcode job dispatcher",
+          "security": [
+            "least-priv role",
+            "idempotent consumer",
+            "provisioned concurrency 5",
+            "DLQ on async invocation"
+          ]
+        },
+        {
+          "id": "mediaconvert",
+          "awsService": "AWS Elemental MediaConvert",
+          "role": "managed video transcoder",
+          "security": [
+            "least-priv IAM role",
+            "KMS output encryption",
+            "queue-based job isolation"
+          ]
+        },
+        {
+          "id": "output_bucket",
+          "awsService": "S3",
+          "role": "transcoded video store",
+          "security": [
+            "SSE-KMS",
+            "block public access",
+            "separate least-priv bucket policy",
+            "CloudFront OAC only"
+          ]
+        },
+        {
+          "id": "job_table",
+          "awsService": "DynamoDB Global Tables",
+          "role": "multi-region job state",
+          "security": [
+            "SSE-KMS CMK",
+            "on-demand capacity",
+            "conditional writes (idempotent)",
+            "TTL 30d",
+            "global table 2-region"
+          ]
+        },
+        {
+          "id": "completion_fn",
+          "awsService": "Lambda",
+          "role": "completion event handler",
+          "security": [
+            "least-priv role",
+            "idempotent consumer",
+            "provisioned concurrency 5"
+          ]
+        },
+        {
+          "id": "ses",
+          "awsService": "Amazon SES",
+          "role": "transactional email notifier",
+          "security": [
+            "DKIM/SPF",
+            "TLS",
+            "bounce/complaint event publishing",
+            "least-priv send role"
+          ]
+        },
+        {
+          "id": "notify_table",
+          "awsService": "DynamoDB Global Tables",
+          "role": "multi-region delivery outbox",
+          "security": [
+            "SSE-KMS CMK",
+            "on-demand capacity",
+            "conditional writes",
+            "global table 2-region"
+          ]
+        },
+        {
+          "id": "cw_logs",
+          "awsService": "CloudWatch Logs",
+          "role": "centralized structured logs",
+          "security": [
+            "KMS encrypted",
+            "90d retention",
+            "least-priv resource policy"
+          ]
+        },
+        {
+          "id": "cw_alarms",
+          "awsService": "CloudWatch Alarms",
+          "role": "golden-signal alarms",
+          "security": [
+            "least-priv role"
+          ]
+        },
+        {
+          "id": "ops_sns",
+          "awsService": "SNS",
+          "role": "ops alert fanout",
+          "security": [
+            "TLS",
+            "least-priv access policy"
+          ]
+        },
+        {
+          "id": "xray",
+          "awsService": "AWS X-Ray",
+          "role": "distributed tracing",
+          "security": [
+            "least-priv role"
+          ]
+        },
+        {
+          "id": "cloudtrail",
+          "awsService": "CloudTrail",
+          "role": "API audit trail",
+          "security": [
+            "log file validation",
+            "S3 SSE-KMS",
+            "management + data events"
+          ]
+        },
+        {
+          "id": "cw_dashboard",
+          "awsService": "CloudWatch Dashboards",
+          "role": "ops golden-signal dashboard",
+          "security": [
+            "least-priv read role"
+          ]
+        },
+        {
+          "id": "slack_webhook",
+          "awsService": "Lambda",
+          "role": "Slack alert forwarder",
+          "security": [
+            "least-priv role",
+            "Secrets Manager webhook URL",
+            "TLS"
+          ]
+        },
+        {
+          "id": "mc_priority_queue",
+          "awsService": "AWS Elemental MediaConvert",
+          "role": "priority transcode queue",
+          "security": [
+            "least-priv IAM role",
+            "KMS output encryption",
+            "queue-based job isolation"
+          ]
+        },
+        {
+          "id": "r53",
+          "awsService": "Route 53",
+          "role": "health-check DNS failover",
+          "security": [
+            "health checks on API GW endpoints",
+            "failover routing policy"
+          ]
+        },
+        {
+          "id": "input_bucket_dr",
+          "awsService": "S3",
+          "role": "DR region raw video replica",
+          "security": [
+            "SSE-KMS",
+            "block public access",
+            "CRR destination",
+            "versioning"
+          ]
+        },
+        {
+          "id": "output_bucket_dr",
+          "awsService": "S3",
+          "role": "DR region output replica",
+          "security": [
+            "SSE-KMS",
+            "block public access",
+            "CRR destination",
+            "CloudFront OAC only"
+          ]
+        },
+        {
+          "id": "eb_cross_region",
+          "awsService": "EventBridge",
+          "role": "cross-region event router",
+          "security": [
+            "least-priv resource policy",
+            "TLS",
+            "archive + replay enabled"
+          ]
+        },
+        {
+          "id": "pagerduty_fn",
+          "awsService": "Lambda",
+          "role": "PagerDuty escalation forwarder",
+          "security": [
+            "least-priv role",
+            "Secrets Manager PD key",
+            "TLS"
+          ]
+        },
+        {
+          "id": "slo_alarm",
+          "awsService": "CloudWatch Alarms",
+          "role": "SLO composite alarm",
+          "security": [
+            "least-priv role"
+          ]
+        },
+        {
+          "id": "anomaly_alarm",
+          "awsService": "CloudWatch Alarms",
+          "role": "anomaly-detection alarm",
+          "security": [
+            "least-priv role",
+            "ML baseline"
+          ]
+        }
+      ],
+      "edges": [
+        {
+          "from": "client",
+          "to": "cdn",
+          "payload": "HTTPS upload/API requests",
+          "protocol": "HTTPS"
+        },
+        {
+          "from": "cdn",
+          "to": "api_gw",
+          "payload": "authenticated API requests",
+          "protocol": "HTTPS"
+        },
+        {
+          "from": "api_gw",
+          "to": "presign_fn",
+          "payload": "presign request (filename, content-type)",
+          "protocol": "HTTPS/Lambda invoke"
+        },
+        {
+          "from": "presign_fn",
+          "to": "client",
+          "payload": "pre-signed S3 PUT URL",
+          "protocol": "HTTPS response"
+        },
+        {
+          "from": "client",
+          "to": "input_bucket",
+          "payload": "raw video bytes (multipart PUT)",
+          "protocol": "HTTPS"
+        },
+        {
+          "from": "input_bucket",
+          "to": "ingest_queue",
+          "payload": "s3:ObjectCreated event (key, size)",
+          "protocol": "S3 Event Notification"
+        },
+        {
+          "from": "ingest_queue",
+          "to": "dispatch_fn",
+          "payload": "SQS message (S3 key, job metadata)",
+          "protocol": "SQS trigger"
+        },
+        {
+          "from": "ingest_queue",
+          "to": "ingest_dlq",
+          "payload": "failed messages after 3 retries",
+          "protocol": "SQS redrive"
+        },
+        {
+          "from": "dispatch_fn",
+          "to": "job_table",
+          "payload": "job record (jobId, status=QUEUED)",
+          "protocol": "DynamoDB PutItem (conditional)"
+        },
+        {
+          "from": "dispatch_fn",
+          "to": "mediaconvert",
+          "payload": "CreateJob request (input S3 URI, output preset)",
+          "protocol": "HTTPS/API"
+        },
+        {
+          "from": "mediaconvert",
+          "to": "output_bucket",
+          "payload": "transcoded video files",
+          "protocol": "S3 PUT (internal)"
+        },
+        {
+          "from": "mediaconvert",
+          "to": "completion_fn",
+          "payload": "job COMPLETE/ERROR event",
+          "protocol": "EventBridge (MediaConvert event)"
+        },
+        {
+          "from": "completion_fn",
+          "to": "job_table",
+          "payload": "status update (COMPLETE/ERROR, output URI)",
+          "protocol": "DynamoDB UpdateItem (conditional)"
+        },
+        {
+          "from": "completion_fn",
+          "to": "notify_table",
+          "payload": "delivery record (pending, userId, jobId)",
+          "protocol": "DynamoDB PutItem (conditional)"
+        },
+        {
+          "from": "completion_fn",
+          "to": "ses",
+          "payload": "send email (user address, output link)",
+          "protocol": "HTTPS/SES API"
+        },
+        {
+          "from": "ses",
+          "to": "notify_table",
+          "payload": "delivery/bounce/complaint event",
+          "protocol": "SES event → Lambda → DynamoDB"
+        },
+        {
+          "from": "dispatch_fn",
+          "to": "cw_logs",
+          "payload": "structured logs (jobId, status)",
+          "protocol": "CloudWatch Logs API"
+        },
+        {
+          "from": "completion_fn",
+          "to": "cw_logs",
+          "payload": "structured logs (completion event)",
+          "protocol": "CloudWatch Logs API"
+        },
+        {
+          "from": "cw_logs",
+          "to": "cw_alarms",
+          "payload": "metric filters (error rate, DLQ depth, duration)",
+          "protocol": "CloudWatch Metrics"
+        },
+        {
+          "from": "cw_alarms",
+          "to": "ops_sns",
+          "payload": "alarm state change notification",
+          "protocol": "SNS publish"
+        },
+        {
+          "from": "ops_sns",
+          "to": "client",
+          "payload": "ops email alert",
+          "protocol": "Email/HTTPS subscription"
+        },
+        {
+          "from": "dispatch_fn",
+          "to": "xray",
+          "payload": "trace segments",
+          "protocol": "X-Ray SDK"
+        },
+        {
+          "from": "completion_fn",
+          "to": "xray",
+          "payload": "trace segments",
+          "protocol": "X-Ray SDK"
+        },
+        {
+          "from": "ops_sns",
+          "to": "slack_webhook",
+          "payload": "alarm notification payload",
+          "protocol": "SNS → Lambda invoke"
+        },
+        {
+          "from": "slack_webhook",
+          "to": "client",
+          "payload": "Slack message (alarm detail)",
+          "protocol": "HTTPS webhook"
+        },
+        {
+          "from": "cw_logs",
+          "to": "cw_dashboard",
+          "payload": "metrics (latency, errors, DLQ depth)",
+          "protocol": "CloudWatch Metrics"
+        },
+        {
+          "from": "dispatch_fn",
+          "to": "mc_priority_queue",
+          "payload": "high-priority CreateJob request",
+          "protocol": "HTTPS/API"
+        },
+        {
+          "from": "input_bucket",
+          "to": "input_bucket_dr",
+          "payload": "raw video objects (CRR)",
+          "protocol": "S3 Cross-Region Replication"
+        },
+        {
+          "from": "output_bucket",
+          "to": "output_bucket_dr",
+          "payload": "transcoded video objects (CRR)",
+          "protocol": "S3 Cross-Region Replication"
+        },
+        {
+          "from": "mediaconvert",
+          "to": "eb_cross_region",
+          "payload": "job completion event",
+          "protocol": "EventBridge rule → cross-region bus"
+        },
+        {
+          "from": "eb_cross_region",
+          "to": "completion_fn",
+          "payload": "replicated completion event (DR region)",
+          "protocol": "EventBridge → Lambda invoke"
+        },
+        {
+          "from": "client",
+          "to": "r53",
+          "payload": "DNS query (API hostname)",
+          "protocol": "DNS"
+        },
+        {
+          "from": "r53",
+          "to": "api_gw",
+          "payload": "primary region routing",
+          "protocol": "DNS failover"
+        },
+        {
+          "from": "slo_alarm",
+          "to": "ops_sns",
+          "payload": "SLO breach notification",
+          "protocol": "CloudWatch → SNS"
+        },
+        {
+          "from": "ops_sns",
+          "to": "pagerduty_fn",
+          "payload": "alarm payload",
+          "protocol": "SNS → Lambda invoke"
+        },
+        {
+          "from": "pagerduty_fn",
+          "to": "client",
+          "payload": "PagerDuty incident (on-call page)",
+          "protocol": "HTTPS/PagerDuty API"
+        },
+        {
+          "from": "anomaly_alarm",
+          "to": "ops_sns",
+          "payload": "anomaly breach alert",
+          "protocol": "CloudWatch → SNS"
+        }
+      ],
+      "delta": [
+        "S3 CRR replicates input + output buckets to DR region — RPO ~15 min for video assets",
+        "DynamoDB Global Tables (2-region) — job + delivery state survives primary-region failure",
+        "EventBridge cross-region bus routes MediaConvert completion events to DR Lambda — RTO <5 min",
+        "Route 53 health-check failover — DNS cuts over to DR API Gateway on primary health failure",
+        "SLO composite alarm + anomaly-detection alarm added — proactive before user impact",
+        "PagerDuty escalation via SNS → Lambda — on-call paged with incident severity + runbook link",
+        "EventBridge archive + replay enabled — replay events after DR recovery without data loss"
+      ],
+      "tradeoffs": [
+        "Global Tables + CRR + EventBridge cross-region add meaningful always-on replication cost",
+        "Active-passive DR: DR region is cold — warm-up of Lambda provisioned concurrency takes ~1 min on failover",
+        "Cross-region MediaConvert jobs must be re-submitted in DR region for in-flight jobs at failure time",
+        "Complexity of two-region state synchronization requires disciplined DR runbook and regular failover drills"
+      ],
+      "costDrivers": [
+        {
+          "service": "CloudFront",
+          "unit": "$/GB transferred",
+          "estimateRange": "$0.043–$0.425/mo",
+          "note": "Data transfer out to internet, first 10TB/month tier (North America). First 1TB/month is free."
+        },
+        {
+          "service": "CloudFront",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.075–$0.750/mo",
+          "note": "HTTPS requests ($0.0075 per 10,000). North America/Europe."
+        },
+        {
+          "service": "Lambda",
+          "unit": "$/GB-second",
+          "estimateRange": "$0.167–$1.67/mo",
+          "note": "Compute duration: $0.0000166667 per GB-second (x86). Multiply by memoryGB x durationSeconds per invocation."
+        },
+        {
+          "service": "Lambda",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.020–$0.200/mo",
+          "note": "On-demand list price ($0.20 per 1M requests). Excludes Free Tier."
+        },
+        {
+          "service": "S3",
+          "unit": "$/GB-month",
+          "estimateRange": "$0.230–$2.30/mo",
+          "note": "S3 Standard storage, first 50TB/month tier."
+        },
+        {
+          "service": "S3",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.500–$5.00/mo",
+          "note": "PUT/COPY/POST/LIST requests per 1,000. GET/SELECT requests are ~$0.0004 per 1,000."
+        },
+        {
+          "service": "SQS",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.040–$0.400/mo",
+          "note": "Standard queue requests ($0.40 per 1M). First 1M/month free. FIFO is $0.50 per 1M."
+        },
+        {
+          "service": "DynamoDB",
+          "unit": "per 1k read units",
+          "estimateRange": "$0.013–$0.125/mo",
+          "note": "On-demand read request units ($0.125 per 1M RRU). 1 RRU = 1 strongly-consistent read up to 4KB."
+        },
+        {
+          "service": "DynamoDB",
+          "unit": "per 1k write units",
+          "estimateRange": "$0.063–$0.625/mo",
+          "note": "On-demand write request units ($0.625 per 1M WRU). 1 WRU = 1 write up to 1KB."
+        },
+        {
+          "service": "SES",
+          "unit": "per 1k requests",
+          "estimateRange": "$10.00–$100.00/mo",
+          "note": "Email send: $0.10 per 1,000 emails (content). Attachment/data transfer billed separately."
+        },
+        {
+          "service": "CloudWatch Logs",
+          "unit": "$/GB ingested",
+          "estimateRange": "$0.010–$0.100/mo",
+          "note": "CloudWatch Logs ingestion $0.50/GB (first 10GB/mo free in some accounts). Archival storage is cheaper; Insights queries extra."
+        },
+        {
+          "service": "SNS",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.050–$0.500/mo",
+          "note": "Standard topic API requests ($0.50 per 1M). Delivery (HTTP/SMS/email) priced separately."
+        },
+        {
+          "service": "X-Ray",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.500–$5.00/mo",
+          "note": "X-Ray traces: $5.00 per 1M traces recorded (first 100k/mo free)."
+        },
+        {
+          "service": "EventBridge",
+          "unit": "per 1k requests",
+          "estimateRange": "$0.100–$1.00/mo",
+          "note": "Custom event-bus events: $1.00 per 1M events published. Pipes/schema registry priced separately."
+        }
+      ]
+    }
+  ],
+  "keyDecisions": [
+    {
+      "decision": "Transcoding engine",
+      "chosen": "AWS Elemental MediaConvert (managed)",
+      "alternativesConsidered": [
+        "Self-hosted FFmpeg on EC2/ECS",
+        "Elastic Transcoder (legacy)"
+      ],
+      "rationale": "MediaConvert is fully managed, scales to concurrent jobs without fleet management, and pays per minute of output — zero idle cost, aligning with cost-optimization and operational-excellence pillars."
+    },
+    {
+      "decision": "Upload ingest path",
+      "chosen": "S3 pre-signed URL (direct client → S3 upload, no proxy)",
+      "alternativesConsidered": [
+        "Proxy upload through API Gateway + Lambda",
+        "Transfer Acceleration"
+      ],
+      "rationale": "Pre-signed URLs offload binary transfer to S3, keeping Lambda/API Gateway outside the data path and eliminating the 10 MB Lambda payload limit — best for performance efficiency and cost."
+    },
+    {
+      "decision": "Async job dispatch mechanism",
+      "chosen": "S3 Event Notification → SQS → Lambda worker",
+      "alternativesConsidered": [
+        "S3 → Lambda direct invocation",
+        "EventBridge Pipes",
+        "Step Functions"
+      ],
+      "rationale": "SQS buffers upload spikes and decouples ingest from transcoder capacity, giving at-least-once delivery with DLQ safety — reliability pillar over the simpler but drop-prone direct Lambda invocation."
+    },
+    {
+      "decision": "User notification delivery",
+      "chosen": "SES with delivery-status event publishing to DynamoDB job record",
+      "alternativesConsidered": [
+        "SNS email subscription",
+        "WebSocket push via API Gateway",
+        "In-app polling"
+      ],
+      "rationale": "SES gives observable, retryable delivery with bounce/complaint tracking; flipping the job record to 'delivered' on success satisfies the outbox pattern for reliable notification — bare SNS email lacks per-message ack."
+    },
+    {
+      "decision": "Job state store",
+      "chosen": "DynamoDB (on-demand) as job tracker",
+      "alternativesConsidered": [
+        "RDS Postgres",
+        "ElastiCache + polling"
+      ],
+      "rationale": "DynamoDB on-demand absorbs write spikes from parallel transcode completions with no provisioned capacity, and its conditional-write gives idempotent job-status updates — cost-optimization + reliability at zero idle cost."
+    }
+  ],
+  "securityFloor": [
+    "Encrypt all data at rest (KMS / service-native SSE), preferring customer-managed keys.",
+    "Enforce TLS in transit everywhere; terminate HTTPS at the edge and reject plaintext.",
+    "Least-privilege IAM: scoped per-service roles, no wildcards, no long-lived access keys.",
+    "Enable S3 Block Public Access account-wide so no bucket or object can be made public.",
+    "Keep the data tier private: VPC-bound stores in private subnets with no public route; managed/serverless stores (DynamoDB/S3) are already private via IAM and need no VPC or NAT.",
+    "Store secrets in AWS Secrets Manager / SSM Parameter Store — never in code or images.",
+    "Front public endpoints with CloudFront + AWS WAF (managed + rate-based rules); Shield Standard for L3/L4.",
+    "Enable CloudTrail plus S3/CloudFront/ALB access logs and VPC Flow Logs for audit."
+  ],
+  "recommendedTier": "balanced",
+  "recommendationRationale": ""
+}

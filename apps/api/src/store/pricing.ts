@@ -30,7 +30,7 @@ function toRecord(row: PricingRow): PriceRecord {
 export class SqlitePricingStore implements PricingStore {
   constructor(private readonly db: Db) {}
 
-  get(service: string, region: string): PriceRecord[] {
+  async get(service: string, region: string): Promise<PriceRecord[]> {
     // YYYY-MM sorts lexicographically, so MAX(month) is the freshest snapshot.
     const rows = this.db
       .prepare(
@@ -45,7 +45,7 @@ export class SqlitePricingStore implements PricingStore {
     return rows.map(toRecord);
   }
 
-  replaceMonth(region: string, month: string, records: PriceRecord[]): void {
+  async replaceMonth(region: string, month: string, records: PriceRecord[]): Promise<void> {
     const swap = this.db.transaction((rows: PriceRecord[]) => {
       this.db
         .prepare(`DELETE FROM pricing WHERE region = ? AND month = ?`)
@@ -59,7 +59,7 @@ export class SqlitePricingStore implements PricingStore {
     swap.immediate(records);
   }
 
-  seed(records: PriceRecord[]): void {
+  async seed(records: PriceRecord[]): Promise<void> {
     const insert = this.db.prepare(
       `INSERT OR IGNORE INTO pricing (service, region, unit, usd, month, note)
        VALUES (@service, @region, @unit, @usd, @month, @note)`,

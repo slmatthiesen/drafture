@@ -132,7 +132,7 @@ async function buildHarness(
   const stores = createStores(openTempDb());
   const lines: string[] = [];
   const sink: TelemetrySink = (line) => lines.push(line);
-  const ctx = buildAppContext(testConfig(configOverrides), {
+  const ctx = await buildAppContext(testConfig(configOverrides), {
     provider: fake.provider,
     stores,
     telemetrySink: sink,
@@ -198,7 +198,7 @@ describe("POST /api/generate", () => {
     const { app, stores, lines } = await buildHarness(fake, {}, { embedder });
 
     // Seed one APPROVED design + its embedding into the corpus.
-    const { id } = stores.generations.upsert({
+    const { id } = await stores.generations.upsert({
       promptHash: "ph-notif",
       description: PROMPT,
       answers: [],
@@ -209,8 +209,8 @@ describe("POST /api/generate", () => {
       body: JSON.stringify(validArchitecture()),
       clientIp: "9.9.9.9",
     });
-    stores.generations.setStatus(id, "approved");
-    stores.designVectors.upsert({ id, source: "generation", promptHash: "ph-notif", text: PROMPT, vector: [1, 0, 0], model: "voyage-3-lite" });
+    await stores.generations.setStatus(id, "approved");
+    await stores.designVectors.upsert({ id, source: "generation", promptHash: "ph-notif", text: PROMPT, vector: [1, 0, 0], model: "voyage-3-lite" });
 
     const res = await app.inject({ method: "POST", url: "/api/generate", payload: { description: PROMPT } });
 
@@ -343,8 +343,8 @@ describe("POST /api/generate", () => {
     const first = await app.inject({ method: "POST", url: "/api/generate", payload: { description: SPEC } });
     expect(first.statusCode).toBe(200);
     expect(fake.calls.generate).toBe(1);
-    const spendAfterFirst = ctx.stores.spendLedger.spentTodayUsd();
-    const capAfterFirst = ctx.stores.spendLedger.ipCountToday("127.0.0.1");
+    const spendAfterFirst = await ctx.stores.spendLedger.spentTodayUsd();
+    const capAfterFirst = await ctx.stores.spendLedger.ipCountToday("127.0.0.1");
     expect(capAfterFirst).toBe(1);
 
     const second = await app.inject({ method: "POST", url: "/api/generate", payload: { description: SPEC } });
@@ -353,8 +353,8 @@ describe("POST /api/generate", () => {
     // The provider was NOT called again — the cache short-circuited generation.
     expect(fake.calls.generate).toBe(1);
     // A cache hit consumes neither the per-IP cap nor the spend ledger (KTD8).
-    expect(ctx.stores.spendLedger.ipCountToday("127.0.0.1")).toBe(1);
-    expect(ctx.stores.spendLedger.spentTodayUsd()).toBeCloseTo(spendAfterFirst);
+    expect(await ctx.stores.spendLedger.ipCountToday("127.0.0.1")).toBe(1);
+    expect(await ctx.stores.spendLedger.spentTodayUsd()).toBeCloseTo(spendAfterFirst);
 
     const rec = lastTelemetry(lines);
     expect(rec.cacheHit).toBe(true);
@@ -371,7 +371,7 @@ describe("POST /api/generate", () => {
     expect(res.statusCode).toBe(502);
     expect(res.json().error).toBe("generation_failed");
     // The reservation was released — no spend lingers from a call that produced nothing.
-    expect(ctx.stores.spendLedger.spentTodayUsd()).toBeCloseTo(0);
+    expect(await ctx.stores.spendLedger.spentTodayUsd()).toBeCloseTo(0);
     expect(lastTelemetry(lines).outcome).toBe("error");
 
     await app.close();

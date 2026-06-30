@@ -15,7 +15,7 @@ async function buildHarness(): Promise<{ app: FastifyInstance; stores: Stores }>
   const stores = createStores(openTempDb());
   // No provider override needed: the curated routes never call the model. The real
   // provider is constructed but idle (the test ANTHROPIC_API_KEY is never used).
-  const ctx = buildAppContext(testConfig(), { stores });
+  const ctx = await buildAppContext(testConfig(), { stores });
   const app = Fastify({ logger: false, trustProxy: true });
   await registerApiRoutes(app, ctx);
   return { app, stores };
@@ -29,7 +29,7 @@ describe("curated routes", () => {
 
   beforeEach(async () => {
     ({ app, stores } = await buildHarness());
-    stores.curated.upsert({ id: "alpha", title: "Alpha", prompt: "p", body: JSON.stringify(DESIGN) });
+    await stores.curated.upsert({ id: "alpha", title: "Alpha", prompt: "p", body: JSON.stringify(DESIGN) });
   });
 
   it("GET /api/curated lists summaries without the body", async () => {

@@ -17,18 +17,18 @@ import { buildAppContext } from "../src/app/context.js";
 import { estimateCosts } from "../src/pipeline/cost.js";
 import type { ArchitectureResult } from "../src/schema/architecture.js";
 
-function main(): void {
+async function main(): Promise<void> {
   const config = getConfig();
-  const ctx = buildAppContext(config);
+  const ctx = await buildAppContext(config);
   const region = config.DEFAULT_REGION;
 
-  for (const summary of ctx.stores.curated.list()) {
-    const run = ctx.stores.curated.get(summary.id);
+  for (const summary of await ctx.stores.curated.list()) {
+    const run = await ctx.stores.curated.get(summary.id);
     if (!run) continue;
     const design = JSON.parse(run.body) as ArchitectureResult;
-    const reestimated = estimateCosts(design, ctx.stores.pricing, region);
+    const reestimated = await estimateCosts(design, ctx.stores.pricing, region);
     // upsert preserves votes + created_at (ON CONFLICT updates only body/title/prompt).
-    ctx.stores.curated.upsert({
+    await ctx.stores.curated.upsert({
       id: summary.id,
       title: run.title,
       prompt: run.prompt,

@@ -89,7 +89,7 @@ function renderReferenceTf(raw: string): { code: string; gaps: string[] } {
 async function main(): Promise<void> {
   const args = parseArgs();
   const config = getConfig();
-  const ctx = buildAppContext(config);
+  const ctx = await buildAppContext(config);
 
   console.log(`Model: ${config.LLM_PROVIDER ?? "anthropic"}/${config.LLM_MODEL}  ·  tiers: ${args.tiers.join(", ")}`);
   console.log(`Prompt: "${args.prompt.slice(0, 100)}${args.prompt.length > 100 ? "…" : ""}"\n`);
@@ -101,7 +101,7 @@ async function main(): Promise<void> {
     answers: args.answers,
     opts: { maxTokens: config.LLM_MAX_TOKENS, effort: config.LLM_EFFORT },
   });
-  const estimated = estimateCosts(result, ctx.stores.pricing, config.DEFAULT_REGION, trafficVolumeScale(args.answers));
+  const estimated = await estimateCosts(result, ctx.stores.pricing, config.DEFAULT_REGION, trafficVolumeScale(args.answers));
 
   // The launch gate — every structural/coherence property. A corpus candidate that
   // fails here must NOT be approved (it would be served verbatim).
@@ -162,7 +162,7 @@ async function main(): Promise<void> {
       model: config.LLM_MODEL,
       region: config.DEFAULT_REGION,
     });
-    const { id, status } = ctx.stores.generations.upsert({
+    const { id, status } = await ctx.stores.generations.upsert({
       promptHash,
       description: args.prompt,
       answers: args.answers,

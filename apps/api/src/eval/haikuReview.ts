@@ -99,7 +99,7 @@ async function main(): Promise<void> {
   const config = loadConfig();
   const db = getDb(config.DB_PATH);
   const stores = createStores(db);
-  seedKnowledgeBase(stores);
+  await seedKnowledgeBase(stores);
   const provider = ClaudeProvider.fromConfig(config);
 
   const prompts = selectPrompts();
@@ -118,7 +118,7 @@ async function main(): Promise<void> {
         memory: stores.memory,
         description: prompt.description,
       });
-      const design = estimateCosts(result, stores.pricing, config.DEFAULT_REGION);
+      const design = await estimateCosts(result, stores.pricing, config.DEFAULT_REGION);
       const props = runAllProperties(design);
       const cost = usd(usage);
       totalCost += cost;

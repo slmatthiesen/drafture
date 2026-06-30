@@ -6,7 +6,7 @@
  * emitters reference those addresses by deterministic name and never invent wiring.
  */
 import type { ArchitectureNode } from "../../../schema/architecture.js";
-import { colocatedHost, lambdaNeedsVpc, ref, type EmitCtx } from "../context.js";
+import { colocatedHost, cwLogsKmsLine, lambdaNeedsVpc, ref, type EmitCtx } from "../context.js";
 import type { HclBlock } from "../hcl.js";
 
 const tag = (node: ArchitectureNode, kw: string): boolean =>
@@ -46,7 +46,8 @@ export function emitEc2(node: ArchitectureNode, ctx: EmitCtx): HclBlock[] {
       `    volume_type = "gp3"`,
       `    volume_size = 20`,
       `    encrypted   = true`,
-      `    kms_key_id  = aws_kms_key.main.arn`,
+      // Budget floor: AWS-managed aws/ebs key (free). Balanced+/compliance: a CMK.
+      ...(ctx.paidSecurity ? [`    kms_key_id  = aws_kms_key.main.arn`] : []),
       `  }`,
       ``,
       `  tags = { Name = "${ctx.prefix}-${tf.replace(/_/g, "-")}" }`,
@@ -71,7 +72,7 @@ export function emitPostgres(node: ArchitectureNode, ctx: EmitCtx): HclBlock[] {
         `  size              = 50`,
         `  type              = "gp3"`,
         `  encrypted         = true`,
-        `  kms_key_id        = aws_kms_key.main.arn`,
+        ...(ctx.paidSecurity ? [`  kms_key_id        = aws_kms_key.main.arn`] : []),
         `  tags              = { Name = "${ctx.prefix}-${tf.replace(/_/g, "-")}" }`,
         `}`,
       ].join("\n"),
@@ -140,7 +141,7 @@ export function emitLambda(node: ArchitectureNode, ctx: EmitCtx): HclBlock[] {
         `resource "aws_cloudwatch_log_group" "${tf}" {`,
         `  name              = "/aws/lambda/${ctx.prefix}-${tf.replace(/_/g, "-")}"`,
         `  retention_in_days = 30`,
-        `  kms_key_id        = aws_kms_key.cw_logs.arn`,
+        ...cwLogsKmsLine(ctx),
         `}`,
       ].join("\n"),
     },

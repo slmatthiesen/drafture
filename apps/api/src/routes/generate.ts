@@ -172,7 +172,7 @@ async function handleGenerate(
   });
 
   // (2) ResponseCache lookup. HIT short-circuits: no cap, no spend, costUsd 0 (KTD8).
-  const cached = ctx.stores.responseCache.get(cacheKey, ctx.config.RESPONSE_CACHE_TTL_MS);
+  const cached = await ctx.stores.responseCache.get(cacheKey, ctx.config.RESPONSE_CACHE_TTL_MS);
   if (cached) {
     emit("ok", { cacheHit: true, costUsd: 0 });
     return reply.code(200).send(JSON.parse(cached.body));
@@ -231,7 +231,7 @@ async function handleGenerate(
   // (4) Reserve against the global daily ceiling BEFORE generating (KTD7). The reserve
   // is transactional in the ledger, so concurrent requests cannot overshoot.
   const provisional = provisionalLlmCostUsdFromConfig(ctx.config);
-  const reservation = reserveSpend(ctx.stores.spendLedger, provisional, ctx.config.DAILY_SPEND_CEILING_USD);
+  const reservation = await reserveSpend(ctx.stores.spendLedger, provisional, ctx.config.DAILY_SPEND_CEILING_USD);
   if (!reservation.ok || !reservation.reservation) {
     emit("refused", { costUsd: 0, retrievalHit });
     // 503: the service is temporarily unavailable for NEW generations; cache still serves.
@@ -245,14 +245,14 @@ async function handleGenerate(
   const reservationId = reservation.reservation.reservationId;
 
   // Now it is a real generation — consume the per-IP daily allotment.
-  ctx.guards.dailyCap.recordIpGeneration(ip);
+  await ctx.guards.dailyCap.recordIpGeneration(ip);
 
   let researchCalls = 0;
   try {
     // Optional research-on-miss: persist quarantined facts so this and future requests
     // are grounded; count its token usage toward the request's spend (R11).
     if (ctx.config.RESEARCH_ON_MISS) {
-      const { missingTopics } = assembleGrounding({ description, answers, memory: ctx.stores.memory });
+      const { missingTopics } = await assembleGrounding({ description, answers, memory: ctx.stores.memory });
       if (missingTopics.length > 0) {
         const summary = await researchMissingTopics({
           topics: missingTopics,
@@ -278,7 +278,7 @@ async function handleGenerate(
     // Traffic is its own axis now: the intake "expected monthly visitors" answer drives
     // ONE volume scale applied equally to all three tiers (tiers differ by robustness,
     // not traffic); absent → the sensible default band.
-    const estimated = estimateCosts(
+    const estimated = await estimateCosts(
       generated.result,
       ctx.stores.pricing,
       ctx.config.DEFAULT_REGION,
@@ -287,7 +287,7 @@ async function handleGenerate(
 
     // Reconcile the provisional reserve to the ACTUAL request cost (KTD7).
     const actualUsd = llmCostUsd(usage, ctx.pricing);
-    ctx.stores.spendLedger.reconcile(reservationId, actualUsd);
+    await ctx.stores.spendLedger.reconcile(reservationId, actualUsd);
 
     // Defense-in-depth: scrub the OUTPUT too. The input was scrubbed before the model
     // saw it, but redact any credential shape that slipped through into free-text fields
@@ -310,7 +310,7 @@ async function handleGenerate(
     // returns it too. Off in test/probe envs (PERSIST_GENERATIONS) so they don't pollute.
     if (ctx.config.PERSIST_GENERATIONS) {
       try {
-        const { id } = ctx.stores.generations.upsert({
+        const { id } = await ctx.stores.generations.upsert({
           promptHash: cacheKey,
           description,
           answers,
@@ -327,7 +327,7 @@ async function handleGenerate(
       }
     }
 
-    ctx.stores.responseCache.set(cacheKey, JSON.stringify(responseBody));
+    await ctx.stores.responseCache.set(cacheKey, JSON.stringify(responseBody));
 
     // Structural-completeness signal for the telemetry line (free, deterministic —
     // the same checks gate the offline eval). Run on the scrubbed, cost-filled body.
@@ -337,7 +337,7 @@ async function handleGenerate(
   } catch (err) {
     // Generation failed: release the reservation so the budget isn't consumed by a
     // call that produced nothing, then surface a clean upstream error.
-    ctx.stores.spendLedger.release(reservationId);
+    await ctx.stores.spendLedger.release(reservationId);
     emit("error", { costUsd: 0, researchCalls, retrievalHit });
     req.log.error({ err }, "generation failed");
     return reply.code(502).send({

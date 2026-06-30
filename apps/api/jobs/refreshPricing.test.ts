@@ -131,36 +131,36 @@ describe("refreshPricing", () => {
     expect(result.servicesRefreshed).toBe(3);
 
     // Lambda is a DUAL-unit service: per-1k requests AND $/GB-second (KTD6).
-    const lambda = unitMap(stores.pricing.get("Lambda", REGION));
+    const lambda = unitMap(await stores.pricing.get("Lambda", REGION));
     expect(lambda.get("per-1k-requests")?.usd).toBeCloseTo(0.0002, 10); // 0.0000002 × 1000
     expect(lambda.get("gb-second")?.usd).toBeCloseTo(0.0000166667, 12);
     expect(lambda.get("per-1k-requests")?.month).toBe("2026-06");
 
     // SQS request price normalized per-1k, cheapest tier wins.
-    const sqs = unitMap(stores.pricing.get("SQS", REGION));
+    const sqs = unitMap(await stores.pricing.get("SQS", REGION));
     expect(sqs.get("per-1k-requests")?.usd).toBeCloseTo(0.0004, 10); // 0.0000004 × 1000
 
     // Data transfer is surfaced as a first-class native unit.
-    const dt = unitMap(stores.pricing.get("Data Transfer", REGION));
+    const dt = unitMap(await stores.pricing.get("Data Transfer", REGION));
     expect(dt.get("gb-internet-egress")?.usd).toBeCloseTo(0.09, 10);
   });
 
   it("replaces a stale month with the new month atomically (no duplicates)", async () => {
     // Pre-seed an older snapshot for Lambda.
-    stores.pricing.replaceMonth(REGION, "2026-05", [
+    await stores.pricing.replaceMonth(REGION, "2026-05", [
       { service: "Lambda", region: REGION, unit: "per-1k-requests", usd: 0.99, month: "2026-05", note: "stale" },
     ]);
 
     await refreshPricing({ pricing: stores.pricing, region: REGION, deps: makeDeps() });
 
     // get() prefers the freshest month — the refreshed 2026-06 snapshot.
-    const lambda = unitMap(stores.pricing.get("Lambda", REGION));
+    const lambda = unitMap(await stores.pricing.get("Lambda", REGION));
     expect(lambda.get("per-1k-requests")?.month).toBe("2026-06");
     expect(lambda.get("per-1k-requests")?.usd).toBeCloseTo(0.0002, 10);
 
     // Re-running the same month replaces, never duplicates.
     await refreshPricing({ pricing: stores.pricing, region: REGION, deps: makeDeps() });
-    expect(stores.pricing.get("Lambda", REGION).filter((r) => r.unit === "per-1k-requests")).toHaveLength(1);
+    expect((await stores.pricing.get("Lambda", REGION)).filter((r) => r.unit === "per-1k-requests")).toHaveLength(1);
   });
 
   it("leaves the prior cache intact on failure (no partial wipe, R10)", async () => {
@@ -173,7 +173,7 @@ describe("refreshPricing", () => {
       month: "2026-06",
       note: "prior good snapshot",
     };
-    stores.pricing.replaceMonth(REGION, "2026-06", [prior]);
+    await stores.pricing.replaceMonth(REGION, "2026-06", [prior]);
 
     // Fail mid-walk (region file load throws). now() => same 2026-06 month.
     const result = await refreshPricing({
@@ -191,13 +191,13 @@ describe("refreshPricing", () => {
     expect(result.error).toMatch(/network exploded/);
 
     // Cache untouched: the prior 2026-06 row survives unchanged.
-    const lambda = stores.pricing.get("Lambda", REGION);
+    const lambda = await stores.pricing.get("Lambda", REGION);
     expect(lambda).toHaveLength(1);
     expect(lambda[0]?.note).toBe("prior good snapshot");
   });
 
   it("treats an empty extraction as failure and leaves the cache intact", async () => {
-    stores.pricing.replaceMonth(REGION, "2026-06", [
+    await stores.pricing.replaceMonth(REGION, "2026-06", [
       { service: "Lambda", region: REGION, unit: "per-1k-requests", usd: 0.0002, month: "2026-06", note: "prior" },
     ]);
 
@@ -210,6 +210,6 @@ describe("refreshPricing", () => {
 
     expect(result.ok).toBe(false);
     expect(result.fellBackToSeed).toBe(true);
-    expect(stores.pricing.get("Lambda", REGION)[0]?.note).toBe("prior");
+    expect((await stores.pricing.get("Lambda", REGION))[0]?.note).toBe("prior");
   });
 });

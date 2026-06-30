@@ -172,7 +172,7 @@ async function handleConfig(
   const tierName = typeof tier?.name === "string" ? tier.name : undefined;
   const generationId = body.generationId;
   if (generationId && tierName) {
-    const stored = ctx.stores.generations.getTerraform(generationId, tierName);
+    const stored = await ctx.stores.generations.getTerraform(generationId, tierName);
     if (stored) {
       emit("ok", { cacheHit: true, costUsd: 0 });
       return reply.code(200).send({ format: FORMAT, code: stored.code });
@@ -180,7 +180,7 @@ async function handleConfig(
   }
 
   // (1) ResponseCache lookup. HIT short-circuits: no spend, costUsd 0 (KTD8).
-  const cached = ctx.stores.responseCache.get(cacheKey, ctx.config.RESPONSE_CACHE_TTL_MS);
+  const cached = await ctx.stores.responseCache.get(cacheKey, ctx.config.RESPONSE_CACHE_TTL_MS);
   if (cached) {
     emit("ok", { cacheHit: true, costUsd: 0 });
     return reply.code(200).send(JSON.parse(cached.body));
@@ -199,12 +199,12 @@ async function handleConfig(
         const responseBody = { format: FORMAT, code: assembled.code };
         if (generationId && tierName) {
           try {
-            ctx.stores.generations.setTerraform(generationId, tierName, responseBody.code);
+            await ctx.stores.generations.setTerraform(generationId, tierName, responseBody.code);
           } catch (err) {
             req.log.error({ err }, "terraform persist failed (non-fatal)");
           }
         }
-        ctx.stores.responseCache.set(cacheKey, JSON.stringify(responseBody));
+        await ctx.stores.responseCache.set(cacheKey, JSON.stringify(responseBody));
         emit("ok", { cacheHit: false, costUsd: 0 });
         return reply.code(200).send(responseBody);
       }
@@ -226,7 +226,7 @@ async function handleConfig(
     ctx.config.LLM_MAX_INPUT_TOKENS,
     CONFIG_MAX_OUTPUT_TOKENS,
   );
-  const reservation = reserveSpend(ctx.stores.spendLedger, provisional, ctx.config.DAILY_SPEND_CEILING_USD);
+  const reservation = await reserveSpend(ctx.stores.spendLedger, provisional, ctx.config.DAILY_SPEND_CEILING_USD);
   if (!reservation.ok || !reservation.reservation) {
     emit("refused", { costUsd: 0 });
     // 503: cost ceiling reached for NEW work; cached configs still serve.
@@ -245,7 +245,7 @@ async function handleConfig(
 
     // Reconcile the provisional reserve to the ACTUAL measured cost (KTD7).
     const actualUsd = llmCostUsd(usage, ctx.pricing);
-    ctx.stores.spendLedger.reconcile(reservationId, actualUsd);
+    await ctx.stores.spendLedger.reconcile(reservationId, actualUsd);
 
     const cleaned = stripCodeFence(generated.result);
     // Residual wire-up gaps the model still omitted — `terraform plan` stays green on
@@ -266,19 +266,19 @@ async function handleConfig(
     // Best-effort: a persist failure never breaks the artifact the user just paid for.
     if (generationId && tierName) {
       try {
-        ctx.stores.generations.setTerraform(generationId, tierName, responseBody.code);
+        await ctx.stores.generations.setTerraform(generationId, tierName, responseBody.code);
       } catch (err) {
         req.log.error({ err }, "terraform persist failed (non-fatal)");
       }
     }
 
-    ctx.stores.responseCache.set(cacheKey, JSON.stringify(responseBody));
+    await ctx.stores.responseCache.set(cacheKey, JSON.stringify(responseBody));
 
     emit("ok", { costUsd: actualUsd });
     return reply.code(200).send(responseBody);
   } catch (err) {
     // The call produced nothing — release the reservation so no budget lingers.
-    ctx.stores.spendLedger.release(reservationId);
+    await ctx.stores.spendLedger.release(reservationId);
     emit("error", { costUsd: 0 });
     req.log.error({ err }, "config generation failed");
     return reply.code(502).send({

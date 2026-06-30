@@ -119,7 +119,7 @@ function slug(title: string): string {
 
 async function main(): Promise<void> {
   const config = getConfig();
-  const ctx = buildAppContext(config);
+  const ctx = await buildAppContext(config);
 
   const seedIds = process.env.SEED_IDS?.split(",").map((s) => s.trim()).filter(Boolean) ?? null;
   const demos = seedIds ? DEMOS.filter((d) => seedIds.includes(slug(d.title))) : DEMOS;
@@ -142,8 +142,8 @@ async function main(): Promise<void> {
         answers: demo.answers,
         opts: { maxTokens: config.LLM_MAX_TOKENS, effort: config.LLM_EFFORT },
       });
-      const estimated = estimateCosts(generated.result, ctx.stores.pricing, config.DEFAULT_REGION);
-      ctx.stores.curated.upsert({
+      const estimated = await estimateCosts(generated.result, ctx.stores.pricing, config.DEFAULT_REGION);
+      await ctx.stores.curated.upsert({
         id,
         title: demo.title,
         prompt: demo.description,

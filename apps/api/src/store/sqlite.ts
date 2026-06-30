@@ -22,22 +22,10 @@ import { SqliteDesignVectorStore } from "./designVectors.js";
 /** Instance type of an open better-sqlite3 database. */
 export type Db = Database.Database;
 
-/**
- * Injectable clock so day-boundary and TTL behavior is testable without waiting
- * on real time. The UTC day key is always derived from `now()` (single knob).
- */
-export interface Clock {
-  now(): number;
-}
-
-export const systemClock: Clock = {
-  now: () => Date.now(),
-};
-
-/** UTC calendar day bucket (YYYY-MM-DD) used for spend + per-IP daily counts. */
-export function utcDayKey(ms: number): string {
-  return new Date(ms).toISOString().slice(0, 10);
-}
+// Clock + day-bucketing now live in the backend-neutral clock module; re-exported
+// here so the many `from "./sqlite.js"` importers keep working unchanged.
+export { systemClock, utcDayKey, type Clock } from "./clock.js";
+import { systemClock, type Clock } from "./clock.js";
 
 const MIGRATIONS = `
   CREATE TABLE IF NOT EXISTS memory_docs (
@@ -182,6 +170,11 @@ export function getDb(path: string): Db {
   // curated_runs gained a tags column so the gallery facets curated + user-generated
   // designs uniformly (backfilled by the retag script).
   addColumnIfMissing(db, "curated_runs", "tags_json", "TEXT NOT NULL DEFAULT '[]'");
+  // curated_runs has no status workflow (curated = public on seed), so a known-bad
+  // seed design (one that no longer clears the property gate) is suppressed with a
+  // hidden flag rather than deleted — survives a re-seed (upsert preserves it) and
+  // is the curated mirror of a generation's status='hidden'.
+  addColumnIfMissing(db, "curated_runs", "hidden", "INTEGER NOT NULL DEFAULT 0");
   return db;
 }
 
@@ -203,16 +196,10 @@ export function tempDbPath(): string {
   return join(tmpdir(), `drafture-test-${randomUUID()}.db`);
 }
 
-export interface Stores {
-  memory: SqliteMemoryStore;
-  responseCache: SqliteResponseCache;
-  pricing: SqlitePricingStore;
-  spendLedger: SqliteSpendLedger;
-  curated: SqliteCuratedStore;
-  feedback: SqliteFeedbackStore;
-  generations: SqliteGenerationsStore;
-  designVectors: SqliteDesignVectorStore;
-}
+// The backend-agnostic Stores shape lives in types.ts; re-exported so existing
+// `import { Stores } from "./sqlite.js"` callers are unaffected by the move.
+export type { Stores } from "./types.js";
+import type { Stores } from "./types.js";
 
 /** Construct all stores bound to one db instance (shared clock). */
 export function createStores(db: Db, clock: Clock = systemClock): Stores {

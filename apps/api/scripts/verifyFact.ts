@@ -28,7 +28,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
   return { id, reject };
 }
 
-function main(): void {
+async function main(): Promise<void> {
   const { id, reject } = parseArgs(process.argv.slice(2));
   if (!id) {
     process.stderr.write(
@@ -42,7 +42,7 @@ function main(): void {
   try {
     const { memory } = createStores(db);
     if (reject) {
-      const removed = memory.delete(id);
+      const removed = await memory.delete(id);
       if (removed) {
         process.stdout.write(`Rejected and deleted fact ${id}.\n`);
       } else {
@@ -51,7 +51,7 @@ function main(): void {
       }
       return;
     }
-    const promoted = memory.setVerified(id, true);
+    const promoted = await memory.setVerified(id, true);
     if (promoted) {
       process.stdout.write(`Verified fact ${id} (now trusted).\n`);
     } else {

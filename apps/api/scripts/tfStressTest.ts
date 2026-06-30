@@ -109,7 +109,7 @@ async function loadDesigns(args: Args): Promise<{ name: string; result: Architec
   }
   // Generate mode — drive the real pipeline per prompt (LLM $).
   const config = getConfig();
-  const ctx = buildAppContext(config);
+  const ctx = await buildAppContext(config);
   const raw = JSON.parse(readFileSync(args.promptsFile, "utf8")) as (string | { description: string; answers?: string[] })[];
   const prompts = raw.map((p) => (typeof p === "string" ? { description: p, answers: [] as string[] } : { description: p.description, answers: p.answers ?? [] }));
   const out: { name: string; result: ArchitectureResult }[] = [];
@@ -122,7 +122,7 @@ async function loadDesigns(args: Args): Promise<{ name: string; result: Architec
       answers: p.answers,
       opts: { maxTokens: config.LLM_MAX_TOKENS, effort: config.LLM_EFFORT },
     });
-    const estimated = estimateCosts(result, ctx.stores.pricing, config.DEFAULT_REGION, trafficVolumeScale(p.answers));
+    const estimated = await estimateCosts(result, ctx.stores.pricing, config.DEFAULT_REGION, trafficVolumeScale(p.answers));
     out.push({ name: `gen-${i + 1}`, result: estimated });
     console.log("done");
   }

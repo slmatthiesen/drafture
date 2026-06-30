@@ -19,6 +19,7 @@ import { TIER_NAMES } from "../../src/schema/architecture.js";
 import type { ArchitectureResult, Tier } from "../../src/schema/architecture.js";
 import { graphHasNoDanglingEdges, primaryDatastoreReachable, isPrimaryDatastore } from "../../src/pipeline/completeness.js";
 import { budgetIdleFloor } from "../../src/pipeline/costFloor.js";
+import { isComplianceFlagged, paidSecurityMarkersOnTier } from "../../src/pipeline/securityTiers.js";
 // Re-export so the golden test (and any caller) keeps importing them from here.
 export { graphHasNoDanglingEdges, primaryDatastoreReachable };
 
@@ -39,7 +40,8 @@ export type PropertyName =
   | "primaryDatastoreReachable"
   | "graphHasNoOrphanNodes"
   | "readPathWhenUiImplied"
-  | "budgetTierIsCostHonest";
+  | "budgetTierIsCostHonest"
+  | "budgetHasNoPaidSecurityFloor";
 
 export interface PropertyResult {
   name: PropertyName;
@@ -744,6 +746,41 @@ export const budgetTierIsCostHonest: Property = (result) => {
   };
 };
 
+// --- Paid security on a none-sensitivity budget (docs/plans/2026-06-30-005) --
+//
+// "Budget = cheapest CORRECT." The FREE structural floor (S3 BPA, TLS, least-priv,
+// SSE with AWS-managed keys, CloudFront+Shield, single-region trail) stays in budget;
+// every PAID control (WAF web ACL, customer-managed CMK, Secrets Manager, multi-region
+// trail) rides the robustness ladder and enters at balanced+. A budget carrying paid
+// security is the over-build a senior reviewer rejects — and exactly what budgetIdle-
+// Floor (always-on compute) can't see, so this sibling check reads the GRAPH surface
+// for the paid markers instead. EXEMPT under compliance: regulated/sensitive data makes
+// the paid floor correct-required, so it belongs in budget then (budget = cheapest
+// *correct*, not cheapest). This is what internalizes the reviewers' "over-built
+// security" finding — it fires BEFORE any handoff.
+export const budgetHasNoPaidSecurityFloor: Property = (result) => {
+  const budget = result.tiers.find((t) => t.name === "budget");
+  if (!budget) {
+    return { name: "budgetHasNoPaidSecurityFloor", ok: true, reason: "no budget tier to check" };
+  }
+  if (isComplianceFlagged(result)) {
+    return {
+      name: "budgetHasNoPaidSecurityFloor",
+      ok: true,
+      reason: "compliance-flagged — the paid security floor is correct-required in budget (exempt)",
+    };
+  }
+  const markers = paidSecurityMarkersOnTier(budget);
+  return {
+    name: "budgetHasNoPaidSecurityFloor",
+    ok: markers.length === 0,
+    reason:
+      markers.length === 0
+        ? "budget carries only the free structural floor (paid controls deferred to balanced+)"
+        : `budget carries PAID security a none-sensitivity workload should defer to balanced+: ${markers.join(", ")}`,
+  };
+};
+
 export const ALL_PROPERTIES: readonly Property[] = [
   exactlyThreeTiers,
   securityFloorCoversAllBaselines,
@@ -758,11 +795,14 @@ export const ALL_PROPERTIES: readonly Property[] = [
   graphHasNoDanglingEdges,
   primaryDatastoreReachable,
   graphHasNoOrphanNodes,
-  // readPathWhenUiImplied and budgetTierIsCostHonest are intentionally NOT in the gate
-  // yet — they ship warn-only (exported + tested) until validated against the 30-prompt
-  // golden set, so a false-fail can't block a launch-blocking gate on day one.
-  // budgetTierIsCostHonest in particular waits on the serverless-first posture change
-  // (docs/plans/2026-06-29-003): today most tiers would fail it, by design.
+  // The cost-honest pair are now HARD gates (docs/plans/2026-06-30-005): the tiered-floor
+  // posture (prompt + emitter) makes a lean budget the default, the golden set is updated
+  // to it, so an over-built budget — paid security on a none-sensitivity tier, or the
+  // always-on managed quartet — can never be served again.
+  budgetTierIsCostHonest,
+  budgetHasNoPaidSecurityFloor,
+  // readPathWhenUiImplied stays warn-only (exported + tested) until validated against the
+  // 30-prompt golden set.
 ];
 
 export interface AggregateResult {

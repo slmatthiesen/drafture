@@ -42,7 +42,7 @@ export class SqliteMemoryStore implements MemoryStore {
     private readonly clock: Clock = systemClock,
   ) {}
 
-  upsert(doc: UpsertInput): MemoryDoc {
+  async upsert(doc: UpsertInput): Promise<MemoryDoc> {
     const now = this.clock.now();
     this.db
       .prepare(
@@ -71,12 +71,12 @@ export class SqliteMemoryStore implements MemoryStore {
         updatedAt: doc.updatedAt ?? now,
       });
     // Return the stored row so the preserved created_at is reflected.
-    const stored = this.getById(doc.id);
+    const stored = await this.getById(doc.id);
     if (!stored) throw new Error(`memory upsert failed for id ${doc.id}`);
     return stored;
   }
 
-  get(topic: string): MemoryDoc | undefined {
+  async get(topic: string): Promise<MemoryDoc | undefined> {
     const row = this.db
       .prepare(
         `SELECT * FROM memory_docs WHERE topic = ? ORDER BY updated_at DESC LIMIT 1`,
@@ -85,14 +85,14 @@ export class SqliteMemoryStore implements MemoryStore {
     return row ? toDoc(row) : undefined;
   }
 
-  getById(id: string): MemoryDoc | undefined {
+  async getById(id: string): Promise<MemoryDoc | undefined> {
     const row = this.db
       .prepare(`SELECT * FROM memory_docs WHERE id = ?`)
       .get(id) as MemoryRow | undefined;
     return row ? toDoc(row) : undefined;
   }
 
-  search(topics: string[]): MemoryDoc[] {
+  async search(topics: string[]): Promise<MemoryDoc[]> {
     if (topics.length === 0) return [];
     const placeholders = topics.map(() => "?").join(",");
     const rows = this.db
@@ -103,7 +103,7 @@ export class SqliteMemoryStore implements MemoryStore {
     return rows.map(toDoc);
   }
 
-  listPending(): MemoryDoc[] {
+  async listPending(): Promise<MemoryDoc[]> {
     const rows = this.db
       .prepare(
         `SELECT * FROM memory_docs WHERE verified = 0 ORDER BY created_at ASC`,
@@ -112,14 +112,14 @@ export class SqliteMemoryStore implements MemoryStore {
     return rows.map(toDoc);
   }
 
-  setVerified(id: string, verified: boolean): boolean {
+  async setVerified(id: string, verified: boolean): Promise<boolean> {
     const info = this.db
       .prepare(`UPDATE memory_docs SET verified = ?, updated_at = ? WHERE id = ?`)
       .run(verified ? 1 : 0, this.clock.now(), id);
     return info.changes > 0;
   }
 
-  delete(id: string): boolean {
+  async delete(id: string): Promise<boolean> {
     const info = this.db
       .prepare(`DELETE FROM memory_docs WHERE id = ?`)
       .run(id);
