@@ -1306,7 +1306,7 @@ resource "aws_iam_role_policy" "cloudtrail_cw" {
 resource "aws_cloudtrail" "cloudtrail" {
   name                          = "balanced-trail"
   s3_bucket_name                = aws_s3_bucket.cloudtrail_logs.bucket
-  is_multi_region_trail         = true
+  is_multi_region_trail         = false
   enable_log_file_validation    = true
   include_global_service_events = true
   cloud_watch_logs_group_arn    = "${aws_cloudwatch_log_group.cloudtrail.arn}:*"
