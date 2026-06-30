@@ -545,6 +545,9 @@ const ORPHAN_EXEMPT_KEYWORDS = [
   // Passive OBSERVABILITY surfaces — edgeless by nature, like CloudWatch Logs:
   // X-Ray traces instrument services in-process, so they carry no graph edge.
   "x-ray", "xray",
+  // Passive build/deploy INFRA — an image registry that compute pulls from at task
+  // launch, not a runtime data-flow participant (present in every container design).
+  "ecr", "elastic container registry", "container registry",
 ] as const;
 
 function isOrphanExempt(awsService: string, role: string): boolean {
