@@ -216,7 +216,7 @@ export function annotateWireupGaps(hcl: string): string {
  * travels WITH the file even after it's copied out of the UI's red banner. Plain `#`
  * comments = valid HCL, survive copy/paste into an editor or `terraform` run.
  */
-const REFERENCE_WARNING_HEADER = `##############################################################################
+export const REFERENCE_WARNING_HEADER = `##############################################################################
 # ⚠  REFERENCE ONLY — DO NOT APPLY THIS FILE BLINDLY
 # AI-generated starting point, NOT production-ready and NOT reviewed.
 # Applying it to an existing stack can DESTROY OR LOSE DATA, and it will need
