@@ -8,13 +8,17 @@
  * batch-generate corpus candidates. It does NOT pass through the spend ledger/daily
  * ceiling, so a Sonnet run spends UNCAPPED real dollars — mind the model.
  *
+ * COST: design generation is one call; reference Terraform is OPT-IN (--with-tf) and
+ * is one LARGE (~32k-token) call PER TIER, so `--tier all --with-tf` is FOUR calls.
+ * Verifying a design/cost/posture needs the design only — leave --with-tf off.
+ *
  * Provider follows env: default Anthropic (LLM_MODEL), or set LLM_PROVIDER=glm
  * LLM_MODEL=glm-4.5-flash for a $0 run.
  *
  * Run:
  *   pnpm --filter @drafture/api exec node --env-file=../../.env --import tsx \
  *     scripts/generateDesign.ts --prompt <file> [--answers <file.json>] \
- *     [--tier budget|balanced|resilient|all] [--out <dir>] [--persist]
+ *     [--tier budget|balanced|resilient|all] [--out <dir>] [--persist] [--with-tf]
  */
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -41,6 +45,10 @@ interface Args {
   tiers: string[];
   out: string;
   persist: boolean;
+  /** Generate reference Terraform per tier. OFF by default — each tier is a large
+   *  (~32k-token) extra LLM call, and verifying a design/cost posture never needs it.
+   *  Opt in explicitly with --with-tf when you actually want the .tf artifacts. */
+  withTf: boolean;
 }
 
 function parseArgs(): Args {
@@ -51,7 +59,7 @@ function parseArgs(): Args {
   };
   const promptPath = get("--prompt");
   if (!promptPath) {
-    console.error("usage: generateDesign.ts --prompt <file> [--answers <file.json>] [--tier all] [--out <dir>] [--persist]");
+    console.error("usage: generateDesign.ts --prompt <file> [--answers <file.json>] [--tier all] [--out <dir>] [--persist] [--with-tf]");
     process.exit(1);
   }
   const answersPath = get("--answers");
@@ -64,6 +72,7 @@ function parseArgs(): Args {
     tiers,
     out: get("--out") ?? "out",
     persist: a.includes("--persist"),
+    withTf: a.includes("--with-tf"),
   };
 }
 
@@ -102,17 +111,23 @@ async function main(): Promise<void> {
   writeFileSync(join(args.out, "design.json"), JSON.stringify(estimated, null, 2));
   console.log(`wrote ${join(args.out, "design.json")}`);
 
-  for (const tierName of args.tiers) {
-    const tier = estimated.tiers.find((t) => t.name === tierName) as Tier | undefined;
-    if (!tier) {
-      console.error(`  ! no tier '${tierName}' in result`);
-      continue;
+  // Terraform generation is OPT-IN: each tier is a large extra LLM call, and design/
+  // cost/posture verification reads design.json only. Skip unless --with-tf is given.
+  if (!args.withTf) {
+    console.log(`\nskipped Terraform (design-only). Pass --with-tf to generate reference .tf — ${args.tiers.length} extra ~32k-token LLM call(s).`);
+  } else {
+    for (const tierName of args.tiers) {
+      const tier = estimated.tiers.find((t) => t.name === tierName) as Tier | undefined;
+      if (!tier) {
+        console.error(`  ! no tier '${tierName}' in result`);
+        continue;
+      }
+      const { result: raw } = await ctx.provider.generateConfig(tier, { maxTokens: 32_000 });
+      const { code, gaps } = renderReferenceTf(raw);
+      const file = join(args.out, `${tierName}.tf`);
+      writeFileSync(file, code);
+      console.log(`wrote ${file}${gaps.length ? `  ⚠ wire-up gaps: ${gaps.join(", ")}` : "  ✓ no wire-up gaps"}`);
     }
-    const { result: raw } = await ctx.provider.generateConfig(tier, { maxTokens: 32_000 });
-    const { code, gaps } = renderReferenceTf(raw);
-    const file = join(args.out, `${tierName}.tf`);
-    writeFileSync(file, code);
-    console.log(`wrote ${file}${gaps.length ? `  ⚠ wire-up gaps: ${gaps.join(", ")}` : "  ✓ no wire-up gaps"}`);
   }
 
   if (args.persist) {
