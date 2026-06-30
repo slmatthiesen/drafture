@@ -70,19 +70,35 @@ becomes Balanced), vs. a new tier below Budget. Leaning re-scope (three tiers is
    `budgetTierIsCostHonest` property (warn-only, not in ALL_PROPERTIES), `scripts/costFloorReport.ts`.
    Calibrated: serverless $0 / single box $12 pass; managed stacks $69–150 flagged. 322 tests green.
    Also HID an already-approved bloated corpus design (`b4ao9aRmoVwo`, $68.89) + `ct-ecommerce-api` (`LJhAwNMIjZR1`).
-2. ⬅ **START HERE (next session): the serverless-first POSTURE change** — prompt/KB. Teach Budget
-   the serverless-first → single-box → (managed split only at Balanced+) hierarchy; make the security
-   floor flex (hardened single host ≠ forced NAT). Find the generation prompt/KB (grep the prompt
-   assembly in `apps/api/src/pipeline/` + `packages/kb`). This is the lever that drops the floors.
-3. Verify the honest way: regenerate happy-hour (`scripts/generateDesign.ts`) + re-run
-   `scripts/costFloorReport.ts` — watch happy-hour's floor fall from $102.86 toward serverless/single-box.
-   Re-run `ct-ecommerce-api` via `scripts/growCorpus.ts --ids ct-ecommerce-api` and re-review.
-4. Once floors drop across the golden set, PROMOTE `budgetTierIsCostHonest` to a hard gate (add to
-   ALL_PROPERTIES) + re-promote `readPathWhenUiImplied` if validated.
+2. ✅ **DONE** — the serverless-first POSTURE change (prompt/KB). `ground.ts` SYSTEM_PROMPT now teaches
+   the explicit budget hierarchy (serverless-no-VPC → single box → managed split only at Balanced+),
+   CHALLENGES managed framing ("containerized"→Docker Compose on a box not Fargate; "managed Postgres
+   +PostGIS"→self-managed on the box not RDS; "scale independently"→co-located now, split at Balanced),
+   and adds a HARD RULE: already-on-one-host + cost-first ⇒ budget MUST be that single box. Also
+   tier-qualified the matched-reference-architectures header (patterns = the SCALED shape; budget must
+   collapse them — this was actively pulling budget toward the container-api quartet). Security floor
+   FLEXED: `security-baselines.json` no-public-data-tier now recognizes a co-located localhost store
+   (shape c) as already-private — no forced private subnet/NAT.
+3. ✅ **DONE (verified honest)** — regenerated happy-hour on Sonnet (prod path): budget floor
+   **$102.86 → $12–45/mo** (run variance; both pass `budgetTierIsCostHonest`). Now a single EC2 box
+   (Docker Compose: web + orchestrator + self-managed Postgres/PostGIS) + render→Lambda + S3/CloudFront,
+   NO ALB/Fargate/RDS/NAT. (Did NOT enshrine into `dogfood/happyhourfriends/` yet — see follow-ups.)
+   Still TODO: re-run `ct-ecommerce-api` via `growCorpus.ts --ids ct-ecommerce-api` + re-review.
+4. ⬅ **NEXT: promote the gate.** Run the full golden set (~$2-3 design-only) to confirm floors drop
+   broadly, then PROMOTE `budgetTierIsCostHonest` to a hard gate (add to ALL_PROPERTIES) +
+   re-promote `readPathWhenUiImplied` if validated. Don't promote on a single design.
 
-## Open follow-ups (not blocking the posture work)
-- `computeMatchesDecision` false-positives on HYBRID compute (Fargate web + Lambda render) — needs
-  per-service scoping so a render=Lambda decision doesn't flag the web tier's Fargate.
+## Open follow-ups
+- ✅ **DONE** — `computeMatchesDecision` HYBRID false-positive: now per-service scoped (serverless
+  decisions check only the nodes they name; always-on stays tier-wide). `properties.ts`. The honest
+  hybrid budget (EC2 box + Lambda render) no longer false-fails.
+- ✅ **DONE** — delta-reconstruction dangling edges: `applyTierDelta` (architecture.ts) now prunes
+  edges whose endpoint a delta removed (the bigger budget→balanced delta from the box→managed-split
+  posture was producing these). Targeted (only explicitly-removed ids) so it never masks a typo'd id.
+- **Refresh the dogfood pack:** `dogfood/happyhourfriends/` still holds the OLD $102.86 bloat. Regen a
+  CLEAN gate-passing 3-tier pack (output has queue-resilience-tag variance run-to-run) and replace it.
 - 3 corpus designs still PENDING approval (sl-webhook `kZg3E8YdaeOm`, qa-order `1B_GyLhZ-m0z`,
   ss-spa `CE7zSZRS5wbz`) — all serverless/cost-honest; approve + `backfillEmbeddings.ts` when ready.
-  The remaining ~24 golden prompts NOT yet run (operator wants cost caution; ~$2 design-only).
+- **Speed (raised this session):** consumer design call ≈ ~90–130s (out ~6.7k tokens is the bottleneck);
+  the 8-min figure was the offline `--tier all` pack (1 design + 3× 32k-token Terraform). Lever:
+  stream/progressively render tiers + loading anim; push more fixed content into the deterministic KB.

@@ -372,15 +372,47 @@ function classifyChosenCompute(chosen: string): ComputeChoice {
   return "unknown";
 }
 
-function tierComputeKinds(tier: Tier): { serverless: string[]; alwayson: string[] } {
+function computeKindsOf(nodes: Tier["nodes"]): { serverless: string[]; alwayson: string[] } {
   const serverless: string[] = [];
   const alwayson: string[] = [];
-  for (const n of tier.nodes) {
+  for (const n of nodes) {
     const surface = `${n.awsService} ${n.role}`.toLowerCase();
     if (SERVERLESS_COMPUTE.some((kw) => new RegExp(`\\b${kw}\\b`).test(surface))) serverless.push(n.awsService);
     if (ALWAYSON_COMPUTE.some((kw) => new RegExp(`\\b${kw}\\b`).test(surface))) alwayson.push(n.awsService);
   }
   return { serverless, alwayson };
+}
+
+// PER-SERVICE SCOPING (hybrid-compute false-positive fix). A compute decision often
+// targets a SPECIFIC component ("Render service compute model" → Lambda) rather than
+// the whole tier. The honest cost-first design is now frequently HYBRID — an always-on
+// box for the web/orchestrator PLUS a scale-to-zero Lambda for a spiky render — so
+// judging a "render = Lambda" decision against the web box's EC2 is a false positive.
+// We scope a SERVERLESS decision to the nodes it is about: derive subject tokens from
+// the decision's question text and check only the nodes whose surface matches one. A
+// decision with no locatable subject (tokens empty) falls back to the whole tier, so
+// the canonical "serverless decision drawn entirely as EC2+ALB" bug is still caught.
+// Only the serverless direction is scoped; the always-on check stays tier-wide (a
+// store-hosting decision that says "EC2 box" must still find the box anywhere).
+const COMPUTE_SCOPE_STOPWORDS = new Set([
+  "compute", "model", "tier", "service", "hosting", "runtime", "shape", "split",
+  "placement", "strategy", "mechanism", "budget", "single", "managed", "stack",
+  "host", "layer", "the", "for", "and", "vs", "with", "of", "at", "an", "a",
+]);
+
+function decisionScopeTokens(decision: string): string[] {
+  return decision
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter((w) => w.length >= 4 && !COMPUTE_SCOPE_STOPWORDS.has(w))
+    .filter((w) => w !== "lambda" && w !== "serverless" && !ALWAYSON_COMPUTE.some((k) => k.includes(w) || w.includes(k)));
+}
+
+/** Nodes a scoped decision is ABOUT; the whole tier when the subject isn't locatable
+ *  (empty tokens → unscoped → strict tier-wide check). */
+function scopedComputeNodes(tier: Tier, tokens: string[]): Tier["nodes"] {
+  if (tokens.length === 0) return tier.nodes;
+  return tier.nodes.filter((n) => tokens.some((t) => `${n.awsService} ${n.role}`.toLowerCase().includes(t)));
 }
 
 /**
@@ -398,14 +430,19 @@ export const computeMatchesDecision: Property = (result) => {
   for (const d of computeDecisions) {
     const choice = classifyChosenCompute(d.chosen);
     if (choice === "unknown") continue;
+    const scopeTokens = decisionScopeTokens(d.decision);
     for (const tier of result.tiers) {
-      const kinds = tierComputeKinds(tier);
-      if (choice === "serverless" && kinds.alwayson.length > 0) {
-        offenders.push(
-          `${tier.name}: decision chose serverless ("${d.chosen}") but tier runs always-on compute [${kinds.alwayson.join(", ")}]`,
-        );
+      if (choice === "serverless") {
+        // Scope to the nodes this serverless decision is about, so a per-service
+        // Lambda decision isn't contradicted by an unrelated always-on box (hybrid).
+        const scoped = computeKindsOf(scopedComputeNodes(tier, scopeTokens));
+        if (scoped.alwayson.length > 0) {
+          offenders.push(
+            `${tier.name}: decision chose serverless ("${d.chosen}") but its scoped compute runs always-on [${scoped.alwayson.join(", ")}]`,
+          );
+        }
       }
-      if (choice === "alwayson" && kinds.alwayson.length === 0) {
+      if (choice === "alwayson" && computeKindsOf(tier.nodes).alwayson.length === 0) {
         offenders.push(
           `${tier.name}: decision chose always-on compute ("${d.chosen}") but tier has no always-on compute node`,
         );

@@ -88,6 +88,29 @@ describe("reconstructTiers", () => {
     expect(out.tiers[1]!.edges).toEqual([]);
   });
 
+  it("prunes edges left dangling when a delta removes a node but forgets its edges", () => {
+    // The model removes 'db' (e.g. budget's single box split out at balanced) but
+    // does NOT list the api→db edge in removeEdges. Reconstruction must drop the
+    // now-dangling edge rather than emit an edge to a removed node.
+    const out = reconstructTiers(
+      wire([delta({ name: "balanced", removeNodeIds: ["db"] }), delta({ name: "resilient" })]),
+    );
+    expect(out.tiers[1]!.nodes.map((n) => n.id)).toEqual(["api"]);
+    expect(out.tiers[1]!.edges).toEqual([]); // api→db pruned with the removed node
+    // resilient inherits the cleaned balanced graph (no dangling edge propagates up)
+    expect(out.tiers[2]!.edges).toEqual([]);
+  });
+
+  it("does NOT prune a typo'd edge (re-added node id survives; unknown ids stay to be flagged)", () => {
+    // removeNodeIds drops 'db', but the same delta re-adds 'db' AND its edge — the
+    // node is present in the end, so the edge must survive (only truly-gone nodes prune).
+    const out = reconstructTiers(
+      wire([delta({ name: "balanced", removeNodeIds: ["db"], addNodes: [node("db", "db v2")], addEdges: [edge("api", "db")] }), delta({ name: "resilient" })]),
+    );
+    expect(out.tiers[1]!.nodes.map((n) => n.id)).toEqual(["api", "db"]);
+    expect(out.tiers[1]!.edges).toEqual([edge("api", "db")]);
+  });
+
   it("carries assumptions and keyDecisions through unchanged", () => {
     const w = wire([delta({ name: "balanced" }), delta({ name: "resilient" })]);
     const out = reconstructTiers(w);
