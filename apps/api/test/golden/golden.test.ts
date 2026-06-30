@@ -104,6 +104,25 @@ describe("completeness critic flips to FAIL on a structurally-broken graph", () 
     expect(graphHasNoOrphanNodes(withSink).ok).toBe(true);
   });
 
+  it("exempts edgeless protection/egress-infra nodes (WAF, Shield, NAT) but still catches a real orphan", () => {
+    // Protection layers (a web ACL, a Shield subscription) ATTACH to CloudFront/ALB and a
+    // NAT gateway is passive egress infra — none are data-flow hops, and models wire them
+    // inconsistently. An edgeless one must NOT be flagged (was false-failing honest designs).
+    const withProtection = structuredClone(goodArchitecture());
+    withProtection.tiers[0]!.nodes.push(
+      { id: "waf", awsService: "AWS WAF", role: "rate-limit + managed rules", security: ["edge protection"] },
+      { id: "shield", awsService: "AWS Shield Advanced", role: "DDoS protection", security: ["edge protection"] },
+      { id: "nat", awsService: "NAT Gateway", role: "private-subnet egress", security: [] },
+    );
+    expect(graphHasNoOrphanNodes(withProtection).ok, graphHasNoOrphanNodes(withProtection).reason).toBe(true);
+
+    // But a genuinely-active sink (an unwired dead-letter QUEUE) is still a real orphan —
+    // a DLQ RECEIVES messages, so leaving it unwired is the delta-forgot-to-wire bug.
+    const withDlq = structuredClone(goodArchitecture());
+    withDlq.tiers[0]!.nodes.push({ id: "sqs_dlq", awsService: "SQS", role: "dead-letter queue", security: ["KMS at rest"] });
+    expect(graphHasNoOrphanNodes(withDlq).ok).toBe(false);
+  });
+
   it("isolates the defect: only graphHasNoOrphanNodes fails on an orphaned active node", () => {
     const broken = structuredClone(goodArchitecture());
     broken.tiers[0]!.nodes.push({ id: "orphan_fn", awsService: "Lambda", role: "stray worker", security: ["least-priv role"] });

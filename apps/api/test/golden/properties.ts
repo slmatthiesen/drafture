@@ -604,6 +604,17 @@ const ORPHAN_EXEMPT_KEYWORDS = [
   // Passive build/deploy INFRA — an image registry that compute pulls from at task
   // launch, not a runtime data-flow participant (present in every container design).
   "ecr", "elastic container registry", "container registry",
+  // Passive PROTECTION LAYERS — a web ACL / DDoS subscription ATTACHES to CloudFront/
+  // ALB/Route 53 rather than sitting in the data flow. The security floor REQUIRES edge
+  // protection, so it's present in most designs; models wire it INCONSISTENTLY (some draw
+  // client→WAF→CloudFront, some leave the ACL as a bare association node), which made the
+  // gate false-fail honest designs. Edgeless here is legitimate, like the audit-log sinks.
+  "waf", "shield",
+  // Passive EGRESS INFRA — a NAT gateway gives private-subnet resources outbound egress;
+  // it is not a data-flow endpoint (the cost engine already models it as a synthetic line,
+  // not a graph hop), so a drawn-but-unwired NAT node is not an orphan bug. Multi-word key
+  // so the bare token "nat" can't collide with words like "coordinate"/"designate".
+  "nat gateway",
 ] as const;
 
 function isOrphanExempt(awsService: string, role: string): boolean {
