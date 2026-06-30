@@ -76,7 +76,16 @@ export function emitBaseline(ctx: EmitCtx): HclBlock[] {
       `  description = "Route53 hosted-zone id for domain_name (ACM DNS validation + alias records)."`,
       `}`,
     );
-    if (ctx.has("ec2") || ctx.has("alb")) {
+    // A dynamic origin is any non-S3 CloudFront target (EC2/ALB/API Gateway/…). When
+    // one exists, the distribution reaches it over var.origin_domain (a custom domain
+    // with a real cert), so declare that variable.
+    const cfHasDynamicOrigin = ctx
+      .nodesOfKey("cloudfront")
+      .some((cf) => ctx.out(cf.id).some((e) => {
+        const t = ctx.byId(e.to);
+        return !!t && ctx.keyOf(t) !== "s3";
+      }));
+    if (cfHasDynamicOrigin) {
       vars.push(
         ``,
         `# A CloudFront https-only origin must present a trusted-CA cert for its hostname.`,

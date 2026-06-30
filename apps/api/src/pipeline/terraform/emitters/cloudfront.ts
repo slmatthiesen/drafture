@@ -23,12 +23,15 @@ export function emitCloudfront(node: ArchitectureNode, ctx: EmitCtx): HclBlock[]
     .out(node.id)
     .map((e) => ctx.byId(e.to))
     .filter((n): n is ArchitectureNode => !!n && ctx.keyOf(n) === "s3");
-  // A dynamic origin (EC2 box or ALB) is reached over a CUSTOM domain with a real
-  // TLS cert (var.origin_domain), never the instance public DNS / raw ALB DNS name.
+  // A dynamic origin is any non-S3 CloudFront target — an EC2 box, an ALB, or an
+  // API/compute service that has no S3-style OAC. It's reached over a CUSTOM domain
+  // with a real TLS cert (var.origin_domain), never a raw AWS DNS name. This also
+  // covers targets with no emitter yet (e.g. API Gateway): the distribution still
+  // needs a valid origin even while that service is a `# TODO` long-tail fallback.
   const dynamicOrigins = ctx
     .out(node.id)
     .map((e) => ctx.byId(e.to))
-    .filter((n): n is ArchitectureNode => !!n && (ctx.keyOf(n) === "ec2" || ctx.keyOf(n) === "alb"));
+    .filter((n): n is ArchitectureNode => !!n && ctx.keyOf(n) !== "s3");
 
   // --- WAF (managed common + known-bad rule sets + IP rate limit) ---
   blocks.push({
@@ -213,8 +216,9 @@ export function emitCloudfront(node: ArchitectureNode, ctx: EmitCtx): HclBlock[]
   }
   for (const dyn of dynamicOrigins) {
     const dtf = ctx.tf(dyn.id);
+    const kind = ctx.keyOf(dyn) === "alb" ? "ALB" : ctx.keyOf(dyn) === "ec2" ? "EC2" : dyn.awsService;
     originBlocks.push(
-      `  # ${ctx.keyOf(dyn) === "alb" ? "ALB" : "EC2"} origin over a custom domain with a TLS cert (NOT a raw AWS DNS name — rule cloudfront-origin-tls).`,
+      `  # ${kind} origin over a custom domain with a TLS cert (NOT a raw AWS DNS name — rule cloudfront-origin-tls).`,
       `  origin {`,
       `    domain_name = var.origin_domain`,
       `    origin_id   = "origin-${dtf}"`,
