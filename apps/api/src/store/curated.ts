@@ -30,7 +30,7 @@ export class SqliteCuratedStore implements CuratedStore {
     private readonly clock: Clock = systemClock,
   ) {}
 
-  list(): CuratedRunSummary[] {
+  async list(): Promise<CuratedRunSummary[]> {
     // Body is read (not returned) only to derive the one-line tech blurb; 4 rows, so
     // parsing per call is negligible and keeps the gallery card self-describing.
     // hidden=0 only: a suppressed seed design leaves the gallery (and, via get()
@@ -46,7 +46,7 @@ export class SqliteCuratedStore implements CuratedStore {
     return rows.map((r) => ({ ...toSummary(r), tech: deriveTech(r.body) }));
   }
 
-  get(id: string): CuratedRun | undefined {
+  async get(id: string): Promise<CuratedRun | undefined> {
     // A hidden run is invisible everywhere it could be served — the deep-link route
     // and `retrieve.loadDesign` both go through get(), mirroring how a non-approved
     // generation is filtered out of retrieval.
@@ -58,14 +58,14 @@ export class SqliteCuratedStore implements CuratedStore {
   }
 
   /** Suppress (or restore) a curated run. Returns false for an unknown id. */
-  setHidden(id: string, hidden: boolean): boolean {
+  async setHidden(id: string, hidden: boolean): Promise<boolean> {
     const res = this.db
       .prepare(`UPDATE curated_runs SET hidden = ? WHERE id = ?`)
       .run(hidden ? 1 : 0, id);
     return res.changes > 0;
   }
 
-  upsert(run: { id: string; title: string; prompt: string; body: string }): void {
+  async upsert(run: { id: string; title: string; prompt: string; body: string }): Promise<void> {
     // Replace content but KEEP the existing vote counters on conflict — re-seeding a
     // run shouldn't reset the community signal it has accumulated.
     this.db
@@ -80,7 +80,7 @@ export class SqliteCuratedStore implements CuratedStore {
       .run({ ...run, createdAt: this.clock.now() });
   }
 
-  vote(id: string, voter: string, value: 1 | -1): CuratedVoteResult | undefined {
+  async vote(id: string, voter: string, value: 1 | -1): Promise<CuratedVoteResult | undefined> {
     const tx = this.db.transaction((): CuratedVoteResult | undefined => {
       const exists = this.db.prepare(`SELECT 1 FROM curated_runs WHERE id = ?`).get(id);
       if (!exists) return undefined;

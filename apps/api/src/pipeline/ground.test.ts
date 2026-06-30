@@ -22,13 +22,13 @@ const ANSWERS = ["expect bursty traffic answer-K3X", "images contain user PII an
 describe("assembleGrounding — static prefix (cacheable, KTD11)", () => {
   let stores: Stores;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     stores = createStores(openTempDb());
-    seedKnowledgeBase(stores);
+    await seedKnowledgeBase(stores);
   });
 
-  it("carries the safe-by-default mandate and ALL eight security baselines", () => {
-    const { prompt } = assembleGrounding({ description: DESCRIPTION, memory: stores.memory });
+  it("carries the safe-by-default mandate and ALL eight security baselines", async () => {
+    const { prompt } = await assembleGrounding({ description: DESCRIPTION, memory: stores.memory });
 
     expect(baselines).toHaveLength(8);
     for (const b of baselines) {
@@ -39,8 +39,8 @@ describe("assembleGrounding — static prefix (cacheable, KTD11)", () => {
     expect(prompt.staticPrefix.toLowerCase()).toContain("minimum safe cost");
   });
 
-  it("instructs burst handling, the NAT/egress callout, and payload-labeled edges", () => {
-    const { prompt } = assembleGrounding({ description: DESCRIPTION, memory: stores.memory });
+  it("instructs burst handling, the NAT/egress callout, and payload-labeled edges", async () => {
+    const { prompt } = await assembleGrounding({ description: DESCRIPTION, memory: stores.memory });
 
     expect(prompt.staticPrefix).toContain("trivial-in-core");
     expect(prompt.staticPrefix).toContain("DynamoDB on-demand");
@@ -49,9 +49,9 @@ describe("assembleGrounding — static prefix (cacheable, KTD11)", () => {
     expect(prompt.staticPrefix.toLowerCase()).toContain("payload");
   });
 
-  it("is byte-identical across requests (so the cache prefix actually hits)", () => {
-    const a = assembleGrounding({ description: "totally different system one", memory: stores.memory });
-    const b = assembleGrounding({ description: "an unrelated request two", answers: ["x"], memory: stores.memory });
+  it("is byte-identical across requests (so the cache prefix actually hits)", async () => {
+    const a = await assembleGrounding({ description: "totally different system one", memory: stores.memory });
+    const b = await assembleGrounding({ description: "an unrelated request two", answers: ["x"], memory: stores.memory });
     expect(a.prompt.staticPrefix).toBe(b.prompt.staticPrefix);
   });
 });
@@ -59,13 +59,13 @@ describe("assembleGrounding — static prefix (cacheable, KTD11)", () => {
 describe("assembleGrounding — volatile suffix (after the breakpoint, KTD11)", () => {
   let stores: Stores;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     stores = createStores(openTempDb());
-    seedKnowledgeBase(stores);
+    await seedKnowledgeBase(stores);
   });
 
-  it("keeps the user description and answers OUT of the cacheable prefix", () => {
-    const { prompt } = assembleGrounding({
+  it("keeps the user description and answers OUT of the cacheable prefix", async () => {
+    const { prompt } = await assembleGrounding({
       description: DESCRIPTION,
       answers: ANSWERS,
       memory: stores.memory,
@@ -82,8 +82,8 @@ describe("assembleGrounding — volatile suffix (after the breakpoint, KTD11)", 
     expect(prompt.volatileSuffix).toContain("answer-V8M");
   });
 
-  it("places matched reference patterns in the volatile suffix only", () => {
-    const { prompt, matchedPatterns } = assembleGrounding({
+  it("places matched reference patterns in the volatile suffix only", async () => {
+    const { prompt, matchedPatterns } = await assembleGrounding({
       description: DESCRIPTION,
       memory: stores.memory,
     });
@@ -95,8 +95,8 @@ describe("assembleGrounding — volatile suffix (after the breakpoint, KTD11)", 
     expect(prompt.staticPrefix).not.toContain("Serverless API");
   });
 
-  it("reports detected topics with no memory hit as missingTopics (for U6 research-on-miss)", () => {
-    const { missingTopics, memoryHits } = assembleGrounding({
+  it("reports detected topics with no memory hit as missingTopics (for U6 research-on-miss)", async () => {
+    const { missingTopics, memoryHits } = await assembleGrounding({
       description: DESCRIPTION,
       memory: stores.memory,
     });
@@ -106,8 +106,8 @@ describe("assembleGrounding — volatile suffix (after the breakpoint, KTD11)", 
     expect(memoryHits).toEqual([]);
   });
 
-  it("surfaces memory hits in the suffix and flags quarantined facts UNVERIFIED (KTD4/R9)", () => {
-    stores.memory.upsert({
+  it("surfaces memory hits in the suffix and flags quarantined facts UNVERIFIED (KTD4/R9)", async () => {
+    await stores.memory.upsert({
       id: "research:file-uploads-1",
       topic: "file-uploads",
       fact: "Use presigned S3 PUT URLs FACTMARK-trusted",
@@ -116,7 +116,7 @@ describe("assembleGrounding — volatile suffix (after the breakpoint, KTD11)", 
       verified: true,
       provenance: "research",
     });
-    stores.memory.upsert({
+    await stores.memory.upsert({
       id: "research:async-processing-1",
       topic: "async-processing",
       fact: "Attach an SQS dead-letter queue FACTMARK-quarantined",
@@ -126,7 +126,7 @@ describe("assembleGrounding — volatile suffix (after the breakpoint, KTD11)", 
       provenance: "research",
     });
 
-    const { prompt, memoryHits, missingTopics } = assembleGrounding({
+    const { prompt, memoryHits, missingTopics } = await assembleGrounding({
       description: DESCRIPTION,
       memory: stores.memory,
     });

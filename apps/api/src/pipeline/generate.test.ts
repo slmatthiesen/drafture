@@ -97,9 +97,9 @@ const FULLY_SPECIFIED =
 describe("generateArchitecture", () => {
   let stores: Stores;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     stores = createStores(openTempDb());
-    seedKnowledgeBase(stores);
+    await seedKnowledgeBase(stores);
   });
 
   it("returns three schema-valid tiers in one pass (happy, R3)", async () => {
@@ -113,7 +113,7 @@ describe("generateArchitecture", () => {
 
     // generateArchitecture returns the GENERATED shape (no costDrivers); estimateCosts
     // fills them like the route/seed do, so parse the FULL result after the cost step.
-    const estimated = estimateCosts(result, stores.pricing, "us-east-1");
+    const estimated = await estimateCosts(result, stores.pricing, "us-east-1");
     expect(() => ArchitectureResultSchema.parse(estimated)).not.toThrow();
     expect(result.tiers.map((t) => t.name)).toEqual(["budget", "balanced", "resilient"]);
     expect(usage).toEqual(USAGE);
@@ -179,7 +179,7 @@ describe("generateArchitecture", () => {
   });
 
   it("includes memory hits in the grounding telemetry when present for the domain (integration, R9)", async () => {
-    stores.memory.upsert({
+    await stores.memory.upsert({
       id: "research:file-uploads-1",
       topic: "file-uploads",
       fact: "Use presigned S3 PUT URLs",

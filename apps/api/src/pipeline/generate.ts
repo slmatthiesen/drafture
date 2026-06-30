@@ -38,7 +38,7 @@ export interface GenerateOutput {
 }
 
 export async function generateArchitecture(input: GenerateInput): Promise<GenerateOutput> {
-  const { prompt, matchedPatterns, memoryHits, missingTopics } = assembleGrounding({
+  const { prompt, matchedPatterns, memoryHits, missingTopics } = await assembleGrounding({
     description: input.description,
     answers: input.answers,
     memory: input.memory,

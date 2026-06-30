@@ -42,12 +42,12 @@ export function formatPending(docs: MemoryDoc[]): string {
   ].join("\n");
 }
 
-function main(): void {
+async function main(): Promise<void> {
   const dbPath = process.env.DB_PATH ?? DEFAULT_DB_PATH;
   const db = getDb(dbPath);
   try {
     const { memory } = createStores(db);
-    process.stdout.write(`${formatPending(memory.listPending())}\n`);
+    process.stdout.write(`${formatPending(await memory.listPending())}\n`);
   } finally {
     db.close();
   }

@@ -256,7 +256,7 @@ async function buildHarness(fake: Fake, configOverrides: Record<string, string> 
   const stores = createStores(openTempDb());
   const lines: string[] = [];
   const sink: TelemetrySink = (line) => lines.push(line);
-  const ctx = buildAppContext(testConfig(configOverrides), {
+  const ctx = await buildAppContext(testConfig(configOverrides), {
     provider: fake.provider,
     stores,
     telemetrySink: sink,
@@ -304,7 +304,7 @@ describe("POST /api/config", () => {
     const first = await app.inject({ method: "POST", url: "/api/config", payload: { tier: balancedTier() } });
     expect(first.statusCode).toBe(200);
     expect(fake.calls.generateConfig).toBe(1);
-    const spendAfterFirst = ctx.stores.spendLedger.spentTodayUsd();
+    const spendAfterFirst = await ctx.stores.spendLedger.spentTodayUsd();
 
     const second = await app.inject({ method: "POST", url: "/api/config", payload: { tier: balancedTier() } });
     expect(second.statusCode).toBe(200);
@@ -312,7 +312,7 @@ describe("POST /api/config", () => {
     // The provider was NOT called again — the cache short-circuited generation.
     expect(fake.calls.generateConfig).toBe(1);
     // A cache hit consumes no spend (KTD8).
-    expect(ctx.stores.spendLedger.spentTodayUsd()).toBeCloseTo(spendAfterFirst);
+    expect(await ctx.stores.spendLedger.spentTodayUsd()).toBeCloseTo(spendAfterFirst);
 
     const rec = lastTelemetry(lines);
     expect(rec.cacheHit).toBe(true);
@@ -365,7 +365,7 @@ describe("POST /api/config", () => {
     const res = await app.inject({ method: "POST", url: "/api/config", payload: { tier: balancedTier() } });
     expect(res.statusCode).toBe(502);
     expect(res.json().error).toBe("config_generation_failed");
-    expect(ctx.stores.spendLedger.spentTodayUsd()).toBeCloseTo(0);
+    expect(await ctx.stores.spendLedger.spentTodayUsd()).toBeCloseTo(0);
     expect(lastTelemetry(lines).outcome).toBe("error");
 
     await app.close();
@@ -387,7 +387,7 @@ describe("POST /api/config — deterministic Terraform (TERRAFORM_DETERMINISTIC)
     // The typed graph was rendered directly — the provider was never called.
     expect(fake.calls.generateConfig).toBe(0);
     // And no spend was reserved/consumed (it's a $0 path).
-    expect(ctx.stores.spendLedger.spentTodayUsd()).toBeCloseTo(0);
+    expect(await ctx.stores.spendLedger.spentTodayUsd()).toBeCloseTo(0);
 
     const rec = lastTelemetry(lines);
     expect(rec.outcome).toBe("ok");

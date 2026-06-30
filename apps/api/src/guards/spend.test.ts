@@ -54,16 +54,16 @@ describe("reserveSpend", () => {
     stores = createStores(openTempDb());
   });
 
-  it("reserves under the ceiling and returns a reservation", () => {
-    const res = reserveSpend(stores.spendLedger, 0.3, 5);
+  it("reserves under the ceiling and returns a reservation", async () => {
+    const res = await reserveSpend(stores.spendLedger, 0.3, 5);
     expect(res.ok).toBe(true);
     expect(res.reservation?.reservationId).toBeTruthy();
     expect(res.spentTodayUsd).toBeCloseTo(0.3);
   });
 
-  it("refuses with a friendly message once the ceiling is reached", () => {
-    reserveSpend(stores.spendLedger, 0.9, 1.0);
-    const res = reserveSpend(stores.spendLedger, 0.5, 1.0);
+  it("refuses with a friendly message once the ceiling is reached", async () => {
+    await reserveSpend(stores.spendLedger, 0.9, 1.0);
+    const res = await reserveSpend(stores.spendLedger, 0.5, 1.0);
     expect(res.ok).toBe(false);
     expect(res.reservation).toBeUndefined();
     expect(res.message).toMatch(/cached results are still available/i);

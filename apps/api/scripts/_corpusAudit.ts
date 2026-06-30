@@ -43,18 +43,18 @@ function audit(kind: Audited["kind"], id: string, label: string, body: string): 
   };
 }
 
-function main(): void {
+async function main(): Promise<void> {
   const config = getConfig();
   const db = getDb(config.DB_PATH);
   const stores = createStores(db);
 
   const audited: Audited[] = [];
-  for (const s of stores.generations.listApproved(10_000)) {
-    const rec = stores.generations.getById(s.id);
+  for (const s of await stores.generations.listApproved(10_000)) {
+    const rec = await stores.generations.getById(s.id);
     if (rec) audited.push(audit("generation", rec.id, rec.description.slice(0, 50), rec.body));
   }
-  for (const c of stores.curated.list()) {
-    const full = stores.curated.get(c.id);
+  for (const c of await stores.curated.list()) {
+    const full = await stores.curated.get(c.id);
     if (full) audited.push(audit("curated", c.id, full.title, full.body));
   }
 

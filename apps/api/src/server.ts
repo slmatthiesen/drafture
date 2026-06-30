@@ -45,7 +45,7 @@ export async function buildServer(
 async function main(): Promise<void> {
   const config = getConfig();
   const { buildAppContext } = await import("./app/context.js");
-  const ctx = buildAppContext(config);
+  const ctx = await buildAppContext(config);
   const app = await buildServer(config, ctx);
   try {
     await app.listen({ port: config.PORT, host: config.HOST });

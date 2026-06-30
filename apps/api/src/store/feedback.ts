@@ -37,7 +37,7 @@ export class SqliteFeedbackStore implements FeedbackStore {
     private readonly clock: Clock = systemClock,
   ) {}
 
-  upsert(entry: Omit<FeedbackEntry, "id" | "createdAt" | "updatedAt">): FeedbackEntry {
+  async upsert(entry: Omit<FeedbackEntry, "id" | "createdAt" | "updatedAt">): Promise<FeedbackEntry> {
     const id = randomUUID();
     const now = this.clock.now();
     const answersJson = entry.answers.length > 0 ? JSON.stringify(entry.answers) : null;
@@ -75,7 +75,7 @@ export class SqliteFeedbackStore implements FeedbackStore {
     return toEntry(row);
   }
 
-  listByRating(rating: 1 | -1, limit: number): FeedbackEntry[] {
+  async listByRating(rating: 1 | -1, limit: number): Promise<FeedbackEntry[]> {
     const rows = this.db
       .prepare(`SELECT * FROM feedback WHERE rating = ? ORDER BY updated_at DESC LIMIT ?`)
       .all(rating, limit) as FeedbackRow[];

@@ -32,7 +32,7 @@ function descriptionFor(slug: string): string {
   return golden.description;
 }
 
-function main(): void {
+async function main(): Promise<void> {
   const config = getConfig();
   const db = getDb(config.DB_PATH);
   const stores = createStores(db);
@@ -58,7 +58,7 @@ function main(): void {
       model: config.LLM_MODEL,
       region: config.DEFAULT_REGION,
     });
-    const { id, status } = stores.generations.upsert({
+    const { id, status } = await stores.generations.upsert({
       promptHash,
       description,
       answers: [],

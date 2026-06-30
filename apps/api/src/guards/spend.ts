@@ -78,12 +78,12 @@ export interface ReserveResult {
  * the route refuses with a friendly message when the budget is exhausted (cache-only
  * for the rest of the day).
  */
-export function reserveSpend(
+export async function reserveSpend(
   ledger: SpendLedger,
   provisionalUsd: number,
   ceilingUsd: number,
-): ReserveResult {
-  const r = ledger.reserve(provisionalUsd, ceilingUsd);
+): Promise<ReserveResult> {
+  const r = await ledger.reserve(provisionalUsd, ceilingUsd);
   if (!r.ok) {
     return {
       ok: false,

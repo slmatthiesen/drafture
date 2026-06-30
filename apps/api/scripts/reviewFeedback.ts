@@ -13,7 +13,7 @@
 import { getConfig } from "../src/config.js";
 import { getDb, createStores } from "../src/store/sqlite.js";
 
-function main(): void {
+async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const wantUp = args.includes("--up");
   const numeric = args.find((a) => /^\d+$/.test(a));
@@ -24,7 +24,7 @@ function main(): void {
   const db = getDb(config.DB_PATH);
   const stores = createStores(db);
 
-  const entries = stores.feedback.listByRating(rating, limit);
+  const entries = await stores.feedback.listByRating(rating, limit);
   const label = rating === 1 ? "UP-voted" : "DOWN-voted";
   console.log(`${entries.length} ${label} design${entries.length === 1 ? "" : "s"} (most recent first):\n`);
 

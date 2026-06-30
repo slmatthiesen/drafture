@@ -426,8 +426,8 @@ interface PriceLookup {
   approximate: boolean;
 }
 
-function lookupPrices(service: string, region: string, pricing: PricingStore): PriceLookup {
-  const cached = pricing.get(service, region);
+async function lookupPrices(service: string, region: string, pricing: PricingStore): Promise<PriceLookup> {
+  const cached = await pricing.get(service, region);
   if (cached.length > 0) return { records: cached, approximate: false };
 
   const seed =
@@ -437,7 +437,7 @@ function lookupPrices(service: string, region: string, pricing: PricingStore): P
   return { records: [], approximate: true };
 }
 
-function driversForService(
+async function driversForService(
   service: string,
   region: string,
   pricing: PricingStore,
@@ -445,8 +445,8 @@ function driversForService(
   tierMultiplier: number,
   volumeScale: number,
   instanceType?: string,
-): CostDriver[] {
-  const { records, approximate } = lookupPrices(service, region, pricing);
+): Promise<CostDriver[]> {
+  const { records, approximate } = await lookupPrices(service, region, pricing);
   return records.map((r) => {
     // The robustness premium (tierMultiplier) applies ONLY to capacity/always-on
     // units — the things redundancy actually duplicates (extra instances, replicas,
@@ -591,13 +591,13 @@ function egressesFromPrivateSubnet(tier: GeneratedTier): boolean {
   });
 }
 
-function estimateTier(
+async function estimateTier(
   tier: GeneratedTier,
   pricing: PricingStore,
   region: string,
   volumeScale: number,
   compliance: boolean,
-): Tier {
+): Promise<Tier> {
   const drivers: CostDriver[] = [];
   const seen = new Set<string>();
   const add = (d: CostDriver): void => {
@@ -622,7 +622,7 @@ function estimateTier(
 
   for (const [service, text] of serviceText) {
     const instanceType = resolveInstanceType(service, text, tier.name);
-    for (const d of driversForService(service, region, pricing, false, tierMultiplier, volumeScale, instanceType)) {
+    for (const d of await driversForService(service, region, pricing, false, tierMultiplier, volumeScale, instanceType)) {
       add(d);
     }
   }
@@ -632,7 +632,7 @@ function estimateTier(
   // (KTD6).
   if (egressesFromPrivateSubnet(tier)) {
     for (const service of DATA_TRANSFER_DEFAULT_SERVICES) {
-      for (const d of driversForService(service, region, pricing, true, tierMultiplier, volumeScale)) add(d);
+      for (const d of await driversForService(service, region, pricing, true, tierMultiplier, volumeScale)) add(d);
     }
   }
 
@@ -653,17 +653,19 @@ function estimateTier(
  * on-demand-list-price disclaimer to the result's assumptions. Returns a new
  * result; the input is not mutated.
  */
-export function estimateCosts(
+export async function estimateCosts(
   result: ArchitectureBeforeCost,
   pricing: PricingStore,
   region: string,
   volumeScale: number = TRAFFIC_VOLUME_SCALE[DEFAULT_TRAFFIC_BAND]!,
-): ArchitectureResult {
+): Promise<ArchitectureResult> {
   // Compliance pulls the paid security floor down into budget (cheapest *correct*).
   // Detected from the design's own surface — same signal the gate reads — so the cost
   // table and the verdict agree about what budget carries.
   const compliance = isComplianceFlagged(result);
-  const tiers = result.tiers.map((tier) => estimateTier(tier, pricing, region, volumeScale, compliance));
+  const tiers = await Promise.all(
+    result.tiers.map((tier) => estimateTier(tier, pricing, region, volumeScale, compliance)),
+  );
   // Disclaimer + the assumed traffic (now its own axis, shared across tiers) — stated
   // so a skipped traffic question still leaves the costing assumption visible. Both are
   // idempotent (re-running estimateCosts never duplicates them).

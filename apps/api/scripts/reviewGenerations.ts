@@ -16,7 +16,7 @@
 import { getConfig } from "../src/config.js";
 import { getDb, createStores } from "../src/store/sqlite.js";
 
-function main(): void {
+async function main(): Promise<void> {
   const [cmd, target] = process.argv.slice(2);
   const config = getConfig();
   const db = getDb(config.DB_PATH);
@@ -29,10 +29,10 @@ function main(): void {
     }
     // Try the generation queue first; fall back to a curated run (curated has no
     // pending/approved workflow, so approve = restore, hide = suppress its `hidden` flag).
-    const asGen = stores.generations.setStatus(target, cmd === "approve" ? "approved" : "hidden");
+    const asGen = await stores.generations.setStatus(target, cmd === "approve" ? "approved" : "hidden");
     if (asGen) {
       console.log(`${cmd}d  ${target} (generation)`);
-    } else if (stores.curated.setHidden(target, cmd === "hide")) {
+    } else if (await stores.curated.setHidden(target, cmd === "hide")) {
       console.log(`${cmd}d  ${target} (curated)`);
     } else {
       console.log(`not found: ${target}`);
@@ -42,7 +42,7 @@ function main(): void {
   }
 
   const limit = cmd && /^\d+$/.test(cmd) ? Number(cmd) : 30;
-  const pending = stores.generations.listPending(limit);
+  const pending = await stores.generations.listPending(limit);
   console.log(`${pending.length} pending generation(s) (newest first):\n`);
   for (const g of pending) {
     const preview = g.description.length > 120 ? `${g.description.slice(0, 120)}…` : g.description;

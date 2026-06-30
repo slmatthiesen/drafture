@@ -113,7 +113,7 @@ export class SqliteGenerationsStore implements GenerationsStore {
     private readonly clock: Clock = systemClock,
   ) {}
 
-  upsert(input: {
+  async upsert(input: {
     promptHash: string;
     description: string;
     answers: string[];
@@ -123,7 +123,8 @@ export class SqliteGenerationsStore implements GenerationsStore {
     tags: string[];
     body: string;
     clientIp: string;
-  }): GenerationUpsertResult {
+  }): Promise<GenerationUpsertResult> {
+
     const now = this.clock.now();
     // On prompt_hash conflict: refresh content + bump gen_count + touch updated_at,
     // but PRESERVE id, status, opt_out, terraform, votes, created_at (RETURNING yields
@@ -164,21 +165,21 @@ export class SqliteGenerationsStore implements GenerationsStore {
     return { id: row.id, status: parseStatus(row.status) };
   }
 
-  getById(id: string): GenerationRecord | undefined {
+  async getById(id: string): Promise<GenerationRecord | undefined> {
     const row = this.db.prepare(`SELECT * FROM generations WHERE id = ?`).get(id) as
       | GenRow
       | undefined;
     return row ? toRecord(row) : undefined;
   }
 
-  getByPromptHash(promptHash: string): GenerationRecord | undefined {
+  async getByPromptHash(promptHash: string): Promise<GenerationRecord | undefined> {
     const row = this.db.prepare(`SELECT * FROM generations WHERE prompt_hash = ?`).get(promptHash) as
       | GenRow
       | undefined;
     return row ? toRecord(row) : undefined;
   }
 
-  listPending(limit: number): GenerationSummary[] {
+  async listPending(limit: number): Promise<GenerationSummary[]> {
     const rows = this.db
       .prepare(
         `SELECT id, prompt_hash, description, model, region, recommended_tier, tags_json,
@@ -190,7 +191,7 @@ export class SqliteGenerationsStore implements GenerationsStore {
     return rows.map(toSummary);
   }
 
-  listApproved(limit: number): GenerationSummary[] {
+  async listApproved(limit: number): Promise<GenerationSummary[]> {
     const rows = this.db
       .prepare(
         `SELECT id, prompt_hash, description, model, region, recommended_tier, tags_json,
@@ -202,14 +203,14 @@ export class SqliteGenerationsStore implements GenerationsStore {
     return rows.map(toSummary);
   }
 
-  setStatus(id: string, status: GenerationStatus): boolean {
+  async setStatus(id: string, status: GenerationStatus): Promise<boolean> {
     const res = this.db
       .prepare(`UPDATE generations SET status = ?, updated_at = ? WHERE id = ?`)
       .run(status, this.clock.now(), id);
     return res.changes > 0;
   }
 
-  getTerraform(id: string, tierName: string): { code: string } | undefined {
+  async getTerraform(id: string, tierName: string): Promise<{ code: string } | undefined> {
     const row = this.db
       .prepare(`SELECT terraform_json FROM generations WHERE id = ?`)
       .get(id) as { terraform_json: string | null } | undefined;
@@ -219,7 +220,7 @@ export class SqliteGenerationsStore implements GenerationsStore {
     return entry?.code ? { code: entry.code } : undefined;
   }
 
-  setTerraform(id: string, tierName: string, code: string): boolean {
+  async setTerraform(id: string, tierName: string, code: string): Promise<boolean> {
     const row = this.db
       .prepare(`SELECT terraform_json FROM generations WHERE id = ?`)
       .get(id) as { terraform_json: string | null } | undefined;
@@ -232,7 +233,7 @@ export class SqliteGenerationsStore implements GenerationsStore {
     return true;
   }
 
-  vote(id: string, voter: string, value: 1 | -1, hideThreshold: number): GenerationVoteResult | undefined {
+  async vote(id: string, voter: string, value: 1 | -1, hideThreshold: number): Promise<GenerationVoteResult | undefined> {
     const tx = this.db.transaction((): GenerationVoteResult | undefined => {
       const existing = this.db.prepare(`SELECT status FROM generations WHERE id = ?`).get(id) as
         | { status: string }

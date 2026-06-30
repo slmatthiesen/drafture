@@ -29,57 +29,57 @@ describe("SqliteMemoryStore", () => {
     store = new SqliteMemoryStore(db, clock);
   });
 
-  it("upsert then get returns the stored doc", () => {
-    const saved = store.upsert(baseDoc);
+  it("upsert then get returns the stored doc", async () => {
+    const saved = await store.upsert(baseDoc);
     expect(saved.createdAt).toBe(1_000);
     expect(saved.updatedAt).toBe(1_000);
-    expect(store.get(baseDoc.topic)).toEqual(saved);
-    expect(store.getById(baseDoc.id)).toEqual(saved);
+    expect(await store.get(baseDoc.topic)).toEqual(saved);
+    expect(await store.getById(baseDoc.id)).toEqual(saved);
   });
 
-  it("second upsert overwrites and preserves createdAt while bumping updatedAt", () => {
-    store.upsert(baseDoc);
+  it("second upsert overwrites and preserves createdAt while bumping updatedAt", async () => {
+    await store.upsert(baseDoc);
     clock.advance(500);
-    const updated = store.upsert({ ...baseDoc, fact: "Updated fact." });
+    const updated = await store.upsert({ ...baseDoc, fact: "Updated fact." });
     expect(updated.fact).toBe("Updated fact.");
     expect(updated.createdAt).toBe(1_000); // preserved
     expect(updated.updatedAt).toBe(1_500); // bumped
-    expect(store.get(baseDoc.topic)?.fact).toBe("Updated fact.");
+    expect((await store.get(baseDoc.topic))?.fact).toBe("Updated fact.");
   });
 
-  it("search returns verified and quarantined docs for matching topics", () => {
-    store.upsert(baseDoc);
-    store.upsert({
+  it("search returns verified and quarantined docs for matching topics", async () => {
+    await store.upsert(baseDoc);
+    await store.upsert({
       ...baseDoc,
       id: "doc-2",
       topic: "nat-gateway-cost",
       verified: false,
       provenance: "research",
     });
-    const hits = store.search(["s3-block-public-access", "nat-gateway-cost"]);
+    const hits = await store.search(["s3-block-public-access", "nat-gateway-cost"]);
     expect(hits.map((d) => d.id).sort()).toEqual(["doc-1", "doc-2"]);
-    expect(store.search([])).toEqual([]);
-    expect(store.search(["nonexistent"])).toEqual([]);
+    expect(await store.search([])).toEqual([]);
+    expect(await store.search(["nonexistent"])).toEqual([]);
   });
 
-  it("listPending returns only unverified docs", () => {
-    store.upsert(baseDoc);
-    store.upsert({ ...baseDoc, id: "doc-2", verified: false, provenance: "research" });
-    const pending = store.listPending();
+  it("listPending returns only unverified docs", async () => {
+    await store.upsert(baseDoc);
+    await store.upsert({ ...baseDoc, id: "doc-2", verified: false, provenance: "research" });
+    const pending = await store.listPending();
     expect(pending.map((d) => d.id)).toEqual(["doc-2"]);
   });
 
-  it("setVerified flips the flag and reports whether a row matched", () => {
-    store.upsert({ ...baseDoc, verified: false, provenance: "research" });
-    expect(store.setVerified("doc-1", true)).toBe(true);
-    expect(store.getById("doc-1")?.verified).toBe(true);
-    expect(store.setVerified("missing", true)).toBe(false);
+  it("setVerified flips the flag and reports whether a row matched", async () => {
+    await store.upsert({ ...baseDoc, verified: false, provenance: "research" });
+    expect(await store.setVerified("doc-1", true)).toBe(true);
+    expect((await store.getById("doc-1"))?.verified).toBe(true);
+    expect(await store.setVerified("missing", true)).toBe(false);
   });
 
-  it("delete removes a doc and reports whether a row matched", () => {
-    store.upsert(baseDoc);
-    expect(store.delete("doc-1")).toBe(true);
-    expect(store.getById("doc-1")).toBeUndefined();
-    expect(store.delete("doc-1")).toBe(false);
+  it("delete removes a doc and reports whether a row matched", async () => {
+    await store.upsert(baseDoc);
+    expect(await store.delete("doc-1")).toBe(true);
+    expect(await store.getById("doc-1")).toBeUndefined();
+    expect(await store.delete("doc-1")).toBe(false);
   });
 });

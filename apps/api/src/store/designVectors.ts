@@ -22,14 +22,14 @@ export class SqliteDesignVectorStore implements DesignVectorStore {
     private readonly clock: Clock,
   ) {}
 
-  upsert(input: {
+  async upsert(input: {
     id: string;
     source: DesignSource;
     promptHash: string;
     text: string;
     vector: number[];
     model: string;
-  }): void {
+  }): Promise<void> {
     const now = this.clock.now();
     this.db
       .prepare(
@@ -51,21 +51,21 @@ export class SqliteDesignVectorStore implements DesignVectorStore {
       });
   }
 
-  hasForModel(id: string, model: string): boolean {
+  async hasForModel(id: string, model: string): Promise<boolean> {
     const row = this.db
       .prepare(`SELECT 1 FROM design_embeddings WHERE id = ? AND model = ?`)
       .get(id, model);
     return row !== undefined;
   }
 
-  count(model: string): number {
+  async count(model: string): Promise<number> {
     const row = this.db
       .prepare(`SELECT COUNT(*) AS n FROM design_embeddings WHERE model = ?`)
       .get(model) as { n: number };
     return row.n;
   }
 
-  search(queryVector: number[], model: string, topK: number): DesignVectorMatch[] {
+  async search(queryVector: number[], model: string, topK: number): Promise<DesignVectorMatch[]> {
     const rows = this.db
       .prepare(`SELECT id, source, vector FROM design_embeddings WHERE model = ?`)
       .all(model) as Row[];
@@ -78,7 +78,7 @@ export class SqliteDesignVectorStore implements DesignVectorStore {
     return scored.slice(0, topK);
   }
 
-  delete(id: string): boolean {
+  async delete(id: string): Promise<boolean> {
     const info = this.db.prepare(`DELETE FROM design_embeddings WHERE id = ?`).run(id);
     return info.changes > 0;
   }

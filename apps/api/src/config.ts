@@ -116,8 +116,21 @@ const ConfigSchema = z.object({
   // back into the review queue — community-driven removal, hard-delete stays manual.
   GENERATION_HIDE_NET_VOTES: z.coerce.number().int().default(-3),
 
-  // Storage
+  // Storage backend selection (provider-abstracted, factory-selected — the house
+  // style). `sqlite` (default) is the dev/test backend: fast, hermetic, no network.
+  // `dynamodb` is the serverless prod backend — state lives in DynamoDB so the box is
+  // stateless. Both implement the same `Stores` interfaces; routes/pipeline never see
+  // which is active.
+  STORE_BACKEND: z.enum(["sqlite", "dynamodb"]).default("sqlite"),
+  // SQLite file (used only when STORE_BACKEND=sqlite).
   DB_PATH: z.string().default("./data/drafture.db"),
+  // DynamoDB (used only when STORE_BACKEND=dynamodb). Table names are
+  // `${DYNAMO_TABLE_PREFIX}${logicalName}`. DYNAMO_ENDPOINT points the SDK at a local
+  // emulator for integration tests; unset in prod (real AWS endpoint). Region falls
+  // back to DEFAULT_REGION when unset.
+  DYNAMO_TABLE_PREFIX: z.string().default("drafture_"),
+  DYNAMO_REGION: z.string().optional(),
+  DYNAMO_ENDPOINT: z.string().optional(),
 
   // Static SPA build directory served by the API
   WEB_DIST: z.string().default("../web/dist"),

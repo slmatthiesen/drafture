@@ -39,7 +39,7 @@ const idParamsSchema = {
 
 export async function registerCuratedRoutes(app: FastifyInstance, ctx: AppContext): Promise<void> {
   app.get(ROUTE, { preHandler: [ctx.guards.accessGate] }, async (_req, reply) => {
-    return reply.code(200).send({ runs: ctx.stores.curated.list() });
+    return reply.code(200).send({ runs: await ctx.stores.curated.list() });
   });
 
   app.get(
@@ -47,7 +47,7 @@ export async function registerCuratedRoutes(app: FastifyInstance, ctx: AppContex
     { schema: { params: idParamsSchema }, preHandler: [ctx.guards.accessGate] },
     async (req, reply) => {
       const { id } = req.params as { id: string };
-      const run = ctx.stores.curated.get(id);
+      const run = await ctx.stores.curated.get(id);
       if (!run) return reply.code(404).send({ error: "not_found", message: "Unknown curated run." });
       // body is the verbatim /api/generate JSON — splice it up so the client gets one
       // flat design object plus the gallery metadata.
@@ -74,12 +74,12 @@ export async function registerCuratedRoutes(app: FastifyInstance, ctx: AppContex
 
 const ROUTE = "/api/curated";
 
-function handleVote(ctx: AppContext, req: FastifyRequest, reply: FastifyReply): unknown {
+async function handleVote(ctx: AppContext, req: FastifyRequest, reply: FastifyReply): Promise<unknown> {
   const { id } = req.params as { id: string };
   const { value } = req.body as VoteBody;
   const voter = clientIp(req);
 
-  const result = ctx.stores.curated.vote(id, voter, value);
+  const result = await ctx.stores.curated.vote(id, voter, value);
   if (!result) return reply.code(404).send({ error: "not_found", message: "Unknown curated run." });
   return reply.code(200).send(result);
 }

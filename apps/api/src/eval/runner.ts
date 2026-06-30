@@ -71,7 +71,7 @@ export async function runEval(input: RunEvalInput): Promise<EvalReport> {
     // Run the deterministic cost step so the result mirrors what the route/seed
     // produce: the model emits no costDrivers, so estimateCosts fills them and
     // appends the on-demand list-price disclaimer the property gate checks.
-    const estimated = estimateCosts(result, input.pricing, input.region ?? "us-east-1");
+    const estimated = await estimateCosts(result, input.pricing, input.region ?? "us-east-1");
     const aggregate = check(estimated);
     perPrompt.push({ id: prompt.id, ok: aggregate.ok, properties: aggregate.results });
   }
@@ -128,7 +128,7 @@ async function main(): Promise<void> {
   const { seedKnowledgeBase } = await import("../store/kbLoader.js");
 
   const stores = createStores(getDb(config.DB_PATH));
-  seedKnowledgeBase(stores);
+  await seedKnowledgeBase(stores);
 
   const provider = ClaudeProvider.fromConfig(config);
   const report = await runEval({

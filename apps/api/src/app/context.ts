@@ -19,7 +19,8 @@ import { GlmProvider } from "../llm/glm.js";
 import type { EmbeddingProvider } from "../llm/embeddings/provider.js";
 import { buildEmbeddingProvider } from "../llm/embeddings/factory.js";
 
-import { getDb, createStores, type Db, type Stores } from "../store/sqlite.js";
+import { createStores, type Db, type Stores } from "../store/sqlite.js";
+import { buildStores } from "../store/factory.js";
 import { seedKnowledgeBase } from "../store/kbLoader.js";
 
 import { makeAccessGate } from "../guards/accessGate.js";
@@ -89,18 +90,25 @@ function buildProvider(config: Config): LlmProvider {
   return config.LLM_PROVIDER === "glm" ? GlmProvider.fromConfig(config) : ClaudeProvider.fromConfig(config);
 }
 
-export function buildAppContext(
+export async function buildAppContext(
   config: Config,
   overrides: AppContextOverrides = {},
-): AppContext {
+): Promise<AppContext> {
   let db = overrides.db;
   let stores = overrides.stores;
   if (!stores) {
-    db = db ?? getDb(config.DB_PATH);
-    stores = createStores(db);
+    if (db) {
+      // A test handed us an open SQLite handle — bind stores to it directly.
+      stores = createStores(db);
+    } else {
+      // Select the configured backend (SQLite dev/test, DynamoDB prod).
+      const built = buildStores(config);
+      stores = built.stores;
+      db = built.db;
+    }
   }
   // Idempotent — safe whether the DB is fresh or already seeded (kbLoader).
-  seedKnowledgeBase(stores);
+  await seedKnowledgeBase(stores);
 
   const provider = overrides.provider ?? buildProvider(config);
   // `embedder` may be explicitly null in tests (exercise the retrieval-off path), so

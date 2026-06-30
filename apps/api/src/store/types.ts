@@ -19,14 +19,14 @@ export interface MemoryDoc {
 }
 
 export interface MemoryStore {
-  upsert(doc: Omit<MemoryDoc, "createdAt" | "updatedAt"> & Partial<Pick<MemoryDoc, "createdAt" | "updatedAt">>): MemoryDoc;
-  get(topic: string): MemoryDoc | undefined;
-  getById(id: string): MemoryDoc | undefined;
+  upsert(doc: Omit<MemoryDoc, "createdAt" | "updatedAt"> & Partial<Pick<MemoryDoc, "createdAt" | "updatedAt">>): Promise<MemoryDoc>;
+  get(topic: string): Promise<MemoryDoc | undefined>;
+  getById(id: string): Promise<MemoryDoc | undefined>;
   /** Topics with a verified or quarantined hit, used by grounding to detect misses. */
-  search(topics: string[]): MemoryDoc[];
-  listPending(): MemoryDoc[];
-  setVerified(id: string, verified: boolean): boolean;
-  delete(id: string): boolean;
+  search(topics: string[]): Promise<MemoryDoc[]>;
+  listPending(): Promise<MemoryDoc[]>;
+  setVerified(id: string, verified: boolean): Promise<boolean>;
+  delete(id: string): Promise<boolean>;
 }
 
 export interface CachedResponse {
@@ -37,8 +37,8 @@ export interface CachedResponse {
 
 export interface ResponseCache {
   /** Returns undefined past TTL. */
-  get(promptHash: string, ttlMs: number): CachedResponse | undefined;
-  set(promptHash: string, body: string): void;
+  get(promptHash: string, ttlMs: number): Promise<CachedResponse | undefined>;
+  set(promptHash: string, body: string): Promise<void>;
 }
 
 /** A normalized unit price keyed by (service, region) (KTD6). */
@@ -53,11 +53,11 @@ export interface PriceRecord {
 }
 
 export interface PricingStore {
-  get(service: string, region: string): PriceRecord[];
+  get(service: string, region: string): Promise<PriceRecord[]>;
   /** Atomically replace one month's rows for a region (refresh job, U7). */
-  replaceMonth(region: string, month: string, records: PriceRecord[]): void;
+  replaceMonth(region: string, month: string, records: PriceRecord[]): Promise<void>;
   /** Seed offline-fallback facts without clobbering a fresher month. */
-  seed(records: PriceRecord[]): void;
+  seed(records: PriceRecord[]): Promise<void>;
 }
 
 /** Outcome of a reserve-on-entry spend check (KTD7). */
@@ -72,18 +72,19 @@ export interface SpendReservation {
 export interface SpendLedger {
   /**
    * Transactionally reserve a provisional debit at guard time. Concurrent callers
-   * cannot each pass the ceiling check (no overshoot) — SQLite serializes writers.
+   * cannot each pass the ceiling check (no overshoot) — SQLite serializes writers;
+   * DynamoDB uses an optimistic-concurrency loop on the day-counter item.
    */
-  reserve(provisionalUsd: number, ceilingUsd: number): SpendReservation;
+  reserve(provisionalUsd: number, ceilingUsd: number): Promise<SpendReservation>;
   /** Reconcile a reservation to the actual cost once generation completes. */
-  reconcile(reservationId: string, actualUsd: number): void;
+  reconcile(reservationId: string, actualUsd: number): Promise<void>;
   /** Release a reservation that never produced a charge (e.g. error). */
-  release(reservationId: string): void;
-  spentTodayUsd(): number;
+  release(reservationId: string): Promise<void>;
+  spentTodayUsd(): Promise<number>;
 
   /** Per-IP daily generation counter for the per-IP cap (U8). */
-  incrementIpCount(ip: string): number;
-  ipCountToday(ip: string): number;
+  incrementIpCount(ip: string): Promise<number>;
+  ipCountToday(ip: string): Promise<number>;
 }
 
 /**
@@ -114,18 +115,18 @@ export interface CuratedVoteResult {
 
 export interface CuratedStore {
   /** Gallery list (no body), best-scored first. */
-  list(): CuratedRunSummary[];
+  list(): Promise<CuratedRunSummary[]>;
   /** Full run incl. body for rendering; undefined if unknown id. */
-  get(id: string): CuratedRun | undefined;
+  get(id: string): Promise<CuratedRun | undefined>;
   /** Admin insert/replace (seed script). Preserves existing votes on replace. */
-  upsert(run: { id: string; title: string; prompt: string; body: string }): void;
+  upsert(run: { id: string; title: string; prompt: string; body: string }): Promise<void>;
   /** Suppress (true) or restore (false) a run from every served surface. False for an unknown id. */
-  setHidden(id: string, hidden: boolean): boolean;
+  setHidden(id: string, hidden: boolean): Promise<boolean>;
   /**
    * Cast or change one voter's up/down vote, recomputing counters. Returns the new
    * counts, or undefined if the run does not exist.
    */
-  vote(id: string, voter: string, value: 1 | -1): CuratedVoteResult | undefined;
+  vote(id: string, voter: string, value: 1 | -1): Promise<CuratedVoteResult | undefined>;
 }
 
 /**
@@ -163,9 +164,9 @@ export interface FeedbackStore {
    * (never stacks), so re-clicking thumbs toggles/updates rather than ballot-stuffing.
    * Returns the canonical (post-conflict) entry.
    */
-  upsert(entry: Omit<FeedbackEntry, "id" | "createdAt" | "updatedAt">): FeedbackEntry;
+  upsert(entry: Omit<FeedbackEntry, "id" | "createdAt" | "updatedAt">): Promise<FeedbackEntry>;
   /** Most-recently-updated entries filtered by rating (operator review script). */
-  listByRating(rating: 1 | -1, limit: number): FeedbackEntry[];
+  listByRating(rating: 1 | -1, limit: number): Promise<FeedbackEntry[]>;
 }
 
 /**
@@ -271,15 +272,31 @@ export interface DesignVectorMatch {
  */
 export interface DesignVectorStore {
   /** Insert or replace the embedding for a design (re-embedding overwrites by id). */
-  upsert(input: { id: string; source: DesignSource; promptHash: string; text: string; vector: number[]; model: string }): void;
+  upsert(input: { id: string; source: DesignSource; promptHash: string; text: string; vector: number[]; model: string }): Promise<void>;
   /** Already embedded under this model? Lets the backfill skip work (idempotent). */
-  hasForModel(id: string, model: string): boolean;
+  hasForModel(id: string, model: string): Promise<boolean>;
   /** Rows embedded under `model` (the comparable corpus). */
-  count(model: string): number;
+  count(model: string): Promise<number>;
   /** Brute-force cosine top-k against the same-`model` corpus, best first. */
-  search(queryVector: number[], model: string, topK: number): DesignVectorMatch[];
+  search(queryVector: number[], model: string, topK: number): Promise<DesignVectorMatch[]>;
   /** Remove an embedding (e.g. when a design is hidden/deleted). */
-  delete(id: string): boolean;
+  delete(id: string): Promise<boolean>;
+}
+
+/**
+ * The full set of storage contracts a running app needs, backend-agnostic (KTD5).
+ * `createStores` (SQLite) and `createDynamoStores` (DynamoDB) both return this shape,
+ * selected by `STORE_BACKEND`; routes/pipeline depend only on these interfaces.
+ */
+export interface Stores {
+  memory: MemoryStore;
+  responseCache: ResponseCache;
+  pricing: PricingStore;
+  spendLedger: SpendLedger;
+  curated: CuratedStore;
+  feedback: FeedbackStore;
+  generations: GenerationsStore;
+  designVectors: DesignVectorStore;
 }
 
 export interface GenerationsStore {
@@ -298,22 +315,22 @@ export interface GenerationsStore {
     tags: string[];
     body: string;
     clientIp: string;
-  }): GenerationUpsertResult;
-  getById(id: string): GenerationRecord | undefined;
-  getByPromptHash(promptHash: string): GenerationRecord | undefined;
+  }): Promise<GenerationUpsertResult>;
+  getById(id: string): Promise<GenerationRecord | undefined>;
+  getByPromptHash(promptHash: string): Promise<GenerationRecord | undefined>;
   /** Operator approval queue (status = pending), newest first. */
-  listPending(limit: number): GenerationSummary[];
+  listPending(limit: number): Promise<GenerationSummary[]>;
   /** Public gallery (status = approved), best community score first. */
-  listApproved(limit: number): GenerationSummary[];
-  setStatus(id: string, status: GenerationStatus): boolean;
+  listApproved(limit: number): Promise<GenerationSummary[]>;
+  setStatus(id: string, status: GenerationStatus): Promise<boolean>;
   /** Persist one tier's reference Terraform onto the row (lazy, from /api/config). */
-  setTerraform(id: string, tierName: string, code: string): boolean;
-  getTerraform(id: string, tierName: string): { code: string } | undefined;
+  setTerraform(id: string, tierName: string, code: string): Promise<boolean>;
+  getTerraform(id: string, tierName: string): Promise<{ code: string } | undefined>;
   /**
    * Cast or change one voter's up/down vote, recomputing counters. If the row is
    * `approved` and net votes (up - down) fall to/below `hideThreshold`, it is auto-
    * hidden back into the review queue — community-driven removal without ceding the
    * hard-delete. Returns undefined if the generation does not exist.
    */
-  vote(id: string, voter: string, value: 1 | -1, hideThreshold: number): GenerationVoteResult | undefined;
+  vote(id: string, voter: string, value: 1 | -1, hideThreshold: number): Promise<GenerationVoteResult | undefined>;
 }

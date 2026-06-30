@@ -50,7 +50,7 @@ function selectPrompts(): { id: string; description: string }[] {
 async function main(): Promise<void> {
   const prompts = selectPrompts();
   const config = getConfig();
-  const ctx = buildAppContext(config);
+  const ctx = await buildAppContext(config);
 
   console.log(`Corpus growth · ${config.LLM_MODEL} · ${prompts.length} prompt(s)\n`);
   const persisted: string[] = [];
@@ -63,7 +63,7 @@ async function main(): Promise<void> {
       description: p.description,
       opts: { maxTokens: config.LLM_MAX_TOKENS, effort: config.LLM_EFFORT },
     });
-    const estimated = estimateCosts(result, ctx.stores.pricing, config.DEFAULT_REGION, trafficVolumeScale([]));
+    const estimated = await estimateCosts(result, ctx.stores.pricing, config.DEFAULT_REGION, trafficVolumeScale([]));
     const gate = runAllProperties(estimated);
     const cost = llmCostUsd(usage, ctx.pricing);
     totalCost += cost;
@@ -82,7 +82,7 @@ async function main(): Promise<void> {
       model: config.LLM_MODEL,
       region: config.DEFAULT_REGION,
     });
-    const { id, status } = ctx.stores.generations.upsert({
+    const { id, status } = await ctx.stores.generations.upsert({
       promptHash,
       description: p.description,
       answers: [],

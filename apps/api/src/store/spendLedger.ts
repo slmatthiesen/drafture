@@ -41,7 +41,7 @@ export class SqliteSpendLedger implements SpendLedger {
     return row.total ?? 0;
   }
 
-  reserve(provisionalUsd: number, ceilingUsd: number): SpendReservation {
+  async reserve(provisionalUsd: number, ceilingUsd: number): Promise<SpendReservation> {
     const day = this.today();
     const now = this.clock.now();
     const txn = this.db.transaction((): SpendReservation => {
@@ -71,7 +71,7 @@ export class SqliteSpendLedger implements SpendLedger {
     return txn.immediate();
   }
 
-  reconcile(reservationId: string, actualUsd: number): void {
+  async reconcile(reservationId: string, actualUsd: number): Promise<void> {
     this.db
       .prepare(
         `UPDATE spend_entries SET amount_usd = ?, status = 'reconciled' WHERE id = ?`,
@@ -79,17 +79,17 @@ export class SqliteSpendLedger implements SpendLedger {
       .run(actualUsd, reservationId);
   }
 
-  release(reservationId: string): void {
+  async release(reservationId: string): Promise<void> {
     this.db
       .prepare(`DELETE FROM spend_entries WHERE id = ?`)
       .run(reservationId);
   }
 
-  spentTodayUsd(): number {
+  async spentTodayUsd(): Promise<number> {
     return this.sumForDay(this.today());
   }
 
-  incrementIpCount(ip: string): number {
+  async incrementIpCount(ip: string): Promise<number> {
     const day = this.today();
     const txn = this.db.transaction((): number => {
       this.db
@@ -106,7 +106,7 @@ export class SqliteSpendLedger implements SpendLedger {
     return txn.immediate();
   }
 
-  ipCountToday(ip: string): number {
+  async ipCountToday(ip: string): Promise<number> {
     const row = this.db
       .prepare(`SELECT count FROM ip_counts WHERE ip = ? AND day = ?`)
       .get(ip, this.today()) as CountRow | undefined;

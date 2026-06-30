@@ -48,7 +48,7 @@ export class SqliteResponseCache implements ResponseCache {
     private readonly clock: Clock = systemClock,
   ) {}
 
-  get(promptHash: string, ttlMs: number): CachedResponse | undefined {
+  async get(promptHash: string, ttlMs: number): Promise<CachedResponse | undefined> {
     const row = this.db
       .prepare(`SELECT * FROM response_cache WHERE prompt_hash = ?`)
       .get(promptHash) as CacheRow | undefined;
@@ -61,7 +61,7 @@ export class SqliteResponseCache implements ResponseCache {
     };
   }
 
-  set(promptHash: string, body: string): void {
+  async set(promptHash: string, body: string): Promise<void> {
     this.db
       .prepare(
         `INSERT INTO response_cache (prompt_hash, body, created_at)

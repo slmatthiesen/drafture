@@ -327,14 +327,14 @@ function renderMemorySection(docs: MemoryDoc[]): string | undefined {
  * Assemble the grounded prompt split at the cache breakpoint (KTD11). The prefix
  * is the shared static block; everything request-specific goes in the suffix.
  */
-export function assembleGrounding(input: GroundingInput): GroundingResult {
+export async function assembleGrounding(input: GroundingInput): Promise<GroundingResult> {
   const answers = input.answers ?? [];
   const haystack = [input.description, ...answers].join("\n");
 
   const matchedPatterns = detectPatternIds(haystack);
   const topics = detectTopics(haystack);
 
-  const hits = topics.length > 0 ? input.memory.search(topics) : [];
+  const hits = topics.length > 0 ? await input.memory.search(topics) : [];
   const memoryHits = hits.map((d) => d.id);
   const hitTopics = new Set(hits.map((d) => d.topic));
   const missingTopics = topics.filter((t) => !hitTopics.has(t));
