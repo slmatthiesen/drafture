@@ -262,7 +262,7 @@ describe("ClaudeProvider.generate", () => {
     expect(create).toHaveBeenCalledTimes(2);
   });
 
-  it("throws a non-retryable ProviderError after the retry also fails validation", async () => {
+  it("throws a non-retryable ProviderError after all retries also fail validation", async () => {
     const { client, create } = fakeClient();
     create.mockResolvedValue(toolMessage({ still: "wrong" }));
 
@@ -270,7 +270,7 @@ describe("ClaudeProvider.generate", () => {
 
     expect(err).toBeInstanceOf(ProviderError);
     expect((err as ProviderError).retryable).toBe(false);
-    expect(create).toHaveBeenCalledTimes(2);
+    expect(create).toHaveBeenCalledTimes(3); // structuredCall now makes 3 attempts
   });
 });
 
