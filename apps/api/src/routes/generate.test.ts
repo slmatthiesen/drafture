@@ -182,6 +182,10 @@ describe("POST /api/generate", () => {
     expect(rec.cacheHit).toBe(false);
     expect(rec.outcome).toBe("ok");
     expect(rec.costUsd as number).toBeGreaterThan(0);
+    // Launch-obs line (U15 §4): model + structural-completeness + retrieval signal.
+    expect(rec.model).toBe("claude-sonnet-4-6");
+    expect(rec.completenessOk).toBe(true);
+    expect(rec.retrievalHit).toBe(false);
 
     await app.close();
   });
@@ -225,6 +229,7 @@ describe("POST /api/generate", () => {
     expect(rec.outcome).toBe("library");
     expect(rec.cacheHit).toBe(true);
     expect(rec.costUsd).toBe(0);
+    expect(rec.retrievalHit).toBe(true);
 
     await app.close();
   });

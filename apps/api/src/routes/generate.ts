@@ -26,6 +26,7 @@ import { llmCostUsd, provisionalLlmCostUsdFromConfig, reserveSpend } from "../gu
 import { runClarify, roundCapReached } from "../pipeline/clarify.js";
 import { assembleGrounding } from "../pipeline/ground.js";
 import { generateArchitecture } from "../pipeline/generate.js";
+import { isStructurallyComplete } from "../pipeline/completeness.js";
 import { retrieveSimilarDesigns, renderExemplars } from "../pipeline/retrieve.js";
 import { estimateCosts, trafficVolumeScale } from "../pipeline/cost.js";
 import { scrubAll, scrubObject, scrubPrompt } from "../pipeline/scrub.js";
@@ -130,7 +131,13 @@ async function handleGenerate(
 
   const emit = (
     outcome: string,
-    opts: { cacheHit?: boolean; costUsd?: number; researchCalls?: number } = {},
+    opts: {
+      cacheHit?: boolean;
+      costUsd?: number;
+      researchCalls?: number;
+      retrievalHit?: boolean;
+      completenessOk?: boolean;
+    } = {},
   ): void => {
     emitTelemetry(
       telemetryRecord({
@@ -145,6 +152,9 @@ async function handleGenerate(
         latencyMs: Date.now() - startedAt,
         costUsd: opts.costUsd ?? 0,
         outcome,
+        model: ctx.config.LLM_MODEL,
+        retrievalHit: opts.retrievalHit,
+        completenessOk: opts.completenessOk,
       }),
       ctx.telemetrySink,
     );
@@ -189,10 +199,13 @@ async function handleGenerate(
         similarity: Number(retrieval.topSimilarity.toFixed(3)),
       },
     };
-    emit("library", { cacheHit: true, costUsd: 0 });
+    emit("library", { cacheHit: true, costUsd: 0, retrievalHit: true });
     return reply.code(200).send(responseBody);
   }
   const exemplarsSection = renderExemplars(retrieval.exemplars);
+  // The learning network grounded this generation if it injected exemplars (an
+  // instant hit returned above). Rides every post-retrieval telemetry line.
+  const retrievalHit = retrieval.exemplars.length > 0;
 
   // (3) Clarification gate (R2). Below the cap we may ask; once the cap is reached we
   // force generation regardless of whether the model still wants to clarify.
@@ -206,7 +219,7 @@ async function handleGenerate(
     if (clarification.needsClarification) {
       // No generation happened, so nothing is debited to the ledger; we still report
       // the (bounded, cheap) clarify-call cost for observability.
-      emit("clarify", { costUsd: llmCostUsd(usage, ctx.pricing) });
+      emit("clarify", { costUsd: llmCostUsd(usage, ctx.pricing), retrievalHit });
       return reply.code(200).send({
         needsClarification: true,
         questions: clarification.questions,
@@ -220,7 +233,7 @@ async function handleGenerate(
   const provisional = provisionalLlmCostUsdFromConfig(ctx.config);
   const reservation = reserveSpend(ctx.stores.spendLedger, provisional, ctx.config.DAILY_SPEND_CEILING_USD);
   if (!reservation.ok || !reservation.reservation) {
-    emit("refused", { costUsd: 0 });
+    emit("refused", { costUsd: 0, retrievalHit });
     // 503: the service is temporarily unavailable for NEW generations; cache still serves.
     return reply.code(503).send({
       error: "daily_budget_reached",
@@ -316,13 +329,16 @@ async function handleGenerate(
 
     ctx.stores.responseCache.set(cacheKey, JSON.stringify(responseBody));
 
-    emit("ok", { costUsd: actualUsd, researchCalls });
+    // Structural-completeness signal for the telemetry line (free, deterministic —
+    // the same checks gate the offline eval). Run on the scrubbed, cost-filled body.
+    const completenessOk = isStructurallyComplete(scrubbedOutput.value);
+    emit("ok", { costUsd: actualUsd, researchCalls, retrievalHit, completenessOk });
     return reply.code(200).send(responseBody);
   } catch (err) {
     // Generation failed: release the reservation so the budget isn't consumed by a
     // call that produced nothing, then surface a clean upstream error.
     ctx.stores.spendLedger.release(reservationId);
-    emit("error", { costUsd: 0, researchCalls });
+    emit("error", { costUsd: 0, researchCalls, retrievalHit });
     req.log.error({ err }, "generation failed");
     return reply.code(502).send({
       error: "generation_failed",
