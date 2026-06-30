@@ -1,6 +1,8 @@
 # DRAFTURE — agent handoff brief (READ THIS FIRST)
 
-> Source: Drafture design `qg7zz9UuLpPL` · tier: **budget** · region: us-east-1 · generated 2026-06-29
+> Source: regenerated from this pack's `prompt.txt` + `answers.json` through the improved
+> Drafture pipeline (tier-delta + wire-up rules + 13-property completeness gate, gate PASS
+> 13/13) · model claude-sonnet-4-6 · tier: **budget** · region: us-east-1 · 2026-06-29
 > Siblings in this pack: `budget.tf` (reference Terraform), `design.json` (full design body).
 
 This pack is an **agent-ready build plan**, not a finished stack. Drafture did the
@@ -31,17 +33,15 @@ These were deliberate. If you "helpfully" add them back, you undo a call the use
 - **No UI/dashboard hosting.** The user already has the front end built and hosted
   elsewhere. Do **not** provision S3+CloudFront static hosting for a dashboard. The
   CloudFront in `budget.tf` fronts the **ingest API**, not a static site.
-- **⚠ The dashboard's READ PATH is not provisioned — this is an open gap, not a decision
-  to skip it.** `budget.tf` is **write-only**: DynamoDB IAM grants are `PutItem`/`UpdateItem`
-  only, there is no read Lambda, and no public GET route. The user's existing static page
-  has **no way to fetch trades to display.** Before finalizing, **raise this to the user**
-  and add one of:
-  1. a public read Lambda + API GW GET route (`GET /trades`, `GET /trades/{id}`) reading
-     DynamoDB (Scan/Query), or
-  2. an AppSync GraphQL endpoint over the table, or
-  3. if the page is already wired to something else, confirm and stop.
-  Do **not** silently leave the page unable to read, and do **not** silently bolt on a
-  design without confirming the approach.
+- **The existing frontend is fed by a PUSH fan-out, not a read API.** This design wires
+  `ingest_lambda → SQS → dispatch_lambda → HTTP POST` to the user's existing frontend
+  endpoint (see the `sqs_fanout`/`dispatch_lambda` nodes). The assumption — **confirm it
+  with the user** — is that the already-built frontend exposes an ingest endpoint and owns
+  its own display store. **⚠ Open gap to verify:** if the frontend instead expects to
+  *pull* trades, there is no public GET route over DynamoDB here (IAM grants are
+  `PutItem`/`UpdateItem` write-only) — in that case raise it and add either a read Lambda +
+  `GET /trades` route or an AppSync endpoint. Do **not** silently assume the push lands
+  somewhere usable; **confirm the frontend's ingest contract** (URL, auth, payload) first.
 - **AI eval is async.** The webhook returns ~200ms; eval runs from the queue. Do not make
   eval synchronous with the webhook response.
 - **No compliance regime.** No PII / regulated data → no HIPAA/PCI scope. Don't invent one.
@@ -58,13 +58,15 @@ when you refactor.
 
 This is **reference-only** HCL. Known gaps the agent owns:
 
-- **No real Lambda handlers.** All three Lambdas point at placeholder zips
-  (`lambda.zip`, `eval_lambda.zip`, `rotate_secret.zip`) that don't exist. Supply real
-  Python handlers: `ingest` (verify TradingView HMAC + timestamp, idempotent
-  `PutItem` to DynamoDB on alert-id, `SendMessage` to the queue), `eval` (consume from
-  queue, fetch market data via the secret, run the Python analysis, write result +
-  artefact), `rotate_secret` (Secrets Manager rotation). **HMAC verification is handler
-  logic — it is NOT in the `.tf`; do not ship the endpoint without it.**
+- **No real Lambda handlers.** The Lambdas point at placeholder zips that don't exist.
+  Supply real Python handlers: `ingest` (validate the **shared-secret bearer token** from
+  the `Authorization` header against Secrets Manager — TradingView cannot HMAC-sign its
+  webhooks, so a passphrase/bearer token is the auth, not a signature — then idempotent
+  `PutItem` to DynamoDB on alert-id and `SendMessage` to the fan-out queue), `dispatch`
+  (consume the queue, HTTP POST to the existing frontend endpoint, fail to the DLQ),
+  `streams`-stub (DynamoDB Streams → S3 archive for the future AI eval). **Token
+  validation is handler logic — it is NOT in the `.tf`; do not ship the endpoint without
+  it**, and reject mismatches before any side-effect.
 - **API Gateway has no stage/deployment.** `aws_apigatewayv2_route` + integration exist but
   there is no `aws_apigatewayv2_stage`/`aws_apigatewayv2_deployment`, so the endpoint won't
   actually serve. Add an `auto_deploy = true` stage.
