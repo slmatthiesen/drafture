@@ -174,7 +174,7 @@ export function emitBaseline(ctx: EmitCtx): HclBlock[] {
   // --- KMS: CloudWatch Logs CMK (needs the logs service principal, LITERAL region) ---
   // Required whenever ANYTHING writes encrypted logs: a log sink, CloudTrail, or any
   // Lambda (every Lambda emits a CMK-encrypted log group).
-  if (ctx.has("cloudwatch-logs") || ctx.has("cloudtrail") || ctx.has("lambda")) {
+  if (ctx.has("cloudwatch-logs") || ctx.has("cloudtrail") || ctx.has("lambda") || ctx.has("apigw")) {
     blocks.push({
       section: "KMS keys",
       hcl: [

@@ -156,29 +156,32 @@ describe("annotateWireupGaps", () => {
 
 // --- Canned tier ------------------------------------------------------------
 
+// A tier built from services with NO deterministic emitter (Cognito + Kinesis), so it
+// always routes to the LLM fallback — used to exercise the LLM path's spend/cache/error
+// behavior. (API Gateway + DynamoDB are now templated, hence not used here.)
 function balancedTier(): Tier {
   return {
     name: "balanced",
     summary: "balanced tier",
     nodes: [
       {
-        id: "api",
-        awsService: "API Gateway",
-        role: "front door",
-        security: ["TLS", "WAF", "throttling", "least-priv role"],
+        id: "auth",
+        awsService: "Amazon Cognito",
+        role: "user pool",
+        security: ["TLS", "MFA", "least-priv role"],
       },
       {
-        id: "db",
-        awsService: "DynamoDB",
-        role: "primary datastore",
-        security: ["encryption at rest", "on-demand", "least-priv role"],
+        id: "stream",
+        awsService: "Amazon Kinesis Data Streams",
+        role: "event firehose",
+        security: ["encryption at rest", "least-priv role"],
       },
     ],
     edges: [
-      { from: "client", to: "api", payload: "JSON request body", protocol: "HTTPS" },
-      { from: "api", to: "db", payload: "item read/write", protocol: "HTTPS" },
+      { from: "client", to: "auth", payload: "auth request", protocol: "HTTPS" },
+      { from: "auth", to: "stream", payload: "event record", protocol: "HTTPS" },
     ],
-    costDrivers: [{ service: "API Gateway", unit: "per 1k requests", estimateRange: "$0.20–$0.90", note: "" }],
+    costDrivers: [{ service: "Amazon Cognito", unit: "per MAU", estimateRange: "$0.00–$0.55", note: "" }],
     delta: ["+ multi-AZ"],
     tradeoffs: ["vs resilient: cheaper, single-region"],
   };
@@ -405,7 +408,7 @@ describe("POST /api/config — deterministic Terraform (TERRAFORM_DETERMINISTIC)
     await app.close();
   });
 
-  it("a tier with an unsupported service (API Gateway + DynamoDB) falls back to the LLM long tail", async () => {
+  it("a tier with an unsupported service (Cognito + Kinesis) falls back to the LLM long tail", async () => {
     const fake = makeFake();
     const { app } = await buildHarness(fake);
 

@@ -14,6 +14,7 @@ import { emitEc2, emitLambda, emitPostgres } from "./emitters/compute.js";
 import { emitCloudfront } from "./emitters/cloudfront.js";
 import { emitScheduler } from "./emitters/scheduler.js";
 import { emitAlb, emitElasticache, emitFargate, emitRds } from "./emitters/managed.js";
+import { emitApiGateway, emitDynamo } from "./emitters/serverless.js";
 import {
   emitCloudtrail,
   emitCloudwatchAlarms,
@@ -53,4 +54,6 @@ export const REGISTRY: ReadonlyMap<ServiceKey, ServiceEmitter> = new Map<Service
   ["cloudwatch-anomaly", emitCloudwatchAnomaly],
   ["sqs", emitSqs],
   ["eventbridge-bus", emitEventbridgeBus],
+  ["dynamo", emitDynamo],
+  ["apigw", emitApiGateway],
 ]);

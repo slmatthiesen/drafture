@@ -153,20 +153,29 @@ describe("deterministic Terraform — IAM from edges AND security tags", () => {
   });
 });
 
-describe("deterministic Terraform — full dogfood coverage (budget + managed tiers)", () => {
-  // The real happy-hour design exercises the whole catalog: CloudFront/WAF/ACM, the
-  // budget single box, and the balanced/resilient managed stack (ALB, Fargate, RDS,
-  // ElastiCache, NAT, SQS+DLQ, EventBridge). Every tier must template fully with no gaps.
-  const design = JSON.parse(
-    readFileSync(new URL("../../../../../dogfood/happyhourfriends/design.json", import.meta.url), "utf8"),
-  ) as { tiers: Tier[] };
-  for (const tier of design.tiers) {
-    it(`${tier.name}: 100% coverage, zero wire-up gaps`, () => {
-      const { coverage, gaps } = assembleTier(tier, { region: "us-east-1" });
-      expect(coverage.unsupported).toEqual([]);
-      expect(coverage.ratio).toBe(1);
-      expect(gaps).toEqual([]);
-    });
+describe("deterministic Terraform — full dogfood coverage (both real designs)", () => {
+  // Two structurally different real designs: happy-hour (CloudFront/WAF, a budget single
+  // box, the balanced/resilient managed stack — ALB/Fargate/RDS/ElastiCache/NAT/SQS/
+  // EventBridge) and trade-monitoring (serverless — API Gateway/Lambda/DynamoDB/SQS).
+  // Every tier of both must template fully with zero wire-up gaps.
+  const designs = ["happyhourfriends", "trade-monitoring-handoff"].map(
+    (d) =>
+      [
+        d,
+        JSON.parse(readFileSync(new URL(`../../../../../dogfood/${d}/design.json`, import.meta.url), "utf8")) as {
+          tiers: Tier[];
+        },
+      ] as const,
+  );
+  for (const [name, design] of designs) {
+    for (const tier of design.tiers) {
+      it(`${name} / ${tier.name}: 100% coverage, zero wire-up gaps`, () => {
+        const { coverage, gaps } = assembleTier(tier, { region: "us-east-1" });
+        expect(coverage.unsupported).toEqual([]);
+        expect(coverage.ratio).toBe(1);
+        expect(gaps).toEqual([]);
+      });
+    }
   }
 });
 

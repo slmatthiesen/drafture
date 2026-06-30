@@ -102,6 +102,23 @@ export function edgeIamStatements(node: ArchitectureNode, ctx: EmitCtx): Jsonish
           Resource: raw(`aws_sqs_queue.${ttf}.arn`),
         });
         break;
+      case "dynamo":
+        statements.push({
+          Sid: `Dynamo_${ttf}`,
+          Effect: "Allow",
+          Action: [
+            "dynamodb:GetItem",
+            "dynamodb:BatchGetItem",
+            "dynamodb:Query",
+            "dynamodb:PutItem",
+            "dynamodb:UpdateItem",
+            "dynamodb:DeleteItem",
+            "dynamodb:BatchWriteItem",
+          ],
+          Resource: [raw(`aws_dynamodb_table.${ttf}.arn`), raw(`"\${aws_dynamodb_table.${ttf}.arn}/index/*"`)],
+        });
+        needsKmsMain = true;
+        break;
       case "postgres-selfmanaged": {
         // A localhost edge from the box ITSELF crosses no network — no grant. A Lambda
         // reaching the co-located Postgres tunnels in via SSM port-forward to the host.

@@ -40,6 +40,8 @@ export type ServiceKey =
   | "rds"
   | "elasticache"
   | "nat"
+  | "dynamo"
+  | "apigw"
   | "unsupported";
 
 interface Rule {
@@ -73,6 +75,8 @@ const RULES: Rule[] = [
   { key: "alb", any: ["application load balancer", "alb", "elastic load balancing"] },
   { key: "fargate", any: ["fargate", "ecs", "elastic container service"] },
   { key: "nat", any: ["nat gateway"] },
+  { key: "apigw", any: ["api gateway", "apigateway", "http api"] },
+  { key: "dynamo", any: ["dynamodb", "dynamo"] },
   { key: "cloudfront", any: ["cloudfront", "cdn"] },
   { key: "lambda", any: ["lambda"] },
   { key: "s3", any: ["s3", "simple storage"] },
