@@ -171,12 +171,19 @@ export function detectWireupGaps(hcl: string): WireupGap[] {
     });
   }
 
-  // s3-access-log-delivery
-  if (has(/logging_config\s*\{/) && !has(/resource\s+"aws_s3_bucket_policy"/)) {
+  // s3-access-log-delivery — require the actual log-delivery principal (the CF
+  // canonical-user data source, or a CanonicalUser principal), NOT merely "some
+  // bucket policy exists": a policy on an UNRELATED bucket (e.g. an OAC on a
+  // dashboard bucket) must not mask a missing delivery grant on the logs bucket.
+  if (
+    has(/logging_config\s*\{/) &&
+    !has(/aws_cloudfront_log_delivery_canonical_user_ids/) &&
+    !has(/CanonicalUser/)
+  ) {
     gaps.push({
       id: "s3-access-log-delivery",
       message:
-        "An access-log bucket (CloudFront/S3 logging_config) has no bucket policy granting the log-delivery principal s3:PutObject — with Block Public Access, logging silently no-ops.",
+        "A CloudFront/S3 access-log bucket has no log-delivery grant (canonical user / cloudfront principal s3:PutObject) — with Block Public Access, logging silently no-ops.",
     });
   }
 

@@ -118,6 +118,7 @@ const CLEAN_HCL = [
   "    bucket = aws_s3_bucket.cf_logs.id",
   "  }",
   "}",
+  'data "aws_cloudfront_log_delivery_canonical_user_ids" "cf_logs" {}',
   'resource "aws_s3_bucket_policy" "cf_logs" {',
   "  bucket = aws_s3_bucket.cf_logs.id",
   "}",
