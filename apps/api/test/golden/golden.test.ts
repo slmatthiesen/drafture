@@ -132,6 +132,8 @@ describe("completeness critic flips to FAIL on a structurally-broken graph", () 
       { id: "waf", awsService: "AWS WAF", role: "rate-limit + managed rules", security: ["edge protection"] },
       { id: "shield", awsService: "AWS Shield Advanced", role: "DDoS protection", security: ["edge protection"] },
       { id: "nat", awsService: "NAT Gateway", role: "private-subnet egress", security: [] },
+      // SSM Parameter Store / Secrets Manager — passive secrets pulled at launch, not a hop.
+      { id: "ssm-params", awsService: "SSM Parameter Store", role: "app secrets/config", security: ["KMS at rest"] },
     );
     expect(graphHasNoOrphanNodes(withProtection).ok, graphHasNoOrphanNodes(withProtection).reason).toBe(true);
 
