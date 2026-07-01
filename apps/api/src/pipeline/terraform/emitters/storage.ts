@@ -100,6 +100,41 @@ export function emitS3(node: ArchitectureNode, ctx: EmitCtx): HclBlock[] {
   return blocks;
 }
 
+/**
+ * SSM Parameter Store — the FREE-floor secrets/config store (the budget tier's default;
+ * AWS Secrets Manager is the paid step-up). SecureString parameters under a per-node
+ * path, encrypted with the AWS-managed `aws/ssm` key at the budget floor or the customer
+ * CMK at balanced+. Values are injected out-of-band via a sensitive map variable — never
+ * a committed secret. A `for_each` over an empty default map creates nothing until the
+ * operator supplies parameters, which is the right reference-only starting point.
+ */
+export function emitSsmParameterStore(node: ArchitectureNode, ctx: EmitCtx): HclBlock[] {
+  const tf = ctx.tf(node.id);
+  const dash = tf.replace(/_/g, "-");
+  return [
+    {
+      section: `SSM Parameter Store — ${node.role}`,
+      hcl: [
+        `variable "${tf}_parameters" {`,
+        `  type        = map(string)`,
+        `  description = "SecureString parameters for ${node.role} (name -> value). Inject out-of-band; do not commit secrets."`,
+        `  default     = {}`,
+        `  sensitive   = true`,
+        `}`,
+        ``,
+        `resource "aws_ssm_parameter" "${tf}" {`,
+        `  for_each = var.${tf}_parameters`,
+        `  name     = "/${ctx.prefix}/${dash}/\${each.key}"`,
+        `  type     = "SecureString"`,
+        `  value    = each.value`,
+        // Budget floor: the AWS-managed aws/ssm key (free). Balanced+/compliance: a CMK.
+        ...(ctx.paidSecurity ? [`  key_id   = aws_kms_key.main.arn`] : []),
+        `}`,
+      ].join("\n"),
+    },
+  ];
+}
+
 export function emitSecrets(node: ArchitectureNode, ctx: EmitCtx): HclBlock[] {
   const tf = ctx.tf(node.id);
   return [

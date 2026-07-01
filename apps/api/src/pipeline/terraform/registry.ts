@@ -9,7 +9,7 @@ import type { EmitCtx } from "./context.js";
 import type { HclBlock } from "./hcl.js";
 import type { ServiceKey } from "./serviceKey.js";
 
-import { emitS3, emitSecrets } from "./emitters/storage.js";
+import { emitS3, emitSecrets, emitSsmParameterStore } from "./emitters/storage.js";
 import { emitEc2, emitLambda, emitPostgres } from "./emitters/compute.js";
 import { emitCloudfront } from "./emitters/cloudfront.js";
 import { emitScheduler } from "./emitters/scheduler.js";
@@ -36,6 +36,7 @@ export type ServiceEmitter = (node: ArchitectureNode, ctx: EmitCtx) => HclBlock[
 export const REGISTRY: ReadonlyMap<ServiceKey, ServiceEmitter> = new Map<ServiceKey, ServiceEmitter>([
   ["s3", emitS3],
   ["secrets-manager", emitSecrets],
+  ["ssm", emitSsmParameterStore],
   ["ec2", emitEc2],
   ["postgres-selfmanaged", emitPostgres],
   ["lambda", emitLambda],

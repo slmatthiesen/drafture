@@ -62,6 +62,15 @@ export function edgeIamStatements(node: ArchitectureNode, ctx: EmitCtx): Jsonish
         });
         needsKmsMain = true;
         break;
+      case "ssm":
+        statements.push({
+          Sid: `SSM_${ttf}`,
+          Effect: "Allow",
+          Action: ["ssm:GetParameter", "ssm:GetParameters", "ssm:GetParametersByPath"],
+          Resource: raw(`"arn:\${local.partition}:ssm:\${local.region}:\${local.account_id}:parameter/${ctx.prefix}/${ttf}/*"`),
+        });
+        needsKmsMain = true;
+        break;
       case "lambda":
         statements.push({
           Sid: `Invoke_${ttf}`,

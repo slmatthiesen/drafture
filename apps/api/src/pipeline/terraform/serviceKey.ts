@@ -27,6 +27,7 @@ export type ServiceKey =
   | "eventbridge-scheduler"
   | "eventbridge-bus"
   | "secrets-manager"
+  | "ssm"
   | "cloudwatch-logs"
   | "cloudwatch-alarms"
   | "cloudwatch-dashboard"
@@ -80,6 +81,9 @@ const RULES: Rule[] = [
   { key: "cloudwatch-logs", any: ["cloudwatch logs", "cloudwatch log", "log group"] },
   { key: "cloudtrail", any: ["cloudtrail"] },
   { key: "secrets-manager", any: ["secrets manager", "secretsmanager"] },
+  // SSM Parameter Store (the FREE-floor secrets/config store). Distinct from Secrets
+  // Manager (checked above) and from other Systems Manager features (Session Manager).
+  { key: "ssm", any: ["parameter store", "ssm parameter", "systems manager parameter"] },
   { key: "xray", any: ["x-ray", "xray"] },
   { key: "sns", any: ["sns", "simple notification"] },
   { key: "sqs", any: ["sqs", "simple queue", "dead-letter queue"] },

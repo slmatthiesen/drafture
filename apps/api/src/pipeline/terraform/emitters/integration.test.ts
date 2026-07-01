@@ -39,6 +39,7 @@ function integrationTier(name: "budget" | "balanced" = "budget"): Tier {
       n("flow", "AWS Step Functions", "onboarding workflow", ["least-priv role"]),
       n("worker", "Lambda", "workflow task", ["least-priv role"]),
       n("search", "Amazon OpenSearch Service", "product search (multi-AZ)", ["private subnet", "TLS"]),
+      n("cfg", "SSM Parameter Store", "config + secrets", ["SecureString"]),
       n("logs", "CloudWatch Logs", "central log sink", ["retention 30 days"]),
       n("sns", "SNS", "ops alert topic", ["TLS"]),
       n("alarms", "CloudWatch Alarms", "golden-signal alarms", []),
@@ -51,6 +52,7 @@ function integrationTier(name: "budget" | "balanced" = "budget"): Tier {
       e("api", "stream", "put record", "HTTPS"),
       e("api", "flow", "StartExecution", "HTTPS"),
       e("api", "search", "query", "HTTPS"),
+      e("api", "cfg", "GetParameter", "HTTPS"),
       e("stream", "consumer", "records", "Kinesis"),
       e("flow", "worker", "task", "states"),
       e("api", "logs"),
@@ -96,6 +98,9 @@ describe("deterministic Terraform — widened emitter vocabulary (Cognito/SES/St
     expect(code).toContain('resource "aws_sfn_state_machine"');
     expect(code).toContain('resource "aws_kinesis_stream"');
     expect(code).toContain('resource "aws_opensearch_domain"');
+    // SSM Parameter Store — the FREE-floor secrets store (the budget-tier default).
+    expect(code).toContain('resource "aws_ssm_parameter"');
+    expect(code).toContain('type     = "SecureString"');
   });
 
   it("derives least-privilege IAM for each integration from the edges", () => {
@@ -104,6 +109,7 @@ describe("deterministic Terraform — widened emitter vocabulary (Cognito/SES/St
     expect(code).toContain("states:StartExecution");
     expect(code).toContain("kinesis:PutRecord");
     expect(code).toContain("es:ESHttpGet");
+    expect(code).toContain("ssm:GetParameter");
   });
 
   it("wires a kinesis→lambda consumer and a step-functions→lambda task from edges", () => {
