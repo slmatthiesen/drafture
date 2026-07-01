@@ -180,13 +180,17 @@ export const LeanTierDeltaSchema = z.object({
   summary: z.string(),
   addNodes: z
     .array(LeanNodeSchema)
-    .describe("Nodes NEW in this tier, OR existing nodes re-stated because they changed (upsert by id). Do NOT repeat unchanged nodes."),
+    .describe(
+      "Nodes NEW in this tier, OR existing nodes re-stated because they changed (upsert by id). Do NOT repeat unchanged nodes. HARD RULE: every addNode MUST be wired by at least one addEdge in this same delta — a node with no edge is an orphan bug the design is rejected for. Express resilience as multi-AZ / standby / read-replica CONFIG on an EXISTING node (re-state it by id with the change), or as a genuinely-new HA component (a DLQ, a DR-region copy) that you FULLY wire with addEdges — NEVER as an unwired '<id>-replica' / '<id>-dr' copy of a node already in the tier.",
+    ),
   removeNodeIds: z
     .array(z.string())
     .describe("Ids of nodes from the tier below that this tier drops (usually empty — tiers grow upward)."),
   addEdges: z
     .array(EdgeSchema)
-    .describe("Edges NEW in this tier, or changed edges re-stated (upsert by from+to). Do NOT repeat unchanged edges."),
+    .describe(
+      "Edges NEW in this tier, or changed edges re-stated (upsert by from+to). Do NOT repeat unchanged edges. MUST include a wiring edge for every node in addNodes (from/to an existing or newly-added node id, or 'client').",
+    ),
   removeEdges: z
     .array(EdgeRefSchema)
     .describe("Edges from the tier below that this tier drops (usually empty)."),

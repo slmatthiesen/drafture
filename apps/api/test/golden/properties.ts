@@ -17,11 +17,13 @@ import type { SecurityBaseline } from "@drafture/kb";
 
 import { TIER_NAMES } from "../../src/schema/architecture.js";
 import type { ArchitectureResult, Tier } from "../../src/schema/architecture.js";
-import { graphHasNoDanglingEdges, primaryDatastoreReachable, isPrimaryDatastore } from "../../src/pipeline/completeness.js";
+import { graphHasNoDanglingEdges, primaryDatastoreReachable, graphHasNoOrphanNodes, isPrimaryDatastore } from "../../src/pipeline/completeness.js";
 import { budgetIdleFloor } from "../../src/pipeline/costFloor.js";
 import { isComplianceFlagged, paidSecurityMarkersOnTier } from "../../src/pipeline/securityTiers.js";
 // Re-export so the golden test (and any caller) keeps importing them from here.
-export { graphHasNoDanglingEdges, primaryDatastoreReachable };
+// All three structural checks live in `src/pipeline/completeness.ts` (single source
+// of truth) so the live generation path can run them too without importing test code.
+export { graphHasNoDanglingEdges, primaryDatastoreReachable, graphHasNoOrphanNodes };
 
 const baselines = securityBaselines as SecurityBaseline[];
 
@@ -592,75 +594,11 @@ export const exactlyThreeTiers: Property = (result) => {
 
 // --- Completeness critic (R-completeness) -----------------------------------
 //
-// The two structural-completeness checks (graphHasNoDanglingEdges,
-// primaryDatastoreReachable) now live in `src/pipeline/completeness.ts` so the
-// SAME logic gates the offline eval AND rides the runtime telemetry line
-// (`completenessOk`). They are imported above and slot into ALL_PROPERTIES below.
-
-// An unwired node is usually a bug (a delta added it but never connected it), but a
-// few service kinds are LEGITIMATELY edgeless sinks: passive asset stores and the
-// audit/log destinations the security floor requires (S3 assets, CloudWatch Logs,
-// CloudTrail, Config). Exempt those — mirroring why primaryDatastoreReachable skips
-// S3 — so the check fires only on genuinely-orphaned active nodes (a stray compute,
-// queue, or primary datastore left dangling).
-const ORPHAN_EXEMPT_KEYWORDS = [
-  "s3", "cloudwatch logs", "cloudwatch log", "cloudtrail", "aws config", "log group",
-  "access log", "audit", "flow log",
-  // Passive OBSERVABILITY surfaces — edgeless by nature, like CloudWatch Logs:
-  // X-Ray traces instrument services in-process, so they carry no graph edge.
-  "x-ray", "xray",
-  // Passive build/deploy INFRA — an image registry that compute pulls from at task
-  // launch, not a runtime data-flow participant (present in every container design).
-  "ecr", "elastic container registry", "container registry",
-  // Passive PROTECTION LAYERS — a web ACL / DDoS subscription ATTACHES to CloudFront/
-  // ALB/Route 53 rather than sitting in the data flow. The security floor REQUIRES edge
-  // protection, so it's present in most designs; models wire it INCONSISTENTLY (some draw
-  // client→WAF→CloudFront, some leave the ACL as a bare association node), which made the
-  // gate false-fail honest designs. Edgeless here is legitimate, like the audit-log sinks.
-  "waf", "shield",
-  // Passive EGRESS INFRA — a NAT gateway gives private-subnet resources outbound egress;
-  // it is not a data-flow endpoint (the cost engine already models it as a synthetic line,
-  // not a graph hop), so a drawn-but-unwired NAT node is not an orphan bug. Multi-word key
-  // so the bare token "nat" can't collide with words like "coordinate"/"designate".
-  "nat gateway",
-] as const;
-
-function isOrphanExempt(awsService: string, role: string): boolean {
-  const s = `${awsService} ${role}`.toLowerCase();
-  if (ORPHAN_EXEMPT_KEYWORDS.some((kw) => s.includes(kw))) return true;
-  // A CloudWatch Dashboard is a passive metric-viz surface (edgeless like a log
-  // group), whichever word holds "dashboard" — service "CloudWatch Dashboard" OR
-  // service "CloudWatch" + role "...dashboard". Require BOTH tokens so a bare
-  // user-facing "dashboard" (a UI_NODE that SHOULD be wired) is never exempted.
-  if (s.includes("cloudwatch") && s.includes("dashboard")) return true;
-  return false;
-}
-
-/** Every node must participate in at least one edge — an unwired active node is
- *  the canonical failure mode of a tier-delta that ADDS a node but never wires it.
- *  Passive asset/audit-log sinks (S3, CloudWatch Logs, CloudTrail) are exempt: they
- *  are legitimately edgeless in the graph, same exclusion primaryDatastoreReachable
- *  makes for S3. */
-export const graphHasNoOrphanNodes: Property = (result) => {
-  const offenders: string[] = [];
-  for (const tier of result.tiers) {
-    const wired = new Set<string>();
-    for (const e of tier.edges) {
-      wired.add(e.from);
-      wired.add(e.to);
-    }
-    for (const n of tier.nodes) {
-      if (!wired.has(n.id) && !isOrphanExempt(n.awsService, n.role)) {
-        offenders.push(`${tier.name}: node '${n.id}' (${n.awsService}) has no edge`);
-      }
-    }
-  }
-  return {
-    name: "graphHasNoOrphanNodes",
-    ok: offenders.length === 0,
-    reason: offenders.length === 0 ? "every active node is wired into the graph" : offenders.join("; "),
-  };
-};
+// All three structural-completeness checks (graphHasNoDanglingEdges,
+// primaryDatastoreReachable, graphHasNoOrphanNodes) live in `src/pipeline/completeness.ts`
+// — single source of truth — so the SAME logic gates the offline eval AND rides the
+// runtime telemetry line (`completenessOk` / `gateFailures`) on every live generation.
+// They are imported + re-exported above and slot into ALL_PROPERTIES below.
 
 // A UI-implying node means the design serves user-facing reads, so a primary
 // datastore must be REACHABLE from the client through compute — data the page shows

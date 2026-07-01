@@ -29,6 +29,12 @@ export interface TelemetryRecord {
   /** True when the generated design passed the structural-completeness checks.
    *  Only set on a real generation; undefined on cache/library/clarify lines. */
   completenessOk?: boolean;
+  /** Names of structural-completeness checks that FAILED on this generation (e.g.
+   *  `["graphHasNoOrphanNodes"]`) — the diagnostic detail behind `completenessOk`,
+   *  so the prod broken-graph rate is measurable per-request and root-caused by
+   *  check name. Empty/undefined when it passed or on non-generation lines. The
+   *  gate is ADVISORY: the design is still served; this only observes. */
+  gateFailures?: string[];
   /** Count of lean nodes whose `svc` matched no service-catalog entry (Layer A,
    *  docs/plans/2026-07-01-009) — data for which catalog entry to add next. Only
    *  set on a real generation. */
