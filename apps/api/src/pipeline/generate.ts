@@ -7,7 +7,7 @@
  * so the caller can log it and U6 can research the misses.
  */
 import type { GenerateOptions, LlmProvider, Usage } from "../llm/provider.js";
-import type { ArchitectureBeforeCost, GeneratedTier, PreHydrationArchitecture, TierName } from "../schema/architecture.js";
+import type { ArchitectureBeforeCost, GeneratedTier, TierName } from "../schema/architecture.js";
 import type { MemoryStore } from "../store/types.js";
 
 import { assembleGrounding } from "./ground.js";
