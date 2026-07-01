@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 
 import { loadConfig } from "../config.js";
-import type { GenerateScope, LlmProvider, ProviderResult, Usage } from "../llm/provider.js";
+import type { GenerateOptions, GenerateScope, LlmProvider, ProviderResult, Usage } from "../llm/provider.js";
 import type { EmbeddingProvider } from "../llm/embeddings/provider.js";
 import type { ArchitectureResult, Clarification, TierName } from "../schema/architecture.js";
 import { TIER_NAMES } from "../schema/architecture.js";
@@ -98,9 +98,16 @@ function makeFake(opts: FakeOpts = {}): Fake {
     },
     // Scope-aware, like the real provider: `budget` emits only the budget tier (the
     // lazy default), `addTier` emits only the requested tier, `full`/undefined emits all.
-    async generate(_prompt, _opts, scope?: GenerateScope): Promise<ProviderResult<ArchitectureResult>> {
+    async generate(
+      _prompt,
+      genOpts?: GenerateOptions,
+      scope?: GenerateScope,
+    ): Promise<ProviderResult<ArchitectureResult>> {
       calls.generate += 1;
       if (opts.generateError) throw new Error("upstream boom");
+      // Emulate the real provider's streaming heartbeat so SSE token events have data.
+      genOpts?.onProgress?.({ outputChars: 120 });
+      genOpts?.onProgress?.({ outputChars: 480 });
       const arch = opts.arch ?? validArchitecture();
       if (scope?.kind === "budget") {
         return { result: { ...arch, tiers: arch.tiers.filter((t) => t.name === "budget") }, usage: USAGE };
@@ -197,6 +204,54 @@ describe("POST /api/generate", () => {
     expect(rec.model).toBe("claude-sonnet-4-6");
     expect(rec.completenessOk).toBe(true);
     expect(rec.retrievalHit).toBe(false);
+
+    await app.close();
+  });
+
+  it("streams phase + token + result SSE events when the client asks for them (fix D)", async () => {
+    const fake = makeFake();
+    const { app } = await buildHarness(fake);
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/generate",
+      headers: { accept: "text/event-stream" },
+      payload: { description: SPEC },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.headers["content-type"]).toContain("text/event-stream");
+    const body = res.payload;
+    // Real phase transitions, a token heartbeat during the decode, then the result.
+    expect(body).toContain("event: phase");
+    expect(body).toContain('"step":"generating"');
+    expect(body).toContain("event: token");
+    expect(body).toContain('"chars":480');
+    expect(body).toContain("event: result");
+    // The terminal result frame carries the budget-only design.
+    const resultFrame = body.slice(body.indexOf("event: result"));
+    const data = JSON.parse(resultFrame.split("data: ")[1]!.split("\n")[0]!);
+    expect(data.tiers.map((t: { name: string }) => t.name)).toEqual(["budget"]);
+    expect(fake.calls.generate).toBe(1);
+
+    await app.close();
+  });
+
+  it("streams a clarify event (not result) when the model needs more info", async () => {
+    const fake = makeFake({ needsClarification: true, questions: ["What traffic shape?"] });
+    const { app } = await buildHarness(fake);
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/generate",
+      headers: { accept: "text/event-stream" },
+      payload: { description: "build me something", round: 1 },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.payload).toContain("event: clarify");
+    expect(res.payload).toContain("What traffic shape?");
+    expect(res.payload).not.toContain("event: result");
 
     await app.close();
   });

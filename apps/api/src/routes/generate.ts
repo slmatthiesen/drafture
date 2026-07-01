@@ -160,6 +160,26 @@ async function handleGenerate(
     );
   };
 
+  // Streaming (fix D): when the client asks for SSE, emit real phase + token-heartbeat
+  // events during the (decode-bound) generation so the wait shows genuine motion. JSON
+  // clients (no `Accept: text/event-stream`) are unaffected — identical terminal payloads,
+  // just delivered via reply.send instead of a final `result`/`clarify`/`error` event.
+  const wantsStream = (req.headers.accept ?? "").includes("text/event-stream");
+  const sse = wantsStream ? openSse(reply) : null;
+  const phase = (step: string): void => sse?.event("phase", { step });
+  const finish = (
+    code: number,
+    payload: unknown,
+    event: "result" | "clarify" | "error" = "result",
+  ): FastifyReply => {
+    if (sse) {
+      sse.event(event, payload);
+      sse.end();
+      return reply;
+    }
+    return reply.code(code).send(payload);
+  };
+
   // Cache key: the normalized prompt + the params that change the output. `round`
   // is included so a round-2 forced generation can't collide with a round-0 answer
   // for the same text; model + region make the key safe across config changes.
@@ -175,8 +195,10 @@ async function handleGenerate(
   const cached = await ctx.stores.responseCache.get(cacheKey, ctx.config.RESPONSE_CACHE_TTL_MS);
   if (cached) {
     emit("ok", { cacheHit: true, costUsd: 0 });
-    return reply.code(200).send(JSON.parse(cached.body));
+    return finish(200, JSON.parse(cached.body));
   }
+
+  phase("preparing");
 
   // (2.5) Semantic learning network: RAG over our own APPROVED designs. A near-exact
   // match is served verbatim ($0, no LLM, no cap — like a cache hit, but across SIMILAR
@@ -200,7 +222,7 @@ async function handleGenerate(
       },
     };
     emit("library", { cacheHit: true, costUsd: 0, retrievalHit: true });
-    return reply.code(200).send(responseBody);
+    return finish(200, responseBody);
   }
   const exemplarsSection = renderExemplars(retrieval.exemplars);
   // The learning network grounded this generation if it injected exemplars (an
@@ -220,11 +242,7 @@ async function handleGenerate(
       // No generation happened, so nothing is debited to the ledger; we still report
       // the (bounded, cheap) clarify-call cost for observability.
       emit("clarify", { costUsd: llmCostUsd(usage, ctx.pricing), retrievalHit });
-      return reply.code(200).send({
-        needsClarification: true,
-        questions: clarification.questions,
-        round,
-      });
+      return finish(200, { needsClarification: true, questions: clarification.questions, round }, "clarify");
     }
   }
 
@@ -235,12 +253,16 @@ async function handleGenerate(
   if (!reservation.ok || !reservation.reservation) {
     emit("refused", { costUsd: 0, retrievalHit });
     // 503: the service is temporarily unavailable for NEW generations; cache still serves.
-    return reply.code(503).send({
-      error: "daily_budget_reached",
-      message: reservation.message,
-      spentTodayUsd: reservation.spentTodayUsd,
-      ceilingUsd: reservation.ceilingUsd,
-    });
+    return finish(
+      503,
+      {
+        error: "daily_budget_reached",
+        message: reservation.message,
+        spentTodayUsd: reservation.spentTodayUsd,
+        ceilingUsd: reservation.ceilingUsd,
+      },
+      "error",
+    );
   }
   const reservationId = reservation.reservation.reservationId;
 
@@ -266,15 +288,23 @@ async function handleGenerate(
 
     // Lazy default (fix A): generate ONLY the budget tier (~⅓ the output → cheaper +
     // faster). The user adds balanced/resilient on demand via POST /api/generate/tier.
+    phase("generating");
     const generated = await generateBudgetArchitecture({
       provider: ctx.provider,
       memory: ctx.stores.memory,
       description,
       answers,
-      opts: { maxTokens: ctx.config.LLM_MAX_TOKENS, effort: ctx.config.LLM_EFFORT },
+      opts: {
+        maxTokens: ctx.config.LLM_MAX_TOKENS,
+        effort: ctx.config.LLM_EFFORT,
+        // Only when streaming: a live output-size heartbeat for the loading UI (forces
+        // the provider to stream the call — the budget output is under the size threshold).
+        onProgress: sse ? (p) => sse.event("token", { chars: p.outputChars }) : undefined,
+      },
       exemplarsSection,
     });
     addUsage(generated.usage);
+    phase("costing");
 
     // (U7) Fill cost drivers deterministically from the PricingStore — never the model.
     // Traffic is its own axis now: the intake "expected monthly visitors" answer drives
@@ -310,6 +340,7 @@ async function handleGenerate(
     // Best-effort: a persistence failure must NEVER break the user's generation. The id
     // becomes the deep link (/design/:id) and rides in the cached body so a cache HIT
     // returns it too. Off in test/probe envs (PERSIST_GENERATIONS) so they don't pollute.
+    phase("saving");
     if (ctx.config.PERSIST_GENERATIONS) {
       try {
         const { id } = await ctx.stores.generations.upsert({
@@ -335,16 +366,44 @@ async function handleGenerate(
     // the same checks gate the offline eval). Run on the scrubbed, cost-filled body.
     const completenessOk = isStructurallyComplete(scrubbedOutput.value);
     emit("ok", { costUsd: actualUsd, researchCalls, retrievalHit, completenessOk });
-    return reply.code(200).send(responseBody);
+    return finish(200, responseBody);
   } catch (err) {
     // Generation failed: release the reservation so the budget isn't consumed by a
     // call that produced nothing, then surface a clean upstream error.
     await ctx.stores.spendLedger.release(reservationId);
     emit("error", { costUsd: 0, researchCalls, retrievalHit });
     req.log.error({ err }, "generation failed");
-    return reply.code(502).send({
-      error: "generation_failed",
-      message: "The design service is temporarily unavailable. Please try again.",
-    });
+    return finish(
+      502,
+      {
+        error: "generation_failed",
+        message: "The design service is temporarily unavailable. Please try again.",
+      },
+      "error",
+    );
   }
+}
+
+/** A minimal Server-Sent-Events channel over the hijacked raw response. Each `event`
+ *  writes one `event: <name>\ndata: <json>\n\n` frame; `end` closes the stream. */
+interface SseChannel {
+  event(name: string, data: unknown): void;
+  end(): void;
+}
+
+function openSse(reply: FastifyReply): SseChannel {
+  // Take over the socket so Fastify won't also try to serialize/send a reply.
+  reply.hijack();
+  const raw = reply.raw;
+  raw.writeHead(200, {
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache, no-transform",
+    Connection: "keep-alive",
+    // Disable proxy buffering (nginx) so events flush immediately, not in a batch.
+    "X-Accel-Buffering": "no",
+  });
+  return {
+    event: (name, data) => raw.write(`event: ${name}\ndata: ${JSON.stringify(data)}\n\n`),
+    end: () => raw.end(),
+  };
 }
