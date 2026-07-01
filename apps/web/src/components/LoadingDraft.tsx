@@ -1,5 +1,5 @@
 /**
- * The "drafting your architecture…" loading state (generation runs ~30–90s).
+ * The "drafting your architecture…" loading state (generation runs ~1–3 min).
  *
  * A blueprint-style animation plus a rotating line of what the architect is doing,
  * so the wait reads as deliberate work, not a hang. role="status" keeps it
@@ -37,7 +37,7 @@ export function LoadingDraft(): JSX.Element {
       <p className="drafting__title">Drafting your architecture…</p>
       <p className="drafting__phase">{PHASES[phase]}…</p>
       <p className="drafting__note">
-        This usually takes about 30 seconds — feel free to step away and come back.
+        This usually takes a minute or two — feel free to step away and come back.
       </p>
     </div>
   );
