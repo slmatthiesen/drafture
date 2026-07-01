@@ -93,6 +93,108 @@ export function emitPostgres(node: ArchitectureNode, ctx: EmitCtx): HclBlock[] {
   return blocks;
 }
 
+/** Pull a volume size in GB out of "EBS (gp3, 20 GB)" — default a small 20 GB gp3. */
+function volumeSizeGb(node: ArchitectureNode): number {
+  const m = /(\d+)\s*gb/i.exec(`${node.awsService} ${node.role}`);
+  return m ? Number(m[1]) : 20;
+}
+
+/**
+ * A standalone durable EBS data volume for a stateful box (e.g. the SQLite file behind
+ * a self-hosted app). Mirrors the self-managed-Postgres volume: a KMS-encrypted gp3
+ * volume kept OFF the root device so on-disk state survives instance replacement, plus
+ * a daily DLM snapshot policy (emitted once per tier) for point-in-time recovery — the
+ * durability a stateful design is meaningless without.
+ */
+export function emitEbs(node: ArchitectureNode, ctx: EmitCtx): HclBlock[] {
+  const tf = ctx.tf(node.id);
+  const host = colocatedHost(ctx, node.id);
+  const section = `EBS — ${node.role}`;
+  const blocks: HclBlock[] = [
+    {
+      section,
+      hcl: [
+        `# Durable gp3 data volume, kept off the root device so on-disk state (a SQLite`,
+        `# file, an upload spool) survives instance replacement. Snapshotted daily below.`,
+        `resource "aws_ebs_volume" "${tf}" {`,
+        `  availability_zone = "${ctx.region}a"`,
+        `  size              = ${volumeSizeGb(node)}`,
+        `  type              = "gp3"`,
+        `  encrypted         = true`,
+        ...(ctx.paidSecurity ? [`  kms_key_id        = aws_kms_key.main.arn`] : []),
+        `  tags              = { Name = "${ctx.prefix}-${tf.replace(/_/g, "-")}", Backup = "daily" }`,
+        `}`,
+      ].join("\n"),
+    },
+  ];
+
+  if (host) {
+    blocks.push({
+      section,
+      hcl: [
+        `resource "aws_volume_attachment" "${tf}" {`,
+        `  device_name = "/dev/sdf"`,
+        `  volume_id   = aws_ebs_volume.${tf}.id`,
+        `  instance_id = ${ref.instance(ctx, host.id)}.id`,
+        `}`,
+      ].join("\n"),
+    });
+  }
+
+  // One DLM policy covers every Backup=daily volume in the tier — emitted once (deduped)
+  // regardless of how many EBS nodes route here.
+  blocks.push({
+    section: `EBS — daily snapshots`,
+    dedupeKey: "ebs-dlm-daily",
+    hcl: [
+      `# Daily automated snapshots of every volume tagged Backup=daily (single-AZ data`,
+      `# volumes have no built-in redundancy — snapshots are the recovery path).`,
+      `resource "aws_iam_role" "dlm" {`,
+      `  name = "${ctx.prefix}-dlm-role"`,
+      `  assume_role_policy = jsonencode({`,
+      `    Version = "2012-10-17"`,
+      `    Statement = [{`,
+      `      Effect    = "Allow"`,
+      `      Principal = { Service = "dlm.amazonaws.com" }`,
+      `      Action    = "sts:AssumeRole"`,
+      `    }]`,
+      `  })`,
+      `}`,
+      ``,
+      `resource "aws_iam_role_policy_attachment" "dlm" {`,
+      `  role       = aws_iam_role.dlm.name`,
+      `  policy_arn = "arn:\${local.partition}:iam::aws:policy/service-role/AWSDataLifecycleManagerServiceRole"`,
+      `}`,
+      ``,
+      `resource "aws_dlm_lifecycle_policy" "ebs_daily" {`,
+      `  description        = "${ctx.prefix} daily EBS snapshot"`,
+      `  execution_role_arn = aws_iam_role.dlm.arn`,
+      `  state              = "ENABLED"`,
+      ``,
+      `  policy_details {`,
+      `    resource_types = ["VOLUME"]`,
+      `    target_tags    = { Backup = "daily" }`,
+      ``,
+      `    schedule {`,
+      `      name = "daily-0200"`,
+      `      create_rule {`,
+      `        interval      = 24`,
+      `        interval_unit = "HOURS"`,
+      `        times         = ["02:00"]`,
+      `      }`,
+      `      retain_rule {`,
+      `        count = 7`,
+      `      }`,
+      `      copy_tags = true`,
+      `    }`,
+      `  }`,
+      `}`,
+    ].join("\n"),
+  });
+
+  return blocks;
+}
+
 export function emitLambda(node: ArchitectureNode, ctx: EmitCtx): HclBlock[] {
   const tf = ctx.tf(node.id);
   const surface = `${node.awsService} ${node.role}`.toLowerCase();

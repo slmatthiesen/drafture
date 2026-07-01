@@ -41,6 +41,7 @@ export type ServiceKey =
   | "rds"
   | "elasticache"
   | "nat"
+  | "ebs"
   | "dynamo"
   | "apigw"
   | "cognito"
@@ -101,6 +102,10 @@ const RULES: Rule[] = [
   { key: "dynamo", any: ["dynamodb", "dynamo"] },
   { key: "cloudfront", any: ["cloudfront", "cdn"] },
   { key: "lambda", any: ["lambda"] },
+  // A standalone EBS data volume (durable on-disk state, e.g. a SQLite file). Distinct
+  // from the EC2 root device the compute emitter draws inline. No earlier rule's tokens
+  // contain "ebs"/"block store", so placement here is safe.
+  { key: "ebs", any: ["ebs", "elastic block store", "block store"] },
   { key: "s3", any: ["s3", "simple storage"] },
   { key: "ec2", any: ["ec2", "elastic compute"] },
 ];

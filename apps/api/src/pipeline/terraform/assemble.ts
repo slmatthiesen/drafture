@@ -61,6 +61,7 @@ const SECTION_ORDER = [
   "IAM",
   "Security group",
   "EC2",
+  "EBS",
   "Self-managed PostgreSQL",
   "S3",
   "Secrets Manager",

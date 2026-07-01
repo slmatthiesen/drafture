@@ -10,7 +10,7 @@ import type { HclBlock } from "./hcl.js";
 import type { ServiceKey } from "./serviceKey.js";
 
 import { emitS3, emitSecrets, emitSsmParameterStore } from "./emitters/storage.js";
-import { emitEc2, emitLambda, emitPostgres } from "./emitters/compute.js";
+import { emitEbs, emitEc2, emitLambda, emitPostgres } from "./emitters/compute.js";
 import { emitCloudfront } from "./emitters/cloudfront.js";
 import { emitScheduler } from "./emitters/scheduler.js";
 import { emitAlb, emitElasticache, emitFargate, emitOpenSearch, emitRds } from "./emitters/managed.js";
@@ -52,6 +52,7 @@ export const REGISTRY: ReadonlyMap<ServiceKey, ServiceEmitter> = new Map<Service
   ["rds", emitRds],
   ["elasticache", emitElasticache],
   ["nat", emitNat],
+  ["ebs", emitEbs],
   ["cloudwatch-dashboard", emitCloudwatchDashboard],
   ["cloudwatch-anomaly", emitCloudwatchAnomaly],
   ["sqs", emitSqs],
