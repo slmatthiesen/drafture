@@ -61,6 +61,12 @@ const ConfigSchema = z.object({
   VOYAGE_API_KEY: z.string().optional(),
   VOYAGE_BASE_URL: z.string().default("https://api.voyageai.com/v1"),
   EMBEDDING_MODEL: z.string().default("voyage-3-lite"),
+  // Langfuse LLM observability (optional). Both keys set → every LLM call is traced
+  // (prompt, completion, tokens, USD cost, latency) to the operator's project via the
+  // TracingProvider decorator. Unset → disabled, zero overhead. Forker-safe like Voyage.
+  LANGFUSE_PUBLIC_KEY: z.string().optional(),
+  LANGFUSE_SECRET_KEY: z.string().optional(),
+  LANGFUSE_BASE_URL: z.string().default("https://cloud.langfuse.com"),
   // Cosine ≥ RETURN → serve the nearest approved design verbatim (re-costed), $0 +
   // instant. GROUND ≤ cosine < RETURN → inject the nearest designs as exemplars into
   // the generation prompt (faster convergence, more consistent).
