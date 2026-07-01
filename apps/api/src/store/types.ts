@@ -127,6 +127,9 @@ export interface CuratedStore {
    * counts, or undefined if the run does not exist.
    */
   vote(id: string, voter: string, value: 1 | -1): Promise<CuratedVoteResult | undefined>;
+  /** Persist one tier's reference Terraform onto the run (lazy, from /api/config). */
+  setTerraform(id: string, tierName: string, code: string): Promise<boolean>;
+  getTerraform(id: string, tierName: string): Promise<{ code: string } | undefined>;
 }
 
 /**

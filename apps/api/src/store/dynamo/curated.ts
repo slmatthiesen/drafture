@@ -11,7 +11,6 @@
 import {
   GetCommand,
   UpdateCommand,
-  QueryCommand,
   ScanCommand,
   TransactWriteCommand,
 } from "@aws-sdk/lib-dynamodb";
@@ -33,7 +32,17 @@ interface MetaItem {
   upvotes: number;
   downvotes: number;
   hidden: boolean;
+  terraformJson?: string | null;
   createdAt: number;
+}
+
+function safeParse<T>(json: string | null | undefined, fallback: T): T {
+  if (!json) return fallback;
+  try {
+    return JSON.parse(json) as T;
+  } catch {
+    return fallback;
+  }
 }
 
 function toSummary(item: MetaItem): CuratedRunSummary {
@@ -150,6 +159,38 @@ export class DynamoCuratedStore implements CuratedStore {
       }
     }
     throw new Error(`curated vote contention exceeded ${MAX_VOTE_ATTEMPTS} attempts for ${id}`);
+  }
+
+  async getTerraform(id: string, tierName: string): Promise<{ code: string } | undefined> {
+    const res = await this.deps.doc.send(
+      new GetCommand({ TableName: this.table, Key: { id, sk: META }, ProjectionExpression: "terraformJson" }),
+    );
+    const raw = res.Item?.terraformJson as string | null | undefined;
+    if (!raw) return undefined;
+    const map = safeParse<Record<string, { code?: string }>>(raw, {});
+    const entry = map[tierName];
+    return entry?.code ? { code: entry.code } : undefined;
+  }
+
+  async setTerraform(id: string, tierName: string, code: string): Promise<boolean> {
+    const res = await this.deps.doc.send(
+      new GetCommand({ TableName: this.table, Key: { id, sk: META }, ProjectionExpression: "terraformJson" }),
+    );
+    if (!res.Item) return false;
+    const map = safeParse<Record<string, { code: string; format: string }>>(
+      res.Item.terraformJson as string | null,
+      {},
+    );
+    map[tierName] = { code, format: "terraform" };
+    await this.deps.doc.send(
+      new UpdateCommand({
+        TableName: this.table,
+        Key: { id, sk: META },
+        UpdateExpression: "SET terraformJson = :tf",
+        ExpressionAttributeValues: { ":tf": JSON.stringify(map) },
+      }),
+    );
+    return true;
   }
 }
 
