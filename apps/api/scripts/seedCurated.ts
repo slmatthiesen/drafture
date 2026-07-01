@@ -20,6 +20,8 @@ import { getConfig } from "../src/config.js";
 import { buildAppContext } from "../src/app/context.js";
 import { generateArchitecture } from "../src/pipeline/generate.js";
 import { estimateCosts } from "../src/pipeline/cost.js";
+import type { ArchitectureResult } from "../src/schema/architecture.js";
+import { runAllProperties } from "../test/golden/properties.js";
 
 interface Demo {
   title: string;
@@ -131,18 +133,39 @@ async function main(): Promise<void> {
   }
 
   console.log(`Seeding ${demos.length} run${demos.length === 1 ? "" : "s"} with ${config.LLM_MODEL} (${config.DEFAULT_REGION})…`);
+  // Gate before persisting: a curated run is served verbatim on the landing page, so a
+  // structurally-broken or cost-dishonest design must never land here. Regenerate up to
+  // MAX_ATTEMPTS times until the full property gate passes (same posture as growCorpus.ts,
+  // plus retries — these are showcase designs we want to exist); skip on persistent failure.
+  const MAX_ATTEMPTS = 3;
   for (const demo of demos) {
     const id = slug(demo.title);
     process.stdout.write(`  • ${demo.title} (${id})… `);
     try {
-      const generated = await generateArchitecture({
-        provider: ctx.provider,
-        memory: ctx.stores.memory,
-        description: demo.description,
-        answers: demo.answers,
-        opts: { maxTokens: config.LLM_MAX_TOKENS, effort: config.LLM_EFFORT },
-      });
-      const estimated = await estimateCosts(generated.result, ctx.stores.pricing, config.DEFAULT_REGION);
+      let estimated: ArchitectureResult | null = null;
+      let fails: { name: string; reason: string }[] = [];
+      for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+        const generated = await generateArchitecture({
+          provider: ctx.provider,
+          memory: ctx.stores.memory,
+          description: demo.description,
+          answers: demo.answers,
+          opts: { maxTokens: config.LLM_MAX_TOKENS, effort: config.LLM_EFFORT },
+        });
+        estimated = await estimateCosts(generated.result, ctx.stores.pricing, config.DEFAULT_REGION);
+        const gate = runAllProperties(estimated);
+        if (gate.ok) {
+          fails = [];
+          break;
+        }
+        fails = gate.results.filter((r) => !r.ok).map((r) => ({ name: r.name, reason: r.reason }));
+        process.stdout.write(`attempt ${attempt}/${MAX_ATTEMPTS} failed (${fails.map((f) => f.name).join(", ")}); retry… `);
+      }
+      if (!estimated || fails.length > 0) {
+        console.log(`SKIPPED — gate failed after ${MAX_ATTEMPTS} attempts (prior body kept)`);
+        for (const f of fails) console.log(`     ${f.name}: ${f.reason}`);
+        continue;
+      }
       await ctx.stores.curated.upsert({
         id,
         title: demo.title,
