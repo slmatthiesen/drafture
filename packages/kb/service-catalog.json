@@ -1,0 +1,192 @@
+{
+  "cloudfront": {
+    "awsService": "Amazon CloudFront",
+    "defaultRole": "CDN edge",
+    "floorTags": ["Shield Standard"],
+    "paidTags": ["WAF managed rules", "rate-based rule"]
+  },
+  "s3": {
+    "awsService": "Amazon S3",
+    "defaultRole": "object store",
+    "floorTags": ["SSE-KMS", "block public access"],
+    "paidTags": []
+  },
+  "ec2": {
+    "awsService": "Amazon EC2",
+    "defaultRole": "host",
+    "floorTags": [
+      "public subnet",
+      "restrictive SG (443/80 from CF only, no direct public DB port)",
+      "IMDSv2 enforced",
+      "EBS gp3 encrypted (KMS)",
+      "least-priv instance role",
+      "SSM Session Manager (no SSH)"
+    ],
+    "paidTags": []
+  },
+  "postgres-selfmanaged": {
+    "awsService": "Self-managed PostgreSQL",
+    "defaultRole": "primary DB (localhost)",
+    "floorTags": [
+      "localhost-bound (not network-exposed)",
+      "KMS-encrypted EBS volume",
+      "pg_hba: local only",
+      "nightly pg_dump → S3"
+    ],
+    "paidTags": []
+  },
+  "lambda": {
+    "awsService": "AWS Lambda",
+    "defaultRole": "compute",
+    "floorTags": ["least-priv role"],
+    "paidTags": []
+  },
+  "eventbridge-scheduler": {
+    "awsService": "Amazon EventBridge Scheduler",
+    "defaultRole": "cron trigger",
+    "floorTags": ["least-priv role"],
+    "paidTags": []
+  },
+  "eventbridge-bus": {
+    "awsService": "Amazon EventBridge",
+    "defaultRole": "event bus",
+    "floorTags": ["least-priv resource policy", "archive enabled"],
+    "paidTags": []
+  },
+  "secrets-manager": {
+    "awsService": "AWS Secrets Manager",
+    "defaultRole": "credentials store",
+    "floorTags": [],
+    "paidTags": []
+  },
+  "ssm": {
+    "awsService": "AWS Systems Manager Parameter Store",
+    "defaultRole": "secrets/config store",
+    "floorTags": ["SecureString", "least-priv access"],
+    "paidTags": []
+  },
+  "cloudwatch-logs": {
+    "awsService": "Amazon CloudWatch Logs",
+    "defaultRole": "centralized log sink",
+    "floorTags": ["KMS encrypted"],
+    "paidTags": []
+  },
+  "cloudwatch-alarms": {
+    "awsService": "Amazon CloudWatch Alarms",
+    "defaultRole": "golden-signal alarms",
+    "floorTags": [],
+    "paidTags": []
+  },
+  "cloudwatch-dashboard": {
+    "awsService": "Amazon CloudWatch Dashboard",
+    "defaultRole": "golden-signal dashboard",
+    "floorTags": ["read-only IAM"],
+    "paidTags": []
+  },
+  "cloudwatch-anomaly": {
+    "awsService": "Amazon CloudWatch Anomaly Detection",
+    "defaultRole": "SLO + anomaly alarms",
+    "floorTags": ["least-priv role"],
+    "paidTags": []
+  },
+  "sns": {
+    "awsService": "Amazon SNS",
+    "defaultRole": "ops alert topic",
+    "floorTags": ["TLS"],
+    "paidTags": []
+  },
+  "sqs": {
+    "awsService": "Amazon SQS",
+    "defaultRole": "job queue",
+    "floorTags": [],
+    "paidTags": []
+  },
+  "xray": {
+    "awsService": "AWS X-Ray",
+    "defaultRole": "distributed tracing",
+    "floorTags": [],
+    "paidTags": []
+  },
+  "cloudtrail": {
+    "awsService": "AWS CloudTrail",
+    "defaultRole": "audit trail",
+    "floorTags": [],
+    "paidTags": []
+  },
+  "alb": {
+    "awsService": "Application Load Balancer",
+    "defaultRole": "HTTPS ingress",
+    "floorTags": ["TLS termination", "SG: 443 from CF only", "access logging → S3", "deletion protection"],
+    "paidTags": []
+  },
+  "fargate": {
+    "awsService": "AWS Fargate (ECS)",
+    "defaultRole": "container service",
+    "floorTags": ["private subnet", "least-priv task role", "no public IP", "Secrets Manager env inject"],
+    "paidTags": [],
+    "vpcBound": true
+  },
+  "rds": {
+    "awsService": "Amazon RDS (PostgreSQL)",
+    "defaultRole": "relational datastore",
+    "floorTags": ["SG: 5432 from Fargate SGs only", "KMS at rest", "automated backups 14d", "deletion protection"],
+    "paidTags": [],
+    "vpcBound": true
+  },
+  "elasticache": {
+    "awsService": "Amazon ElastiCache (Redis)",
+    "defaultRole": "cache",
+    "floorTags": ["SG: 6379 from Fargate only", "TLS in-transit", "at-rest encryption"],
+    "paidTags": [],
+    "vpcBound": true
+  },
+  "nat": {
+    "awsService": "NAT Gateway",
+    "defaultRole": "private subnet egress",
+    "floorTags": ["Elastic IP"],
+    "paidTags": []
+  },
+  "dynamo": {
+    "awsService": "Amazon DynamoDB",
+    "defaultRole": "primary datastore",
+    "floorTags": ["KMS SSE", "least-priv IAM", "point-in-time recovery", "Streams enabled"],
+    "paidTags": []
+  },
+  "apigw": {
+    "awsService": "Amazon API Gateway (HTTP API)",
+    "defaultRole": "front door",
+    "floorTags": ["TLS", "least-priv resource policy", "throttle 10 rps"],
+    "paidTags": []
+  },
+  "cognito": {
+    "awsService": "Amazon Cognito",
+    "defaultRole": "auth / user pool",
+    "floorTags": ["least-priv app client scopes", "TLS"],
+    "paidTags": []
+  },
+  "ses": {
+    "awsService": "Amazon SES",
+    "defaultRole": "email delivery",
+    "floorTags": ["TLS", "least-priv send policy"],
+    "paidTags": []
+  },
+  "step-functions": {
+    "awsService": "AWS Step Functions",
+    "defaultRole": "workflow orchestrator",
+    "floorTags": ["least-priv role"],
+    "paidTags": []
+  },
+  "kinesis": {
+    "awsService": "Amazon Kinesis Data Streams",
+    "defaultRole": "event stream",
+    "floorTags": ["KMS SSE", "least-priv IAM"],
+    "paidTags": []
+  },
+  "opensearch": {
+    "awsService": "Amazon OpenSearch Service",
+    "defaultRole": "search cluster",
+    "floorTags": ["private subnet", "KMS at rest", "least-priv access policy"],
+    "paidTags": [],
+    "vpcBound": true
+  }
+}

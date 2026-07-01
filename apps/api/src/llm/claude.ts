@@ -3,7 +3,7 @@ import type { z } from "zod";
 
 import type { Config } from "../config.js";
 import { ClarificationSchema } from "../schema/architecture.js";
-import type { GeneratedArchitecture, Clarification, GeneratedTier } from "../schema/architecture.js";
+import type { PreHydrationArchitecture, Clarification, GeneratedTier } from "../schema/architecture.js";
 import { clarificationToolSchema } from "./schema-utils.js";
 import { resolveGenerateScope, type GenerateScope } from "./generateScope.js";
 import { StreamItemScanner } from "./streamScanner.js";
@@ -105,7 +105,7 @@ export class ClaudeProvider implements LlmProvider {
     prompt: GroundedPrompt,
     opts?: GenerateOptions,
     scope?: GenerateScope,
-  ): Promise<ProviderResult<GeneratedArchitecture>> {
+  ): Promise<ProviderResult<PreHydrationArchitecture>> {
     const maxTokens = opts?.maxTokens ?? this.settings.maxTokens;
     // The scope picks the tool (budget-only / add-one-tier / full three) so the model
     // emits only what's asked — the lazy-per-tier cost/latency lever.

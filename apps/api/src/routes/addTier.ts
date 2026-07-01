@@ -102,7 +102,7 @@ async function handleAddTier(ctx: AppContext, req: FastifyRequest, reply: Fastif
     usage.cacheReadTokens += u.cacheReadTokens;
     usage.cacheWriteTokens += u.cacheWriteTokens;
   };
-  const emit = (outcome: string, opts: { cacheHit?: boolean; costUsd?: number } = {}): void => {
+  const emit = (outcome: string, opts: { cacheHit?: boolean; costUsd?: number; catalogMiss?: number } = {}): void => {
     emitTelemetry(
       telemetryRecord({
         requestId,
@@ -116,6 +116,7 @@ async function handleAddTier(ctx: AppContext, req: FastifyRequest, reply: Fastif
         costUsd: opts.costUsd ?? 0,
         outcome,
         model: ctx.config.LLM_MODEL,
+        catalogMiss: opts.catalogMiss,
       }),
       ctx.telemetrySink,
     );
@@ -152,7 +153,7 @@ async function handleAddTier(ctx: AppContext, req: FastifyRequest, reply: Fastif
   const reservationId = reservation.reservation.reservationId;
 
   try {
-    const { tier: addedTier, usage: genUsage } = await addTierToDesign({
+    const { tier: addedTier, usage: genUsage, catalogMiss } = await addTierToDesign({
       provider: ctx.provider,
       memory: ctx.stores.memory,
       description: body.description,
@@ -198,7 +199,7 @@ async function handleAddTier(ctx: AppContext, req: FastifyRequest, reply: Fastif
     }
     await ctx.stores.responseCache.set(cacheKey, JSON.stringify(responseBody));
 
-    emit("ok", { costUsd: actualUsd });
+    emit("ok", { costUsd: actualUsd, catalogMiss });
     return reply.code(200).send(responseBody);
   } catch (err) {
     await ctx.stores.spendLedger.release(reservationId);

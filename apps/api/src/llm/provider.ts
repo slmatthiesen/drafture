@@ -1,4 +1,4 @@
-import type { GeneratedArchitecture, GeneratedTier, Clarification } from "../schema/architecture.js";
+import type { PreHydrationArchitecture, GeneratedTier, Clarification } from "../schema/architecture.js";
 import type { GenerateScope } from "./generateScope.js";
 import type { ScannedItem } from "./streamScanner.js";
 
@@ -66,7 +66,9 @@ export interface LlmProvider {
   /**
    * Generate the architecture as a validated typed graph (KTD3). The result OMITS the
    * security floor — that reusable knowledge is injected deterministically downstream
-   * (see pipeline/securityFloor.ts), not generated.
+   * (see pipeline/securityFloor.ts), not generated. Nodes are LEAN PICKs (Layer A,
+   * docs/plans/2026-07-01-009) — the pipeline hydrates them into full nodes via the KB
+   * service catalog (`pipeline/hydrate.ts`) before anything else runs.
    *
    * `scope` selects how MANY tiers are emitted (the lazy-per-tier cost/latency lever):
    * `budget` (default caller behavior — one tier), `addTier` (one tier as a delta vs a
@@ -78,7 +80,7 @@ export interface LlmProvider {
     prompt: GroundedPrompt,
     opts?: GenerateOptions,
     scope?: GenerateScope,
-  ): Promise<ProviderResult<GeneratedArchitecture>>;
+  ): Promise<ProviderResult<PreHydrationArchitecture>>;
 
   /**
    * Generate idiomatic, REFERENCE-ONLY Terraform (HCL) for a single tier of an

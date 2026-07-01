@@ -33,6 +33,35 @@ export const NodeSchema = z
       .describe("Short security-control TAGS (e.g. 'TLS', 'private subnet', 'DLQ', 'idempotent consumer')."),
   });
 
+// LEAN NODE (Layer A — service catalog, docs/plans/2026-07-01-009): the model's
+// emission unit is a PICK, not the full node — `svc` + `id` plus only what's
+// design-specific. The server hydrates it into a full `ArchitectureNode` via the
+// KB service catalog (`pipeline/hydrate.ts`), which fills the canonical
+// `awsService` name and the safe-by-default security tags for that service +
+// tier deterministically. This is the WIRE shape only; `NodeSchema` above stays
+// the RESULT/hydrated type every downstream consumer (cost, gates, TF, web) sees.
+export const LeanNodeSchema = z.object({
+  svc: z
+    .string()
+    .describe(
+      "Service key — the AWS service, e.g. 'sqs','dynamodb','lambda','s3','api gateway'. Normalized server-side to pull canned config.",
+    ),
+  id: z.string().describe("Stable node id, referenced by edges."),
+  role: z
+    .string()
+    .optional()
+    .describe(
+      "SHORT role label ONLY if it differs from the service's default (e.g. 'thumbnail worker'). Omit to accept the default.",
+    ),
+  addSecurity: z
+    .array(z.string())
+    .optional()
+    .describe(
+      "ONLY design-specific security controls the standard floor can't know (e.g. 'idempotent — key = job hash'). Do NOT restate standard tags like 'SSE-KMS' / 'block public access' — those are added for you.",
+    ),
+});
+export type LeanNode = z.infer<typeof LeanNodeSchema>;
+
 export const EdgeSchema = z
   .object({
     from: z.string().describe("Source node id (or 'client')."),
@@ -128,12 +157,30 @@ export const EdgeRefSchema = z.object({
   to: z.string().describe("Destination node id of the edge to remove."),
 });
 
-export const GeneratedTierDeltaSchema = z.object({
+// LEAN WIRE SHAPES (Layer A) — what the model actually emits: a tier / tier-delta
+// whose nodes are LEAN PICKs (LeanNodeSchema), not full ArchitectureNodes. These
+// mirror GeneratedTierSchema/the delta shape structurally; only the node type
+// differs. `reconstructTiers`/`reconstructBudgetOnly` assemble these into a
+// {@link LeanGeneratedArchitecture}; `pipeline/hydrate.ts` then hydrates every
+// lean node into the full `NodeSchema` shape before anything downstream runs.
+export const LeanTierSchema = z.object({
+  name: z.enum(TIER_NAMES),
+  summary: z.string(),
+  nodes: z.array(LeanNodeSchema),
+  edges: z.array(EdgeSchema),
+  delta: z
+    .array(z.string())
+    .describe("What THIS tier adds/changes vs the others (robustness incl. burst handling). Budget states the baseline."),
+  tradeoffs: z.array(z.string()).describe("Trade-offs versus the other two tiers (R3)."),
+});
+export type LeanTier = z.infer<typeof LeanTierSchema>;
+
+export const LeanTierDeltaSchema = z.object({
   name: z.enum(TIER_NAMES),
   summary: z.string(),
   addNodes: z
-    .array(NodeSchema)
-    .describe("Nodes NEW in this tier, OR existing nodes re-stated IN FULL because they changed (upsert by id). Do NOT repeat unchanged nodes."),
+    .array(LeanNodeSchema)
+    .describe("Nodes NEW in this tier, OR existing nodes re-stated because they changed (upsert by id). Do NOT repeat unchanged nodes."),
   removeNodeIds: z
     .array(z.string())
     .describe("Ids of nodes from the tier below that this tier drops (usually empty — tiers grow upward)."),
@@ -148,6 +195,7 @@ export const GeneratedTierDeltaSchema = z.object({
     .describe("What THIS tier adds/changes vs the tier below (one short line each)."),
   tradeoffs: z.array(z.string()).describe("Trade-offs versus the other two tiers."),
 });
+export type LeanTierDelta = z.infer<typeof LeanTierDeltaSchema>;
 
 // Fields shared between the WIRE schema (what the model emits) and the assembled
 // RESULT. The two diverge only on how the tiers are represented (deltas vs full).
@@ -159,37 +207,75 @@ const commonGeneratedShape = {
     .describe("The handful of load-bearing decisions: chosen vs alternatives + why, framed through the WAF pillars."),
 } as const;
 
-/** THE WIRE SHAPE the LLM emits: the budget tier in FULL + the other two as DELTAS.
- *  This is what the forced-tool schema constrains. The provider validates against it
- *  then reconstructs to the full `GeneratedArchitecture` — so the wire format is an
- *  internal provider detail and downstream code never sees deltas. */
+/** THE WIRE SHAPE the LLM emits: the budget tier in FULL (LEAN nodes) + the other
+ *  two as DELTAS. This is what the forced-tool schema constrains. The provider
+ *  validates against it, reconstructs to a {@link LeanGeneratedArchitecture} (pure
+ *  delta arithmetic — still lean nodes), and the pipeline hydrates every node
+ *  before anything downstream runs (`pipeline/hydrate.ts`). */
 export const GeneratedWireSchema = z.object({
   ...commonGeneratedShape,
-  baseTier: GeneratedTierSchema.describe("The BUDGET tier as a FULL graph — the baseline the other two tiers build on."),
+  baseTier: LeanTierSchema.describe("The BUDGET tier as a FULL graph — the baseline the other two tiers build on."),
   tierDeltas: z
-    .array(GeneratedTierDeltaSchema)
+    .array(LeanTierDeltaSchema)
     .length(2)
     .describe("Exactly two: balanced then resilient, EACH as a delta vs the tier below it."),
 });
+export type GeneratedWire = z.infer<typeof GeneratedWireSchema>;
 
 /** LAZY PER-TIER WIRE SHAPE — the BUDGET tier only (the cost/latency default). The
  *  user picks a tier up front (budget by default) and we generate ONLY that one graph
  *  (~⅓ the output of the three-tier emission), adding balanced/resilient on demand via
- *  {@link GeneratedTierDeltaSchema} (see `generate(scope:"budget"|"addTier")`). */
+ *  {@link LeanTierDeltaSchema} (see `generate(scope:"budget"|"addTier")`). */
 export const GeneratedBudgetWireSchema = z.object({
   ...commonGeneratedShape,
-  baseTier: GeneratedTierSchema.describe("The BUDGET tier as a FULL graph — the only tier emitted in the lazy default."),
+  baseTier: LeanTierSchema.describe("The BUDGET tier as a FULL graph — the only tier emitted in the lazy default."),
 });
 export type GeneratedBudgetWire = z.infer<typeof GeneratedBudgetWireSchema>;
 
+/** The RECONSTRUCTED (delta arithmetic applied) but PRE-HYDRATION architecture: still
+ *  lean nodes. `pipeline/hydrate.ts` turns this into a {@link GeneratedArchitecture}. */
+export const LeanGeneratedArchitectureSchema = z.object({
+  ...commonGeneratedShape,
+  tiers: z
+    .array(LeanTierSchema)
+    .min(1)
+    .max(3)
+    .describe("One to three tiers (budget always first); nodes are LEAN picks, pre-hydration."),
+});
+export type LeanGeneratedArchitecture = z.infer<typeof LeanGeneratedArchitectureSchema>;
+
 /** What downstream code consumes: three FULL tiers (no security floor yet — injected
- *  later). The provider produces this from the wire shape via `reconstructTiers`. */
+ *  later). `pipeline/hydrate.ts` produces this from a {@link LeanGeneratedArchitecture}. */
 export const GeneratedArchitectureSchema = z.object({
   ...commonGeneratedShape,
   // 1..3 since lazy generation: a fresh call returns budget only; the user adds
   // balanced/resilient on demand (each reconstructed as a delta vs the budget baseline).
   tiers: z.array(GeneratedTierSchema).min(1).max(3).describe("One to three tiers (budget always first)."),
 });
+
+/**
+ * A node either fresh from the model (LEAN, pre-hydration) or already hydrated/full
+ * (a node inherited UNCHANGED across an "add tier" delta, which merges a lean delta
+ * onto an already-hydrated budget tier — see `addTierToDesign`). `hydrate.ts`
+ * discriminates the two at runtime via `"svc" in node`.
+ */
+export type PreHydrationNode = LeanNode | ArchitectureNode;
+
+export interface PreHydrationTier {
+  name: TierName;
+  summary: string;
+  nodes: PreHydrationNode[];
+  edges: ArchitectureEdge[];
+  delta: string[];
+  tradeoffs: string[];
+}
+
+export interface PreHydrationArchitecture {
+  assumptions: string[];
+  clarificationsUsed: string[];
+  keyDecisions: KeyDecision[];
+  tiers: PreHydrationTier[];
+}
 
 /** The full result the backend assembles: reconstructed graph + injected security
  *  floor and computed cost drivers. `tiers` is the FULL `TierSchema` (with
@@ -222,19 +308,47 @@ export type ArchitectureEdge = z.infer<typeof EdgeSchema>;
 export type CostDriver = z.infer<typeof CostDriverSchema>;
 export type Tier = z.infer<typeof TierSchema>;
 export type GeneratedTier = z.infer<typeof GeneratedTierSchema>;
-export type GeneratedTierDelta = z.infer<typeof GeneratedTierDeltaSchema>;
 export type KeyDecision = z.infer<typeof KeyDecisionSchema>;
-export type GeneratedWire = z.infer<typeof GeneratedWireSchema>;
 export type GeneratedArchitecture = z.infer<typeof GeneratedArchitectureSchema>;
 export type ArchitectureResult = z.infer<typeof ArchitectureResultSchema>;
 
 const edgeKey = (e: { from: string; to: string }): string => `${e.from} ${e.to}`;
 
-/** Apply one tier's delta to the (full) tier below it: drop removed nodes/edges,
- *  then upsert added/changed ones (by node id / by edge endpoints). */
-function applyTierDelta(prev: GeneratedTier, d: GeneratedTierDelta): GeneratedTier {
+interface NodeLike {
+  id: string;
+}
+interface TierLike<N extends NodeLike> {
+  name: TierName;
+  summary: string;
+  nodes: N[];
+  edges: ArchitectureEdge[];
+  delta: string[];
+  tradeoffs: string[];
+}
+interface TierDeltaLike<N extends NodeLike> {
+  name: TierName;
+  summary: string;
+  addNodes: N[];
+  removeNodeIds: string[];
+  addEdges: ArchitectureEdge[];
+  removeEdges: { from: string; to: string }[];
+  delta: string[];
+  tradeoffs: string[];
+}
+
+/**
+ * Apply one tier's delta to the tier below it: drop removed nodes/edges, then
+ * upsert added/changed ones (by node id / by edge endpoints). Generic over the
+ * node type on either side so the same arithmetic serves both reconstruction
+ * paths: (a) an all-LEAN wire (budget baseline + lean deltas -- the three-tier
+ * / lazy-budget scopes) and (b) a MIXED merge of an already-hydrated FULL
+ * budget tier with a freshly-emitted LEAN delta (the "add tier" scope) -- in
+ * (b) the result's nodes are a mix (unchanged nodes stay full; new/changed
+ * ones are still lean until pipeline/hydrate.ts hydrates them).
+ */
+function applyTierDelta<A extends NodeLike, B extends NodeLike>(prev: TierLike<A>, d: TierDeltaLike<B>): TierLike<A | B> {
   const removeNode = new Set(d.removeNodeIds);
-  const nodes = new Map(prev.nodes.filter((n) => !removeNode.has(n.id)).map((n) => [n.id, n] as const));
+  const nodes = new Map<string, A | B>(prev.nodes.filter((n) => !removeNode.has(n.id)).map((n) => [n.id, n] as const));
   for (const n of d.addNodes) nodes.set(n.id, n); // new id → add; existing id → replace
   const removeEdge = new Set(d.removeEdges.map(edgeKey));
   const edges = new Map(prev.edges.filter((e) => !removeEdge.has(edgeKey(e))).map((e) => [edgeKey(e), e] as const));
@@ -256,11 +370,12 @@ function applyTierDelta(prev: GeneratedTier, d: GeneratedTierDelta): GeneratedTi
   };
 }
 
-/** Rebuild three FULL tiers from the budget baseline + the two structured deltas —
+/** Rebuild three LEAN tiers from the budget baseline + the two structured deltas —
  *  the deterministic inverse of the model's delta emission. Pure. Providers call
- *  this so callers always receive the full {@link GeneratedArchitecture}. */
-export function reconstructTiers(wire: GeneratedWire): GeneratedArchitecture {
-  const tiers: GeneratedTier[] = [wire.baseTier];
+ *  this so callers always receive a {@link LeanGeneratedArchitecture}; the
+ *  pipeline hydrates it (pipeline/hydrate.ts) before anything downstream runs. */
+export function reconstructTiers(wire: GeneratedWire): LeanGeneratedArchitecture {
+  const tiers: LeanTier[] = [wire.baseTier];
   for (const d of wire.tierDeltas) tiers.push(applyTierDelta(tiers[tiers.length - 1]!, d));
   return {
     assumptions: wire.assumptions,
@@ -270,9 +385,9 @@ export function reconstructTiers(wire: GeneratedWire): GeneratedArchitecture {
   };
 }
 
-/** The lazy default: a single-tier {@link GeneratedArchitecture} carrying ONLY the
- *  budget baseline. The other tiers are added later via {@link reconstructAddedTier}. */
-export function reconstructBudgetOnly(wire: GeneratedBudgetWire): GeneratedArchitecture {
+/** The lazy default: a single-tier {@link LeanGeneratedArchitecture} carrying ONLY
+ *  the budget baseline. The other tiers are added later via {@link reconstructAddedTier}. */
+export function reconstructBudgetOnly(wire: GeneratedBudgetWire): LeanGeneratedArchitecture {
   return {
     assumptions: wire.assumptions,
     clarificationsUsed: wire.clarificationsUsed,
@@ -281,11 +396,13 @@ export function reconstructBudgetOnly(wire: GeneratedBudgetWire): GeneratedArchi
   };
 }
 
-/** Reconstruct ONE added tier (balanced or resilient) by applying its delta to the
- *  budget baseline — the on-demand "+ Add tier" path. Same delta arithmetic as the
- *  three-tier reconstruction, but each added tier is expressed vs BUDGET (not vs the
- *  tier below), so tiers can be added in any order without a missing intermediate. */
-export function reconstructAddedTier(budgetTier: GeneratedTier, delta: GeneratedTierDelta): GeneratedTier {
+/** Reconstruct ONE added tier (balanced or resilient) by applying its LEAN delta to
+ *  the already-hydrated FULL budget baseline — the on-demand "+ Add tier" path. Same
+ *  delta arithmetic as the three-tier reconstruction, but each added tier is expressed
+ *  vs BUDGET (not vs the tier below), so tiers can be added in any order without a
+ *  missing intermediate. The result is MIXED (unchanged nodes stay full; new/changed
+ *  ones stay lean) — `pipeline/hydrate.ts` hydrates the remaining lean ones. */
+export function reconstructAddedTier(budgetTier: GeneratedTier, delta: LeanTierDelta): PreHydrationTier {
   return applyTierDelta(budgetTier, delta);
 }
 
@@ -329,7 +446,7 @@ export function budgetArchitectureJsonSchema(): Record<string, unknown> {
 
 /** JSON Schema for the on-demand "+ Add tier" tool — one tier as a delta vs budget. */
 export function addTierJsonSchema(): Record<string, unknown> {
-  return zodToJsonSchema(GeneratedTierDeltaSchema, {
+  return zodToJsonSchema(LeanTierDeltaSchema, {
     name: "GeneratedTierDelta",
     target: "jsonSchema7",
     $refStrategy: "none",

@@ -29,6 +29,10 @@ export interface TelemetryRecord {
   /** True when the generated design passed the structural-completeness checks.
    *  Only set on a real generation; undefined on cache/library/clarify lines. */
   completenessOk?: boolean;
+  /** Count of lean nodes whose `svc` matched no service-catalog entry (Layer A,
+   *  docs/plans/2026-07-01-009) — data for which catalog entry to add next. Only
+   *  set on a real generation. */
+  catalogMiss?: number;
 }
 
 export type TelemetrySink = (line: string) => void;
