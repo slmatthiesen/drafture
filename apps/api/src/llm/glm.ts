@@ -16,7 +16,7 @@ import type { z } from "zod";
 
 import type { Config } from "../config.js";
 import { ClarificationSchema } from "../schema/architecture.js";
-import type { GeneratedArchitecture, Clarification, GeneratedTier } from "../schema/architecture.js";
+import type { PreHydrationArchitecture, Clarification, GeneratedTier } from "../schema/architecture.js";
 import { clarificationToolSchema } from "./schema-utils.js";
 import { resolveGenerateScope, type GenerateScope } from "./generateScope.js";
 import { renderTerraformWireupRules } from "./configPrompt.js";
@@ -142,7 +142,7 @@ export class GlmProvider implements LlmProvider {
     prompt: GroundedPrompt,
     opts?: GenerateOptions,
     scope?: GenerateScope,
-  ): Promise<ProviderResult<GeneratedArchitecture>> {
+  ): Promise<ProviderResult<PreHydrationArchitecture>> {
     const maxTokens = opts?.maxTokens ?? this.settings.maxTokens;
     // The scope picks the function (budget-only / add-one-tier / full three) — the
     // lazy-per-tier lever. The model emits a WIRE shape; reconstruct the tier(s) here.

@@ -123,4 +123,19 @@ describe("SqliteCuratedStore", () => {
   it("setHidden returns false for an unknown id", async () => {
     expect(await store.setHidden("nope", true)).toBe(false);
   });
+
+  it("setTerraform/getTerraform round-trip per tier and coexist", async () => {
+    await store.upsert(run("a", "Alpha"));
+    expect(await store.getTerraform("a", "balanced")).toBeUndefined();
+    expect(await store.setTerraform("a", "balanced", "resource x {}")).toBe(true);
+    expect((await store.getTerraform("a", "balanced"))?.code).toBe("resource x {}");
+    expect(await store.getTerraform("a", "resilient")).toBeUndefined();
+    await store.setTerraform("a", "resilient", "resource y {}");
+    expect((await store.getTerraform("a", "resilient"))?.code).toBe("resource y {}");
+    expect((await store.getTerraform("a", "balanced"))?.code).toBe("resource x {}"); // untouched
+  });
+
+  it("setTerraform on an unknown id returns false", async () => {
+    expect(await store.setTerraform("nope", "balanced", "x")).toBe(false);
+  });
 });

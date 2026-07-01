@@ -111,6 +111,36 @@ export class SqliteCuratedStore implements CuratedStore {
     });
     return tx();
   }
+
+  async getTerraform(id: string, tierName: string): Promise<{ code: string } | undefined> {
+    const row = this.db
+      .prepare(`SELECT terraform_json FROM curated_runs WHERE id = ?`)
+      .get(id) as { terraform_json: string | null } | undefined;
+    if (!row || !row.terraform_json) return undefined;
+    const map = safeParse<Record<string, { code?: string }>>(row.terraform_json, {});
+    const entry = map[tierName];
+    return entry?.code ? { code: entry.code } : undefined;
+  }
+
+  async setTerraform(id: string, tierName: string, code: string): Promise<boolean> {
+    const row = this.db
+      .prepare(`SELECT terraform_json FROM curated_runs WHERE id = ?`)
+      .get(id) as { terraform_json: string | null } | undefined;
+    if (!row) return false;
+    const map = safeParse<Record<string, { code: string; format: string }>>(row.terraform_json, {});
+    map[tierName] = { code, format: "terraform" };
+    this.db.prepare(`UPDATE curated_runs SET terraform_json = ? WHERE id = ?`).run(JSON.stringify(map), id);
+    return true;
+  }
+}
+
+function safeParse<T>(json: string | null | undefined, fallback: T): T {
+  if (!json) return fallback;
+  try {
+    return JSON.parse(json) as T;
+  } catch {
+    return fallback;
+  }
 }
 
 function toSummary(row: Omit<RunRow, "body">): Omit<CuratedRunSummary, "tech"> {

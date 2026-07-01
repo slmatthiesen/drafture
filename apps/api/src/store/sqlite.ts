@@ -175,6 +175,9 @@ export function getDb(path: string): Db {
   // hidden flag rather than deleted — survives a re-seed (upsert preserves it) and
   // is the curated mirror of a generation's status='hidden'.
   addColumnIfMissing(db, "curated_runs", "hidden", "INTEGER NOT NULL DEFAULT 0");
+  // Lazy reference-Terraform cache, mirroring generations.terraform_json — a curated
+  // run can now cache its per-tier /api/config output too (see CuratedStore.setTerraform).
+  addColumnIfMissing(db, "curated_runs", "terraform_json", "TEXT");
   return db;
 }
 

@@ -16,12 +16,12 @@ import type { z } from "zod";
 
 import {
   GeneratedBudgetWireSchema,
-  GeneratedTierDeltaSchema,
+  LeanTierDeltaSchema,
   GeneratedWireSchema,
   reconstructAddedTier,
   reconstructBudgetOnly,
   reconstructTiers,
-  type GeneratedArchitecture,
+  type PreHydrationArchitecture,
   type GeneratedTier,
   type TierName,
 } from "../schema/architecture.js";
@@ -41,8 +41,10 @@ export interface ResolvedScope {
   wireSchema: z.ZodTypeAny;
   /** Extra user-turn content appended after the grounded suffix (the addTier baseline). */
   extraUserContent?: string;
-  /** Turn the validated wire object into a full (1–3 tier) GeneratedArchitecture. */
-  reconstruct(wire: unknown): GeneratedArchitecture;
+  /** Turn the validated wire object into a (1–3 tier) PRE-hydration architecture —
+   *  still lean nodes (mixed with full ones on the addTier path). The pipeline
+   *  hydrates it (`pipeline/hydrate.ts`) before anything downstream runs. */
+  reconstruct(wire: unknown): PreHydrationArchitecture;
 }
 
 export function resolveGenerateScope(scope: GenerateScope = { kind: "full" }): ResolvedScope {
@@ -62,7 +64,7 @@ export function resolveGenerateScope(scope: GenerateScope = { kind: "full" }): R
         toolName: "emit_tier",
         toolDescription: `Emit ONLY the ${target} tier as a single delta vs the provided budget baseline.`,
         toolSchema: addTierToolSchema(),
-        wireSchema: GeneratedTierDeltaSchema,
+        wireSchema: LeanTierDeltaSchema,
         extraUserContent: buildAddTierInstruction(budgetTier, target),
         reconstruct: (wire) => {
           // Force the delta's tier name to the requested target so a mis-named delta
@@ -101,7 +103,8 @@ function buildAddTierInstruction(budgetTier: GeneratedTier, target: TierName): s
     `Build ONLY the ${target} tier by expressing what CHANGES vs this budget baseline on the ROBUSTNESS axis`,
     `(${target === "resilient" ? "multi-region / DR, read replicas, cross-region failover" : "multi-AZ, managed split (ALB/Fargate/RDS), WAF + customer CMK + Secrets Manager"}).`,
     `Reuse the SAME node ids so inheritance works. Emit a SINGLE delta object: addNodes (new OR changed nodes,`,
-    `re-stated in full with the same id), removeNodeIds, addEdges, removeEdges, plus this tier's summary, delta`,
+    `each a LEAN pick — svc/id + role/addSecurity only if they differ from the service default — re-stated with`,
+    `the same id), removeNodeIds, addEdges, removeEdges, plus this tier's summary, delta`,
     `(one short line each), and tradeoffs. Do NOT repeat unchanged nodes/edges — they are inherited.`,
     ``,
     `BUDGET BASELINE:`,

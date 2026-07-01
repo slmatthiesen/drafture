@@ -11,6 +11,7 @@ import type { ArchitectureBeforeCost, GeneratedTier, TierName } from "../schema/
 import type { MemoryStore } from "../store/types.js";
 
 import { assembleGrounding } from "./ground.js";
+import { hydrateArchitecture } from "./hydrate.js";
 import { sanitizeGenerated } from "./sanitize.js";
 import { securityFloorLines } from "./securityFloor.js";
 
@@ -35,6 +36,9 @@ export interface GenerateOutput {
   result: ArchitectureBeforeCost;
   usage: Usage;
   grounding: GroundingTelemetry;
+  /** Count of lean nodes whose `svc` matched no catalog entry (Layer A) — data for
+   *  which service-catalog entry to add next, not guesswork. */
+  catalogMiss: number;
 }
 
 export async function generateArchitecture(input: GenerateInput): Promise<GenerateOutput> {
@@ -45,7 +49,12 @@ export async function generateArchitecture(input: GenerateInput): Promise<Genera
     exemplarsSection: input.exemplarsSection,
   });
 
-  const { result: generated, usage } = await input.provider.generate(prompt, input.opts);
+  const { result: pre, usage } = await input.provider.generate(prompt, input.opts);
+
+  // Hydrate the model's LEAN node picks into full nodes via the KB service catalog
+  // (Layer A) BEFORE anything else runs, so every downstream step (sanitize, the
+  // security floor, cost, gates, TF, web) keeps seeing full nodes exactly as before.
+  const { architecture: generated, catalogMiss } = hydrateArchitecture(pre);
 
   // Deterministically fix the model's most common tag error (a "private subnet"
   // tag on a managed/serverless service) before injecting the security floor.
@@ -69,6 +78,7 @@ export async function generateArchitecture(input: GenerateInput): Promise<Genera
     result,
     usage,
     grounding: { matchedPatterns, memoryHits, missingTopics },
+    catalogMiss,
   };
 }
 
@@ -87,7 +97,8 @@ export async function generateBudgetArchitecture(input: GenerateInput): Promise<
     exemplarsSection: input.exemplarsSection,
   });
 
-  const { result: generated, usage } = await input.provider.generate(prompt, input.opts, { kind: "budget" });
+  const { result: pre, usage } = await input.provider.generate(prompt, input.opts, { kind: "budget" });
+  const { architecture: generated, catalogMiss } = hydrateArchitecture(pre);
   const cleaned = sanitizeGenerated(generated);
 
   const result: ArchitectureBeforeCost = {
@@ -97,7 +108,7 @@ export async function generateBudgetArchitecture(input: GenerateInput): Promise<
     recommendationRationale: "",
   };
 
-  return { result, usage, grounding: { matchedPatterns, memoryHits, missingTopics } };
+  return { result, usage, grounding: { matchedPatterns, memoryHits, missingTopics }, catalogMiss };
 }
 
 export interface AddTierInput extends GenerateInput {
@@ -111,6 +122,8 @@ export interface AddTierOutput {
   /** The reconstructed target tier (BEFORE cost drivers — the route fills those). */
   tier: GeneratedTier;
   usage: Usage;
+  /** Count of lean nodes whose `svc` matched no catalog entry (Layer A). */
+  catalogMiss: number;
 }
 
 /**
@@ -127,11 +140,28 @@ export async function addTierToDesign(input: AddTierInput): Promise<AddTierOutpu
     exemplarsSection: input.exemplarsSection,
   });
 
-  const { result: generated, usage } = await input.provider.generate(prompt, input.opts, {
+  const { result: pre, usage } = await input.provider.generate(prompt, input.opts, {
     kind: "addTier",
     budgetTier: input.budgetTier,
     target: input.target,
   });
-  const cleaned = sanitizeGenerated(generated);
-  return { tier: cleaned.tiers[0]!, usage };
+
+  // Hydrate alongside the CLIENT-SENT budget tier (already full) so compliance
+  // detection sees the whole design's surface, not just the new tier — a regime
+  // marker ("PCI scope") stated on the budget tier's data node must still gate the
+  // added tier's paid floor even if the delta doesn't restate it. The budget tier's
+  // own (already-hydrated) nodes pass through hydrateNode untouched.
+  const { architecture: hydrated, catalogMiss } = hydrateArchitecture({
+    assumptions: [],
+    clarificationsUsed: [],
+    keyDecisions: [],
+    tiers: [input.budgetTier, pre.tiers[0]!],
+  });
+  const cleaned = sanitizeGenerated({
+    assumptions: [],
+    clarificationsUsed: [],
+    keyDecisions: [],
+    tiers: [hydrated.tiers[1]!],
+  });
+  return { tier: cleaned.tiers[0]!, usage, catalogMiss };
 }

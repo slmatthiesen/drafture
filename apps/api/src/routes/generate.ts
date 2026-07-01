@@ -137,6 +137,7 @@ async function handleGenerate(
       researchCalls?: number;
       retrievalHit?: boolean;
       completenessOk?: boolean;
+      catalogMiss?: number;
     } = {},
   ): void => {
     emitTelemetry(
@@ -155,6 +156,7 @@ async function handleGenerate(
         model: ctx.config.LLM_MODEL,
         retrievalHit: opts.retrievalHit,
         completenessOk: opts.completenessOk,
+        catalogMiss: opts.catalogMiss,
       }),
       ctx.telemetrySink,
     );
@@ -371,7 +373,7 @@ async function handleGenerate(
     // Structural-completeness signal for the telemetry line (free, deterministic —
     // the same checks gate the offline eval). Run on the scrubbed, cost-filled body.
     const completenessOk = isStructurallyComplete(scrubbedOutput.value);
-    emit("ok", { costUsd: actualUsd, researchCalls, retrievalHit, completenessOk });
+    emit("ok", { costUsd: actualUsd, researchCalls, retrievalHit, completenessOk, catalogMiss: generated.catalogMiss });
     return finish(200, responseBody);
   } catch (err) {
     // Generation failed: release the reservation so the budget isn't consumed by a

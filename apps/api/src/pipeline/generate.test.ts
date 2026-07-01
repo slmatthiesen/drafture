@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach } from "vitest";
 
 import type { LlmProvider, ProviderResult, GroundedPrompt, GenerateOptions, Usage } from "../llm/provider.js";
-import type { GeneratedArchitecture, Clarification, TierName } from "../schema/architecture.js";
+import type { GeneratedArchitecture, PreHydrationArchitecture, Clarification, TierName } from "../schema/architecture.js";
 import { ArchitectureResultSchema, TIER_NAMES } from "../schema/architecture.js";
 
 import { openTempDb, createStores, type Stores } from "../store/sqlite.js";
@@ -73,7 +73,7 @@ interface FakeProvider {
 function fakeProvider(arch: GeneratedArchitecture): FakeProvider {
   const calls: FakeProvider["calls"] = { prompts: [], opts: [] };
   const provider: LlmProvider = {
-    async generate(prompt, opts): Promise<ProviderResult<GeneratedArchitecture>> {
+    async generate(prompt, opts): Promise<ProviderResult<PreHydrationArchitecture>> {
       calls.prompts.push(prompt);
       calls.opts.push(opts);
       return { result: arch, usage: USAGE };

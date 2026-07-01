@@ -105,3 +105,25 @@ export interface InstancePriceTable {
   _note: string;
   prices: Record<string, number>;
 }
+
+/**
+ * One entry in the service catalog (`service-catalog.json`) — the canned config
+ * a lean node PICK hydrates against, keyed by `ServiceKey` (see
+ * `pipeline/terraform/serviceKey.ts`). This is the reusable knowledge that lets
+ * the model emit `{svc, id, role?, addSecurity?}` instead of retyping the same
+ * security tags on every node of a given service (see `pipeline/hydrate.ts`).
+ */
+export interface ServiceCatalogEntry {
+  /** Canonical AWS service name the hydrated node's `awsService` gets. */
+  awsService: string;
+  /** Used when the lean node omits `role`. */
+  defaultRole?: string;
+  /** FREE-floor security tags — applied at EVERY tier. */
+  floorTags: string[];
+  /** PAID-floor tags — applied ONLY when `paidSecurityActive(tier, compliance)`. */
+  paidTags?: string[];
+  /** Informational; the Terraform layer already derives VPC-boundness itself. */
+  vpcBound?: boolean;
+}
+
+export type ServiceCatalog = Record<string, ServiceCatalogEntry>;

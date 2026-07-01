@@ -8,8 +8,8 @@ import Anthropic, {
 import { ClaudeProvider } from "./claude.js";
 import { ProviderError } from "./provider.js";
 import type { GroundedPrompt } from "./provider.js";
-import { GeneratedArchitectureSchema } from "../schema/architecture.js";
-import type { GeneratedArchitecture, GeneratedWire, Clarification, TierName } from "../schema/architecture.js";
+import { LeanGeneratedArchitectureSchema } from "../schema/architecture.js";
+import type { GeneratedTier, GeneratedWire, LeanGeneratedArchitecture, Clarification, TierName } from "../schema/architecture.js";
 
 // --- Test doubles -----------------------------------------------------------
 
@@ -97,7 +97,8 @@ function textMessage(text: string, usage: FakeUsage = {}): Anthropic.Message {
 
 // --- Fixtures ---------------------------------------------------------------
 
-function makeTier(name: TierName): GeneratedArchitecture["tiers"][number] {
+// FULL tier — used where a caller consumes an already-hydrated tier (generateConfig).
+function makeTier(name: TierName): GeneratedTier {
   return {
     name,
     summary: `${name} tier`,
@@ -110,14 +111,28 @@ function makeTier(name: TierName): GeneratedArchitecture["tiers"][number] {
   };
 }
 
+// LEAN tier (Layer A) — what the model actually emits on the wire: a `svc` PICK,
+// not a full node. Used to build the fake tool-call input.
+function makeLeanTier(name: TierName): GeneratedWire["baseTier"] {
+  return {
+    name,
+    summary: `${name} tier`,
+    nodes: [{ svc: "api gateway", id: "api", role: "front door", addSecurity: ["throttling"] }],
+    edges: [{ from: "client", to: "api", payload: "request", protocol: "HTTPS" }],
+    delta: ["baseline: single-AZ, throttling absorbs bursts"],
+    tradeoffs: ["Cheaper than resilient"],
+  };
+}
+
 // The model output OMITS securityFloor (it is injected deterministically
-// downstream); the provider validates against the GENERATED schema, which would
-// reject an unexpected securityFloor field.
-function validArchitecture(): GeneratedArchitecture {
+// downstream); the provider validates against the LEAN wire schema and returns the
+// reconstructed (still-lean) architecture — hydration happens in the pipeline, above
+// the provider — so this is what `generate()` is expected to return.
+function expectedLeanArchitecture(): LeanGeneratedArchitecture {
   return {
     assumptions: ["single region"],
     clarificationsUsed: [],
-    tiers: [makeTier("budget"), makeTier("balanced"), makeTier("resilient")],
+    tiers: [makeLeanTier("budget"), makeLeanTier("balanced"), makeLeanTier("resilient")],
     keyDecisions: [
       {
         decision: "Compute model",
@@ -130,8 +145,8 @@ function validArchitecture(): GeneratedArchitecture {
 }
 
 // The model emits the tier-delta WIRE shape (budget full + two deltas). These
-// no-op deltas reconstruct EXACTLY to validArchitecture()'s three tiers, so the
-// provider's reconstructed result equals validArchitecture().
+// no-op deltas reconstruct EXACTLY to expectedLeanArchitecture()'s three tiers, so
+// the provider's reconstructed result equals expectedLeanArchitecture().
 function makeDelta(name: TierName): GeneratedWire["tierDeltas"][number] {
   return {
     name,
@@ -146,11 +161,11 @@ function makeDelta(name: TierName): GeneratedWire["tierDeltas"][number] {
 }
 
 function validWire(): GeneratedWire {
-  const arch = validArchitecture();
+  const arch = expectedLeanArchitecture();
   return {
     assumptions: arch.assumptions,
     clarificationsUsed: arch.clarificationsUsed,
-    baseTier: makeTier("budget"),
+    baseTier: makeLeanTier("budget"),
     tierDeltas: [makeDelta("balanced"), makeDelta("resilient")],
     keyDecisions: arch.keyDecisions,
   };
@@ -159,14 +174,14 @@ function validWire(): GeneratedWire {
 // --- Tests ------------------------------------------------------------------
 
 describe("ClaudeProvider.generate", () => {
-  it("returns a schema-valid ArchitectureResult for a representative prompt", async () => {
-    const arch = validArchitecture();
+  it("returns a schema-valid (lean, pre-hydration) architecture for a representative prompt", async () => {
+    const arch = expectedLeanArchitecture();
     const { client, create } = fakeClient();
     create.mockResolvedValueOnce(toolMessage(validWire(), { input_tokens: 1200, output_tokens: 800 }));
 
     const { result, usage } = await makeProvider(client).generate(PROMPT);
 
-    expect(result).toEqual(GeneratedArchitectureSchema.parse(arch));
+    expect(result).toEqual(LeanGeneratedArchitectureSchema.parse(arch));
     expect(result.tiers.map((t) => t.name)).toEqual(["budget", "balanced", "resilient"]);
     expect(usage.inputTokens).toBe(1200);
     expect(usage.outputTokens).toBe(800);

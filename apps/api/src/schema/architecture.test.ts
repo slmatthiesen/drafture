@@ -1,15 +1,14 @@
 import { describe, it, expect } from "vitest";
 
 import { reconstructTiers } from "./architecture.js";
-import type { GeneratedWire, GeneratedTier } from "./architecture.js";
+import type { GeneratedWire, LeanNode } from "./architecture.js";
 
-const node = (id: string, role = id): GeneratedTier["nodes"][number] => ({
+const node = (id: string, role?: string): LeanNode => ({
+  svc: id,
   id,
-  awsService: id,
-  role,
-  security: ["TLS"],
+  ...(role !== undefined ? { role } : {}),
 });
-const edge = (from: string, to: string): GeneratedTier["edges"][number] => ({
+const edge = (from: string, to: string): GeneratedWire["baseTier"]["edges"][number] => ({
   from,
   to,
   payload: "data",

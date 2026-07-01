@@ -3,8 +3,8 @@ import { describe, it, expect, vi } from "vitest";
 import { GlmProvider } from "./glm.js";
 import { ProviderError } from "./provider.js";
 import type { GroundedPrompt } from "./provider.js";
-import { GeneratedArchitectureSchema } from "../schema/architecture.js";
-import type { GeneratedArchitecture, GeneratedWire, Clarification, TierName } from "../schema/architecture.js";
+import { LeanGeneratedArchitectureSchema } from "../schema/architecture.js";
+import type { GeneratedTier, GeneratedWire, LeanGeneratedArchitecture, Clarification, TierName } from "../schema/architecture.js";
 
 // --- Test doubles -----------------------------------------------------------
 
@@ -65,7 +65,8 @@ const PROMPT: GroundedPrompt = {
 
 // --- Fixtures ---------------------------------------------------------------
 
-function makeTier(name: TierName): GeneratedArchitecture["tiers"][number] {
+// FULL tier — used where a caller consumes an already-hydrated tier (generateConfig).
+function makeTier(name: TierName): GeneratedTier {
   return {
     name,
     summary: `${name} tier`,
@@ -76,11 +77,25 @@ function makeTier(name: TierName): GeneratedArchitecture["tiers"][number] {
   };
 }
 
-function validArchitecture(): GeneratedArchitecture {
+// LEAN tier (Layer A) — what the model actually emits on the wire.
+function makeLeanTier(name: TierName): GeneratedWire["baseTier"] {
+  return {
+    name,
+    summary: `${name} tier`,
+    nodes: [{ svc: "api gateway", id: "api", role: "front door" }],
+    edges: [{ from: "client", to: "api", payload: "request", protocol: "HTTPS" }],
+    delta: ["baseline: single-AZ"],
+    tradeoffs: ["Cheaper than resilient"],
+  };
+}
+
+// The provider validates against the LEAN wire schema and returns the reconstructed
+// (still-lean) architecture — hydration happens in the pipeline, above the provider.
+function expectedLeanArchitecture(): LeanGeneratedArchitecture {
   return {
     assumptions: ["single region"],
     clarificationsUsed: [],
-    tiers: [makeTier("budget"), makeTier("balanced"), makeTier("resilient")],
+    tiers: [makeLeanTier("budget"), makeLeanTier("balanced"), makeLeanTier("resilient")],
     keyDecisions: [
       {
         decision: "Compute model",
@@ -93,9 +108,9 @@ function validArchitecture(): GeneratedArchitecture {
 }
 
 // The model emits the tier-delta WIRE shape; these no-op deltas reconstruct EXACTLY
-// to validArchitecture()'s three tiers (the provider reconstructs before returning).
+// to expectedLeanArchitecture()'s three tiers (the provider reconstructs before returning).
 function validWire(): GeneratedWire {
-  const arch = validArchitecture();
+  const arch = expectedLeanArchitecture();
   const delta = (name: TierName): GeneratedWire["tierDeltas"][number] => ({
     name,
     summary: `${name} tier`,
@@ -109,7 +124,7 @@ function validWire(): GeneratedWire {
   return {
     assumptions: arch.assumptions,
     clarificationsUsed: arch.clarificationsUsed,
-    baseTier: makeTier("budget"),
+    baseTier: makeLeanTier("budget"),
     tierDeltas: [delta("balanced"), delta("resilient")],
     keyDecisions: arch.keyDecisions,
   };
@@ -118,14 +133,14 @@ function validWire(): GeneratedWire {
 // --- Tests ------------------------------------------------------------------
 
 describe("GlmProvider.generate", () => {
-  it("returns a schema-valid ArchitectureResult for a representative prompt", async () => {
-    const arch = validArchitecture();
+  it("returns a schema-valid (lean, pre-hydration) architecture for a representative prompt", async () => {
+    const arch = expectedLeanArchitecture();
     const fetchMock = vi.fn();
     fetchMock.mockResolvedValueOnce(okResponse(glmToolResponse(validWire(), { prompt_tokens: 1200, completion_tokens: 800 })));
 
     const { result, usage } = await makeProvider(fetchMock).generate(PROMPT);
 
-    expect(result).toEqual(GeneratedArchitectureSchema.parse(arch));
+    expect(result).toEqual(LeanGeneratedArchitectureSchema.parse(arch));
     expect(result.tiers.map((t) => t.name)).toEqual(["budget", "balanced", "resilient"]);
     expect(usage.inputTokens).toBe(1200);
     expect(usage.outputTokens).toBe(800);

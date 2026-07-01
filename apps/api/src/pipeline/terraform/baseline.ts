@@ -14,7 +14,6 @@ import { type HclBlock, type Jsonish, jsonencode, policyDoc, raw } from "./hcl.j
 
 export function emitBaseline(ctx: EmitCtx): HclBlock[] {
   const blocks: HclBlock[] = [];
-  const p = ctx.prefix;
   const usesCloudfront = ctx.has("cloudfront");
 
   // --- Terraform + provider(s) ---
