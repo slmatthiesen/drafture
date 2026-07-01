@@ -1,0 +1,36 @@
+# Copy to terraform.tfvars and fill in. `tofu plan` reads it automatically.
+# Do NOT commit terraform.tfvars (it names your account's resources); this .example is safe.
+
+# --- Required (no defaults) ---------------------------------------------------
+
+# Existing VPC + a PUBLIC subnet in it. The box gets a public IP and is reachable
+# only from Cloudflare IP ranges (see the SG in the .tf).
+vpc_id           = "vpc-xxxxxxxxxxxxxxxxx"
+public_subnet_id = "subnet-xxxxxxxxxxxxxxxxx"
+
+# Ops alerts (SNS will send a subscription-confirmation email here on apply).
+ops_email = "you@example.com"
+
+# Domain CloudFront serves the static SPA assets on (e.g. app.example.com). CloudFront
+# needs an ACM cert for it — see the aws_acm_certificate resource in the .tf.
+static_site_domain = "app.example.com"
+
+# The app container image you built + pushed (ECR/GHCR/Docker Hub). Build locally:
+#   docker build -t <acct>.dkr.ecr.us-east-1.amazonaws.com/drafture:latest .
+#   (then aws ecr create-repository + docker push)
+container_image = "<acct>.dkr.ecr.us-east-1.amazonaws.com/drafture:latest"
+
+# --- Optional (sensible defaults; override only if needed) --------------------
+
+# aws_region     = "us-east-1"
+# ami_id         = ""          # empty = auto-resolve latest AL2023 arm64 (recommended)
+# container_port = 8080        # the app listens here; host :80 maps to it
+# ebs_volume_size_gb = 20      # SQLite data volume
+
+# After apply:
+#   1. Set the Anthropic key (out-of-band, never in this file):
+#        aws ssm put-parameter --overwrite --type SecureString \
+#          --name /drafture/anthropic_api_key --value sk-ant-... --region us-east-1
+#      (use your `project` value in the path if you changed it from "budget"/"drafture")
+#   2. Point a PROXIED Cloudflare DNS record at the `ec2_public_ip` output.
+#   3. Smoke test:  curl -s https://<your-domain>/api/health

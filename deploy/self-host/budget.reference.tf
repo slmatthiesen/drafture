@@ -43,8 +43,8 @@ variable "aws_region" {
 
 variable "project" {
   type        = string
-  default     = "budget"
-  description = "Project name used as a prefix for all resources."
+  default     = "drafture"
+  description = "Project name used as a prefix for all resources (and the SSM key path / container name)."
 }
 
 variable "ops_email" {
@@ -54,7 +54,19 @@ variable "ops_email" {
 
 variable "ami_id" {
   type        = string
-  description = "ARM64 AMI ID (Amazon Linux 2023 or Ubuntu 22.04 arm64) for t4g.small."
+  default     = ""
+  description = "ARM64 AMI for t4g.small. Leave empty to auto-resolve the latest Amazon Linux 2023 arm64 AMI (recommended); set an explicit ID to pin one."
+}
+
+variable "container_image" {
+  type        = string
+  description = "Container image URI for the app, e.g. <acct>.dkr.ecr.<region>.amazonaws.com/drafture:latest. Build + push your image and set this before apply — there is no default on purpose."
+}
+
+variable "container_port" {
+  type        = number
+  default     = 8080
+  description = "Port the app container listens on (Fastify serves the SPA + /api on one port)."
 }
 
 variable "vpc_id" {
@@ -138,6 +150,26 @@ variable "backup_lifecycle_days" {
 
 data "aws_caller_identity" "current" {}
 data "aws_region" "current" {}
+
+# Latest Amazon Linux 2023 arm64 AMI — used when var.ami_id is empty so a first
+# apply doesn't fail hunting a region-specific AMI ID by hand.
+data "aws_ami" "al2023_arm64" {
+  most_recent = true
+  owners      = ["amazon"]
+
+  filter {
+    name   = "name"
+    values = ["al2023-ami-*-arm64"]
+  }
+  filter {
+    name   = "architecture"
+    values = ["arm64"]
+  }
+  filter {
+    name   = "virtualization-type"
+    values = ["hvm"]
+  }
+}
 
 # =============================================================================
 # KMS — EBS ENCRYPTION KEY
@@ -334,6 +366,10 @@ resource "aws_s3_bucket_lifecycle_configuration" "backup" {
     id     = "expire-old-backups"
     status = "Enabled"
 
+    # Empty filter = apply to all objects. Required by AWS provider v5 (a rule with
+    # neither filter nor prefix is a validation error in newer versions).
+    filter {}
+
     expiration {
       days = var.backup_lifecycle_days
     }
@@ -412,7 +448,7 @@ resource "aws_s3_bucket_policy" "cloudtrail" {
         Resource = "${aws_s3_bucket.cloudtrail.arn}/AWSLogs/${data.aws_caller_identity.current.account_id}/*"
         Condition = {
           StringEquals = {
-            "s3:x-amz-acl" = "bucket-owner-full-control"
+            "s3:x-amz-acl"  = "bucket-owner-full-control"
             "AWS:SourceArn" = "arn:aws:cloudtrail:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:trail/${var.project}-trail"
           }
         }
@@ -779,7 +815,7 @@ data "aws_availability_zones" "available" {
 # =============================================================================
 
 resource "aws_instance" "app" {
-  ami                         = var.ami_id
+  ami                         = var.ami_id != "" ? var.ami_id : data.aws_ami.al2023_arm64.id
   instance_type               = "t4g.small"
   subnet_id                   = var.public_subnet_id
   vpc_security_group_ids      = [aws_security_group.ec2_app.id]
@@ -821,11 +857,19 @@ resource "aws_instance" "app" {
       dpkg -i amazon-cloudwatch-agent.deb
     fi
 
-    # Mount the data EBS volume (after attachment; device name varies by OS)
-    # TODO: Replace /dev/xvdf with actual device name after attachment
-    # mkfs.xfs /dev/xvdf (FIRST BOOT ONLY — guard with label check)
-    # mkdir -p /data/sqlite && mount /dev/xvdf /data/sqlite
-    # echo '/dev/xvdf /data/sqlite xfs defaults,nofail 0 2' >> /etc/fstab
+    # Mount the data EBS volume. On Nitro (t4g) AL2023 the ec2-utils udev rules
+    # symlink the attachment (/dev/xvdf, matching aws_volume_attachment.db) to the
+    # underlying NVMe device; wait for it, format ONCE (guarded by a blkid check so a
+    # reboot never reformats live data), then persist via fstab with nofail.
+    DEVICE=/dev/xvdf
+    MOUNT=/data
+    for i in $(seq 1 30); do [ -e "$DEVICE" ] && break; sleep 2; done
+    if ! blkid "$DEVICE"; then
+      mkfs.xfs "$DEVICE"
+    fi
+    mkdir -p "$MOUNT"
+    grep -q "$MOUNT" /etc/fstab || echo "$DEVICE $MOUNT xfs defaults,nofail 0 2" >> /etc/fstab
+    mount -a
 
     # CloudWatch agent config — structured JSON logs to log group
     cat > /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json <<'CWCONFIG'
@@ -850,6 +894,31 @@ resource "aws_instance" "app" {
     /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
       -a fetch-config -m ec2 -s \
       -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
+
+    # -----------------------------------------------------------------------
+    # Deploy the app container. The image (var.container_image) must be pushed
+    # first. The Anthropic key is read from SSM at boot (never baked into the AMI
+    # or this file); SQLite lives on the mounted data volume so it survives
+    # instance replacement. Cloudflare terminates TLS and proxies to :80 here
+    # (set the CF origin to "Full" with an origin cert, or "Flexible"); the
+    # container listens on var.container_port.
+    # -----------------------------------------------------------------------
+    dnf install -y docker
+    systemctl enable --now docker
+
+    # If the image is in a private ECR repo, authenticate first:
+    #   aws ecr get-login-password --region ${var.aws_region} | docker login --username AWS --password-stdin <acct>.dkr.ecr.${var.aws_region}.amazonaws.com
+
+    APP_KEY="$(aws ssm get-parameter --name /${var.project}/anthropic_api_key --with-decryption --region ${var.aws_region} --query Parameter.Value --output text)"
+
+    # The image declares VOLUME /app/data and defaults DB_PATH=/app/data/drafture.db,
+    # so mount the host data volume there and let the image's own default stand.
+    docker run -d --name ${var.project} --restart always \
+      -p 80:${var.container_port} \
+      -v /data:/app/data \
+      -e STORE_BACKEND=sqlite \
+      -e ANTHROPIC_API_KEY="$APP_KEY" \
+      ${var.container_image}
   EOF
   )
 
