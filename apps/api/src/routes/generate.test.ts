@@ -209,6 +209,31 @@ describe("POST /api/generate", () => {
     await app.close();
   });
 
+  it("advisory structural gate: a broken graph is still served (200) but telemetry records the failure (Finding 1)", async () => {
+    // Budget tier carries an orphan active node (a compute node added with no edge) — the
+    // canonical tier-delta failure: the model emits addNodes with no matching addEdge.
+    const broken = validArchitecture();
+    const budget = broken.tiers.find((t) => t.name === "budget")!;
+    budget.nodes.push({ id: "lambda-worker", awsService: "Lambda", role: "stray worker", security: ["TLS"] });
+    const fake = makeFake({ arch: broken });
+    const { app, lines } = await buildHarness(fake);
+
+    const res = await app.inject({ method: "POST", url: "/api/generate", payload: { description: SPEC } });
+
+    // Advisory: the design is STILL served — no hard-fail, no retry (a systematic break
+    // would fail a retry identically and double cost). The user gets their design.
+    expect(res.statusCode).toBe(200);
+    expect(res.json().tiers.map((t: { name: string }) => t.name)).toEqual(["budget"]);
+    // ...but the gate fires, so the prod broken-graph rate is finally observable
+    // per-request, root-caused by check name.
+    const rec = lastTelemetry(lines);
+    expect(rec.outcome).toBe("ok");
+    expect(rec.completenessOk).toBe(false);
+    expect(rec.gateFailures).toEqual(["graphHasNoOrphanNodes"]);
+
+    await app.close();
+  });
+
   it("streams phase + token + result SSE events when the client asks for them (fix D)", async () => {
     const fake = makeFake();
     const { app } = await buildHarness(fake);

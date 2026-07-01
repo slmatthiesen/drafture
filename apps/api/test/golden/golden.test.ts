@@ -88,6 +88,21 @@ describe("completeness critic flips to FAIL on a structurally-broken graph", () 
     expect(graphHasNoDanglingEdges(goodArchitecture()).ok).toBe(true);
   });
 
+  it("graphHasNoDanglingEdges exempts a known external SaaS endpoint (cloudflare/anthropic) but still catches a typo", () => {
+    // A bare edge to an external dependency (no marker node) is legitimate — the design
+    // calls Cloudflare/Anthropic over the public internet; there is no aws_* for it.
+    const withExternal = structuredClone(goodArchitecture());
+    withExternal.tiers[0]!.edges.push(
+      { from: "fn", to: "cloudflare", payload: "edge TLS / CDN", protocol: "HTTPS" },
+      { from: "fn", to: "anthropic-api", payload: "LLM completion call", protocol: "HTTPS" },
+    );
+    expect(graphHasNoDanglingEdges(withExternal).ok, graphHasNoDanglingEdges(withExternal).reason).toBe(true);
+    // But a non-external unknown id is still a real dangling reference (a typo'd node).
+    const withTypo = structuredClone(goodArchitecture());
+    withTypo.tiers[0]!.edges.push({ from: "fn", to: "lambda-wroker", payload: "x", protocol: "HTTPS" });
+    expect(graphHasNoDanglingEdges(withTypo).ok).toBe(false);
+  });
+
   it("primaryDatastoreReachable fails when a primary datastore has no edges", () => {
     const broken = structuredClone(goodArchitecture());
     broken.tiers[0]!.nodes.push({ id: "orphan_db", awsService: "DynamoDB", role: "unwired store", security: ["KMS at rest"] });

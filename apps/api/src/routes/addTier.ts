@@ -16,7 +16,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest, preHandlerHookHandl
 
 import type { AppContext } from "../app/context.js";
 import type { Usage } from "../llm/provider.js";
-import type { ArchitectureBeforeCost, GeneratedTier, Tier, TierName } from "../schema/architecture.js";
+import type { ArchitectureBeforeCost, ArchitectureResult, GeneratedTier, Tier, TierName } from "../schema/architecture.js";
 
 import { clientIp } from "../guards/clientIp.js";
 import { assertWithinInputBudget } from "../guards/inputCap.js";
@@ -24,6 +24,7 @@ import { llmCostUsd, provisionalLlmCostUsdFromConfig, reserveSpend } from "../gu
 
 import { addTierToDesign } from "../pipeline/generate.js";
 import { estimateCosts, trafficVolumeScale } from "../pipeline/cost.js";
+import { structuralFailures } from "../pipeline/completeness.js";
 import { scrubObject } from "../pipeline/scrub.js";
 import { tagDesign } from "../pipeline/tags.js";
 
@@ -102,7 +103,10 @@ async function handleAddTier(ctx: AppContext, req: FastifyRequest, reply: Fastif
     usage.cacheReadTokens += u.cacheReadTokens;
     usage.cacheWriteTokens += u.cacheWriteTokens;
   };
-  const emit = (outcome: string, opts: { cacheHit?: boolean; costUsd?: number; catalogMiss?: number } = {}): void => {
+  const emit = (
+    outcome: string,
+    opts: { cacheHit?: boolean; costUsd?: number; catalogMiss?: number; completenessOk?: boolean; gateFailures?: string[] } = {},
+  ): void => {
     emitTelemetry(
       telemetryRecord({
         requestId,
@@ -117,6 +121,8 @@ async function handleAddTier(ctx: AppContext, req: FastifyRequest, reply: Fastif
         outcome,
         model: ctx.config.LLM_MODEL,
         catalogMiss: opts.catalogMiss,
+        completenessOk: opts.completenessOk,
+        gateFailures: opts.gateFailures,
       }),
       ctx.telemetrySink,
     );
@@ -199,7 +205,16 @@ async function handleAddTier(ctx: AppContext, req: FastifyRequest, reply: Fastif
     }
     await ctx.stores.responseCache.set(cacheKey, JSON.stringify(responseBody));
 
-    emit("ok", { costUsd: actualUsd, catalogMiss });
+    // Advisory structural gate on the added tier (same checks as /api/generate). The
+    // checks read `.tiers` only, so a single-tier view is sufficient to catch an
+    // orphaned/unwired node the delta introduced. Served regardless; telemetry-only.
+    const gateFailures = structuralFailures({ tiers: [responseBody.tier] } as ArchitectureResult);
+    const completenessOk = gateFailures.length === 0;
+    if (!completenessOk) {
+      req.log.warn({ gateFailures, route: ROUTE }, "added tier failed a structural gate (served anyway — advisory)");
+    }
+
+    emit("ok", { costUsd: actualUsd, catalogMiss, completenessOk, gateFailures });
     return reply.code(200).send(responseBody);
   } catch (err) {
     await ctx.stores.spendLedger.release(reservationId);

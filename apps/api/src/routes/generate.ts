@@ -26,7 +26,7 @@ import { llmCostUsd, provisionalLlmCostUsdFromConfig, reserveSpend } from "../gu
 import { runClarify, roundCapReached } from "../pipeline/clarify.js";
 import { assembleGrounding } from "../pipeline/ground.js";
 import { generateBudgetArchitecture } from "../pipeline/generate.js";
-import { isStructurallyComplete } from "../pipeline/completeness.js";
+import { structuralFailures } from "../pipeline/completeness.js";
 import { retrieveSimilarDesigns, renderExemplars } from "../pipeline/retrieve.js";
 import { estimateCosts, trafficVolumeScale } from "../pipeline/cost.js";
 import { scrubAll, scrubObject, scrubPrompt } from "../pipeline/scrub.js";
@@ -137,6 +137,7 @@ async function handleGenerate(
       researchCalls?: number;
       retrievalHit?: boolean;
       completenessOk?: boolean;
+      gateFailures?: string[];
       catalogMiss?: number;
     } = {},
   ): void => {
@@ -156,6 +157,7 @@ async function handleGenerate(
         model: ctx.config.LLM_MODEL,
         retrievalHit: opts.retrievalHit,
         completenessOk: opts.completenessOk,
+        gateFailures: opts.gateFailures,
         catalogMiss: opts.catalogMiss,
       }),
       ctx.telemetrySink,
@@ -370,10 +372,19 @@ async function handleGenerate(
 
     await ctx.stores.responseCache.set(cacheKey, JSON.stringify(responseBody));
 
-    // Structural-completeness signal for the telemetry line (free, deterministic —
-    // the same checks gate the offline eval). Run on the scrubbed, cost-filled body.
-    const completenessOk = isStructurallyComplete(scrubbedOutput.value);
-    emit("ok", { costUsd: actualUsd, researchCalls, retrievalHit, completenessOk, catalogMiss: generated.catalogMiss });
+    // Advisory structural gate (Finding 1): run the SAME structural checks the offline
+    // golden suite asserts (now incl. orphan-node detection) on the served body, free +
+    // sub-ms. ADVISORY — a failure is logged + telemetry'd, NEVER blocks the response
+    // (we serve 200 regardless), so this finally MEASURES the prod broken-graph rate
+    // without UX risk. The data decides a later promote-to-retry/hard-fail (a config
+    // change, not new plumbing). Not a blind retry: the 0/12 regression was systematic
+    // (the model emits unwired addNodes), so a retry would fail identically and double cost.
+    const gateFailures = structuralFailures(scrubbedOutput.value);
+    const completenessOk = gateFailures.length === 0;
+    if (!completenessOk) {
+      req.log.warn({ gateFailures, route: ROUTE }, "generated design failed a structural gate (served anyway — advisory)");
+    }
+    emit("ok", { costUsd: actualUsd, researchCalls, retrievalHit, completenessOk, catalogMiss: generated.catalogMiss, gateFailures });
     return finish(200, responseBody);
   } catch (err) {
     // Generation failed: release the reservation so the budget isn't consumed by a
