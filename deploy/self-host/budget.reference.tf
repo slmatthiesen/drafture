@@ -57,6 +57,17 @@ variable "ami_id" {
   description = "ARM64 AMI ID (Amazon Linux 2023 or Ubuntu 22.04 arm64) for t4g.small."
 }
 
+variable "container_image" {
+  type        = string
+  description = "Container image URI for the app, e.g. <acct>.dkr.ecr.<region>.amazonaws.com/drafture:latest. Build + push your image and set this before apply — there is no default on purpose."
+}
+
+variable "container_port" {
+  type        = number
+  default     = 8080
+  description = "Port the app container listens on (Fastify serves the SPA + /api on one port)."
+}
+
 variable "vpc_id" {
   type        = string
   description = "Existing VPC ID to deploy into."
@@ -333,6 +344,10 @@ resource "aws_s3_bucket_lifecycle_configuration" "backup" {
   rule {
     id     = "expire-old-backups"
     status = "Enabled"
+
+    # Empty filter = apply to all objects. Required by AWS provider v5 (a rule with
+    # neither filter nor prefix is a validation error in newer versions).
+    filter {}
 
     expiration {
       days = var.backup_lifecycle_days
@@ -821,11 +836,19 @@ resource "aws_instance" "app" {
       dpkg -i amazon-cloudwatch-agent.deb
     fi
 
-    # Mount the data EBS volume (after attachment; device name varies by OS)
-    # TODO: Replace /dev/xvdf with actual device name after attachment
-    # mkfs.xfs /dev/xvdf (FIRST BOOT ONLY — guard with label check)
-    # mkdir -p /data/sqlite && mount /dev/xvdf /data/sqlite
-    # echo '/dev/xvdf /data/sqlite xfs defaults,nofail 0 2' >> /etc/fstab
+    # Mount the data EBS volume. On Nitro (t4g) AL2023 the ec2-utils udev rules
+    # symlink the attachment (/dev/xvdf, matching aws_volume_attachment.db) to the
+    # underlying NVMe device; wait for it, format ONCE (guarded by a blkid check so a
+    # reboot never reformats live data), then persist via fstab with nofail.
+    DEVICE=/dev/xvdf
+    MOUNT=/data
+    for i in $(seq 1 30); do [ -e "$DEVICE" ] && break; sleep 2; done
+    if ! blkid "$DEVICE"; then
+      mkfs.xfs "$DEVICE"
+    fi
+    mkdir -p "$MOUNT"
+    grep -q "$MOUNT" /etc/fstab || echo "$DEVICE $MOUNT xfs defaults,nofail 0 2" >> /etc/fstab
+    mount -a
 
     # CloudWatch agent config — structured JSON logs to log group
     cat > /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json <<'CWCONFIG'
@@ -850,6 +873,30 @@ resource "aws_instance" "app" {
     /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
       -a fetch-config -m ec2 -s \
       -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
+
+    # -----------------------------------------------------------------------
+    # Deploy the app container. The image (var.container_image) must be pushed
+    # first. The Anthropic key is read from SSM at boot (never baked into the AMI
+    # or this file); SQLite lives on the mounted data volume so it survives
+    # instance replacement. Cloudflare terminates TLS and proxies to :80 here
+    # (set the CF origin to "Full" with an origin cert, or "Flexible"); the
+    # container listens on var.container_port.
+    # -----------------------------------------------------------------------
+    dnf install -y docker
+    systemctl enable --now docker
+
+    # If the image is in a private ECR repo, authenticate first:
+    #   aws ecr get-login-password --region ${var.aws_region} | docker login --username AWS --password-stdin <acct>.dkr.ecr.${var.aws_region}.amazonaws.com
+
+    APP_KEY="$(aws ssm get-parameter --name /${var.project}/anthropic_api_key --with-decryption --region ${var.aws_region} --query Parameter.Value --output text)"
+
+    docker run -d --name ${var.project} --restart always \
+      -p 80:${var.container_port} \
+      -v /data:/data \
+      -e STORE_BACKEND=sqlite \
+      -e DB_PATH=/data/drafture.db \
+      -e ANTHROPIC_API_KEY="$APP_KEY" \
+      ${var.container_image}
   EOF
   )
 
