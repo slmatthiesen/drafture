@@ -16,6 +16,7 @@ import type { Config } from "../config.js";
 import type { LlmProvider } from "../llm/provider.js";
 import { ClaudeProvider } from "../llm/claude.js";
 import { GlmProvider } from "../llm/glm.js";
+import { withTracing } from "../llm/tracingProvider.js";
 import type { EmbeddingProvider } from "../llm/embeddings/provider.js";
 import { buildEmbeddingProvider } from "../llm/embeddings/factory.js";
 
@@ -111,7 +112,11 @@ export async function buildAppContext(
   // Idempotent — safe whether the DB is fresh or already seeded (kbLoader).
   await seedKnowledgeBase(stores);
 
-  const provider = overrides.provider ?? buildProvider(config);
+  // One pricing instance for the ledger, telemetry, AND Langfuse cost — built once.
+  const pricing = pricingFromConfig(config);
+  // Wrap the config-built provider with Langfuse tracing (no-op unless configured). An
+  // injected test provider is used bare — tests don't trace.
+  const provider = overrides.provider ?? withTracing(buildProvider(config), config, pricing);
   // `embedder` may be explicitly null in tests (exercise the retrieval-off path), so
   // distinguish "not provided" (build from config) from "provided as null" (disable).
   const embedder = "embedder" in overrides ? overrides.embedder ?? null : buildEmbeddingProvider(config, overrides.fetchFn);
@@ -128,7 +133,7 @@ export async function buildAppContext(
     provider,
     embedder,
     stores,
-    pricing: pricingFromConfig(config),
+    pricing,
     guards,
     telemetrySink: overrides.telemetrySink,
     db,
