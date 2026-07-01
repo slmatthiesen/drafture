@@ -43,8 +43,8 @@ variable "aws_region" {
 
 variable "project" {
   type        = string
-  default     = "budget"
-  description = "Project name used as a prefix for all resources."
+  default     = "drafture"
+  description = "Project name used as a prefix for all resources (and the SSM key path / container name)."
 }
 
 variable "ops_email" {
@@ -54,7 +54,8 @@ variable "ops_email" {
 
 variable "ami_id" {
   type        = string
-  description = "ARM64 AMI ID (Amazon Linux 2023 or Ubuntu 22.04 arm64) for t4g.small."
+  default     = ""
+  description = "ARM64 AMI for t4g.small. Leave empty to auto-resolve the latest Amazon Linux 2023 arm64 AMI (recommended); set an explicit ID to pin one."
 }
 
 variable "container_image" {
@@ -149,6 +150,26 @@ variable "backup_lifecycle_days" {
 
 data "aws_caller_identity" "current" {}
 data "aws_region" "current" {}
+
+# Latest Amazon Linux 2023 arm64 AMI — used when var.ami_id is empty so a first
+# apply doesn't fail hunting a region-specific AMI ID by hand.
+data "aws_ami" "al2023_arm64" {
+  most_recent = true
+  owners      = ["amazon"]
+
+  filter {
+    name   = "name"
+    values = ["al2023-ami-*-arm64"]
+  }
+  filter {
+    name   = "architecture"
+    values = ["arm64"]
+  }
+  filter {
+    name   = "virtualization-type"
+    values = ["hvm"]
+  }
+}
 
 # =============================================================================
 # KMS — EBS ENCRYPTION KEY
@@ -427,7 +448,7 @@ resource "aws_s3_bucket_policy" "cloudtrail" {
         Resource = "${aws_s3_bucket.cloudtrail.arn}/AWSLogs/${data.aws_caller_identity.current.account_id}/*"
         Condition = {
           StringEquals = {
-            "s3:x-amz-acl" = "bucket-owner-full-control"
+            "s3:x-amz-acl"  = "bucket-owner-full-control"
             "AWS:SourceArn" = "arn:aws:cloudtrail:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:trail/${var.project}-trail"
           }
         }
@@ -794,7 +815,7 @@ data "aws_availability_zones" "available" {
 # =============================================================================
 
 resource "aws_instance" "app" {
-  ami                         = var.ami_id
+  ami                         = var.ami_id != "" ? var.ami_id : data.aws_ami.al2023_arm64.id
   instance_type               = "t4g.small"
   subnet_id                   = var.public_subnet_id
   vpc_security_group_ids      = [aws_security_group.ec2_app.id]
@@ -890,11 +911,12 @@ resource "aws_instance" "app" {
 
     APP_KEY="$(aws ssm get-parameter --name /${var.project}/anthropic_api_key --with-decryption --region ${var.aws_region} --query Parameter.Value --output text)"
 
+    # The image declares VOLUME /app/data and defaults DB_PATH=/app/data/drafture.db,
+    # so mount the host data volume there and let the image's own default stand.
     docker run -d --name ${var.project} --restart always \
       -p 80:${var.container_port} \
-      -v /data:/data \
+      -v /data:/app/data \
       -e STORE_BACKEND=sqlite \
-      -e DB_PATH=/data/drafture.db \
       -e ANTHROPIC_API_KEY="$APP_KEY" \
       ${var.container_image}
   EOF

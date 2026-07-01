@@ -19,24 +19,55 @@ CloudWatch logs/alarms → SNS). ~$14–42/mo.
 |---|---|
 | `vpc_id` | existing VPC to deploy into |
 | `public_subnet_id` | public subnet for the EC2 instance |
-| `ami_id` | ARM64 AMI (Amazon Linux 2023 / Ubuntu 22.04 arm64) for t4g.small |
 | `ops_email` | address for SNS ops-alert subscription |
+| `container_image` | the app image you built + pushed (ECR/GHCR/Docker Hub) |
+| `static_site_domain` | domain CloudFront serves the SPA assets on (needs an ACM cert) |
 
-`aws_region` (us-east-1), `project`, and the Cloudflare IP ranges have defaults — keep
-the CF ranges current (links are in the file).
+`aws_region` (us-east-1), `project` (drafture), `ami_id` (empty → auto-resolves the
+latest AL2023 arm64 AMI), `container_port` (8080), and the Cloudflare IP ranges all have
+defaults. Keep the CF ranges current (links are in the file). Copy
+`terraform.tfvars.example` → `terraform.tfvars` and fill it in.
 
-## Use
+`user_data` now does the full box bootstrap AND app deploy: mounts the encrypted EBS
+volume for SQLite, installs Docker, reads the Anthropic key from SSM, and runs
+`container_image` (host `:80` → container `:container_port`, data volume at `/app/data`).
+Cloudflare terminates TLS and proxies to `:80`.
+
+## Deploy, end to end
 
 ```
+# 1. Build + push the image (from the repo root)
+docker build -t <acct>.dkr.ecr.us-east-1.amazonaws.com/drafture:latest .
+aws ecr create-repository --repository-name drafture --region us-east-1   # once
+aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin <acct>.dkr.ecr.us-east-1.amazonaws.com
+docker push <acct>.dkr.ecr.us-east-1.amazonaws.com/drafture:latest
+
+# 2. Plan + apply (tofu or terraform)
 cd deploy/self-host
-terraform init
-terraform plan   # review every resource
-terraform apply
+cp terraform.tfvars.example terraform.tfvars   # then edit it
+tofu init
+tofu plan     # review every resource + the resolved AMI
+tofu apply
+
+# 3. Set the Anthropic key (out-of-band; never in a committed file)
+aws ssm put-parameter --overwrite --type SecureString \
+  --name /drafture/anthropic_api_key --value sk-ant-... --region us-east-1
+
+# 4. Point a PROXIED Cloudflare record at the `ec2_public_ip` output, then smoke test
+curl -s https://<your-domain>/api/health     # -> {"status":"ok",...}
 ```
 
-The `user_data` block bootstraps the box at a reference level; finish the app-deploy
-steps (pull the container/build, mount the EBS volume for the SQLite file, wire the
-`ANTHROPIC_API_KEY` via the SSM parameter) for your actual runtime.
+**Optional local smoke test before deploying** (proves the image serves with the deploy's
+env, $0, no AWS): from the repo root —
+```
+docker build -t drafture:local .
+docker run --rm -p 8080:8080 -e STORE_BACKEND=sqlite -e ANTHROPIC_API_KEY=dummy drafture:local
+curl -s localhost:8080/api/health
+```
 
-To regenerate after a design change: open the design in the app and pull Terraform for
-the budget tier again.
+**Seed the gallery** (curated examples are gitignored, not in the image): after the box is
+up, either ship your local `data/drafture.db` onto the volume, or run `seed-curated` once
+(~$0.60, a real paid generation). Empty otherwise.
+
+To regenerate this file after a design change: open the design in the app and pull
+Terraform for the budget tier again (the deterministic emitter now covers the EBS volume).
