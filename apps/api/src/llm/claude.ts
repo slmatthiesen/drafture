@@ -140,7 +140,7 @@ export class ClaudeProvider implements LlmProvider {
 
     // The model emits a WIRE shape (per scope); reconstruct the tier(s) here so
     // callers always receive a complete GeneratedArchitecture (1..3 tiers).
-    const { result: wire, usage } = await this.structuredCall(params, resolved.wireSchema);
+    const { result: wire, usage } = await this.structuredCall(params, resolved.wireSchema, opts?.onProgress);
     return { result: resolved.reconstruct(wire), usage };
   }
 
@@ -207,6 +207,7 @@ export class ClaudeProvider implements LlmProvider {
   private async structuredCall<T>(
     params: Anthropic.MessageCreateParamsNonStreaming,
     schema: z.ZodType<T>,
+    onProgress?: (p: { outputChars: number }) => void,
   ): Promise<ProviderResult<T>> {
     let lastError: unknown;
 
@@ -219,7 +220,7 @@ export class ClaudeProvider implements LlmProvider {
     for (let attempt = 0; attempt < 3; attempt++) {
       let message: Anthropic.Message;
       try {
-        message = await this.callModel(params);
+        message = await this.callModel(params, onProgress);
       } catch (err) {
         // API/transport failures (from create/stream) are mapped and thrown
         // immediately, never retried. Any other throw falls through to retry.
@@ -262,11 +263,31 @@ export class ClaudeProvider implements LlmProvider {
 
   private async callModel(
     params: Anthropic.MessageCreateParamsNonStreaming,
+    onProgress?: (p: { outputChars: number }) => void,
   ): Promise<Anthropic.Message> {
-    if (params.max_tokens >= STREAMING_THRESHOLD) {
-      // Streamed messages return the same final Message (tool_use blocks
-      // included); extractStructuredOutput reads the forced tool call's `input`.
-      return this.client.messages.stream(params).finalMessage();
+    // Stream when a large output risks the SDK HTTP timeout OR when the caller wants a
+    // live progress heartbeat (fix D) — the default budget generation is below the size
+    // threshold, so onProgress is what forces streaming for the progress UI.
+    if (onProgress || params.max_tokens >= STREAMING_THRESHOLD) {
+      const stream = this.client.messages.stream(params);
+      if (onProgress) {
+        // Count the forced-tool input JSON (and any text) as it streams. This is a
+        // coarse output-size proxy, not billed tokens — enough to animate real motion.
+        let chars = 0;
+        stream.on("streamEvent", (event) => {
+          if (event.type !== "content_block_delta") return;
+          const delta = event.delta;
+          const piece =
+            delta.type === "input_json_delta" ? delta.partial_json : delta.type === "text_delta" ? delta.text : "";
+          if (piece) {
+            chars += piece.length;
+            onProgress({ outputChars: chars });
+          }
+        });
+      }
+      // Streamed messages return the same final Message (tool_use blocks included);
+      // extractStructuredOutput reads the forced tool call's `input`.
+      return stream.finalMessage();
     }
     // Forced tool use returns a tool_use block whose `input` is guaranteed valid
     // JSON; create() returns the raw Message for extractStructuredOutput to read.

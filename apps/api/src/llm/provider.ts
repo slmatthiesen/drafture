@@ -33,10 +33,22 @@ export interface GroundedPrompt {
   volatileSuffix: string;
 }
 
+/** Progress signal for a streaming generation — a coarse output-size heartbeat so the
+ *  UI can animate real motion during the long decode (fix D). `outputChars` is a
+ *  monotonically-increasing count of structured-output characters emitted so far (an
+ *  approximation, not billed tokens); dividing by ~4 gives a rough token estimate. */
+export interface GenerateProgress {
+  outputChars: number;
+}
+
 /** Cost ceiling for a single generation call. */
 export interface GenerateOptions {
   maxTokens?: number;
   effort?: "low" | "medium" | "high";
+  /** When set, the provider STREAMS the call and fires this as output accrues, so the
+   *  caller can emit a live progress heartbeat. Omitted → the normal (non-streaming
+   *  under the threshold) path, unchanged. */
+  onProgress?: (progress: GenerateProgress) => void;
 }
 
 /**

@@ -99,7 +99,12 @@ export async function generate(
   if (isClarify(data)) {
     return { kind: "clarify", questions: data.questions, round: data.round };
   }
+  return toResultOutcome(data);
+}
 
+/** Map a `/api/generate` success body to the `result` outcome. Shared by the JSON and
+ *  streaming clients so both stay in sync with the response shape. */
+function toResultOutcome(data: unknown): ApiOutcome {
   const result = (data ?? {}) as Partial<GenerateResponse>;
   const tiers = result.tiers ?? [];
   return {
@@ -114,6 +119,105 @@ export async function generate(
     keyDecisions: result.keyDecisions ?? [],
     fromLibrary: result.fromLibrary,
   };
+}
+
+/** Live progress from a streaming generation (fix D). */
+export interface GenerateStreamHandlers {
+  /** A named pipeline phase started (preparing / generating / costing / saving). */
+  onPhase?: (step: string) => void;
+  /** Output-size heartbeat during the decode — a rough char count (≈ tokens × 4). */
+  onToken?: (chars: number) => void;
+}
+
+/**
+ * Streaming variant of {@link generate} (fix D): asks the server for Server-Sent Events
+ * and reports real phase + token-heartbeat progress as they arrive, resolving to the
+ * SAME {@link ApiOutcome} as `generate`. Falls back to JSON parsing if the server doesn't
+ * stream (guards reject before the stream opens, or an old server). Never throws.
+ */
+export async function generateStream(
+  body: GenerateRequest,
+  handlers: GenerateStreamHandlers = {},
+  fetchImpl: typeof fetch = fetch,
+): Promise<ApiOutcome> {
+  let res: Response;
+  try {
+    res = await fetchImpl(ENDPOINT, {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: "text/event-stream" },
+      body: JSON.stringify(body),
+    });
+  } catch {
+    return { kind: "error", status: 0, code: "network_error" };
+  }
+
+  const ctype = res.headers?.get?.("content-type") ?? "";
+  // A guard rejection (4xx/5xx) or a non-streaming server answers with JSON — parse it
+  // exactly as the plain client would, so behavior is identical off the streaming path.
+  if (!res.ok || !ctype.includes("text/event-stream") || !res.body) {
+    let data: unknown = null;
+    try {
+      data = await res.json();
+    } catch {
+      /* non-JSON body — fall through to code-by-status */
+    }
+    if (!res.ok) {
+      const obj = (data ?? {}) as { error?: string; message?: string };
+      return { kind: "error", status: res.status, code: obj.error ?? "unknown_error", message: obj.message };
+    }
+    if (isClarify(data)) return { kind: "clarify", questions: data.questions, round: data.round };
+    return toResultOutcome(data);
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  let outcome: ApiOutcome | null = null;
+
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    let sep: number;
+    // Frames are separated by a blank line ("\n\n").
+    while ((sep = buf.indexOf("\n\n")) >= 0) {
+      const frame = buf.slice(0, sep);
+      buf = buf.slice(sep + 2);
+      const { event, data } = parseSseFrame(frame);
+      if (!event) continue;
+      if (event === "phase") handlers.onPhase?.(String((data as { step?: string }).step ?? ""));
+      else if (event === "token") handlers.onToken?.(Number((data as { chars?: number }).chars ?? 0));
+      else if (event === "result") outcome = toResultOutcome(data);
+      else if (event === "clarify") {
+        const c = data as { questions?: string[]; round?: number };
+        outcome = { kind: "clarify", questions: c.questions ?? [], round: c.round ?? 0 };
+      } else if (event === "error") {
+        const e = data as { error?: string; message?: string };
+        outcome = { kind: "error", status: 0, code: e.error ?? "unknown_error", message: e.message };
+      }
+    }
+  }
+
+  return outcome ?? { kind: "error", status: 0, code: "stream_incomplete" };
+}
+
+/** Parse one SSE frame into its event name + JSON-decoded data payload. */
+function parseSseFrame(frame: string): { event?: string; data?: unknown } {
+  let event: string | undefined;
+  let dataRaw = "";
+  for (const line of frame.split("\n")) {
+    if (line.startsWith("event:")) event = line.slice(6).trim();
+    else if (line.startsWith("data:")) dataRaw += line.slice(5).trim();
+  }
+  let data: unknown = undefined;
+  if (dataRaw) {
+    try {
+      data = JSON.parse(dataRaw);
+    } catch {
+      /* leave data undefined on a malformed frame */
+    }
+  }
+  return { event, data };
 }
 
 /** Resubmit answers to advance a clarification round — same endpoint as {@link generate}. */
