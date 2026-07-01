@@ -122,6 +122,11 @@ const ORPHAN_EXEMPT_KEYWORDS = [
   // Passive build/deploy INFRA — an image registry that compute pulls from at task
   // launch, not a runtime data-flow participant (present in every container design).
   "ecr", "elastic container registry", "container registry",
+  // Passive SECRETS/CONFIG stores — SSM Parameter Store / Secrets Manager are pulled at
+  // launch (or call-time) by compute, not runtime data-flow endpoints. Models correctly
+  // draw them as nodes but (rightly) don't wire them as data-flow hops, so an edgeless one
+  // is legitimate — same call ECR/NAT/WAF make.
+  "ssm", "parameter store", "secrets manager",
   // Passive PROTECTION LAYERS — a web ACL / DDoS subscription ATTACHES to CloudFront/
   // ALB/Route 53 rather than sitting in the data flow. The security floor REQUIRES edge
   // protection, so it's present in most designs; models wire it inconsistently, which
