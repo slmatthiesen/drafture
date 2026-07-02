@@ -28,18 +28,6 @@ const DOMAINS: { tag: string; label: string }[] = [
   { tag: "api-backend", label: "API backend" },
 ];
 
-// Mirror of `FACETS` in apps/api/src/pipeline/tags.ts (display order).
-const FACETS = [
-  "compute",
-  "data",
-  "messaging",
-  "api",
-  "realtime",
-  "security",
-  "robustness",
-  "observability",
-] as const;
-
 const TIER_LABEL: Record<TierName, string> = {
   budget: "Budget",
   balanced: "Balanced",
@@ -175,24 +163,6 @@ export function GalleryBrowser({ initialLimit }: GalleryBrowserProps): JSX.Eleme
           })}
         </div>
       )}
-
-      <div className="gallery__filters" role="group" aria-label="Filter by capability">
-        <span className="gallery__filter-label">Capability</span>
-        {FACETS.map((facet) => {
-          const on = active.has(facet);
-          return (
-            <button
-              key={facet}
-              type="button"
-              className={`tag-chip ${on ? "tag-chip--on" : ""}`}
-              aria-pressed={on}
-              onClick={() => toggleFacet(facet)}
-            >
-              {facet}
-            </button>
-          );
-        })}
-      </div>
 
       <div className="gallery__sortbar">
         <span className="gallery__count">
