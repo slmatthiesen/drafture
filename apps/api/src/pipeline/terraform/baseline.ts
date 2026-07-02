@@ -9,7 +9,7 @@
  * service-principal grant inline, keyed off the LITERAL region, every time the
  * consuming service is present. The gap becomes structurally impossible.
  */
-import { type EmitCtx } from "./context.js";
+import { type EmitCtx, tierHasEncryptedLogGroup } from "./context.js";
 import { type HclBlock, type Jsonish, jsonencode, policyDoc, raw } from "./hcl.js";
 
 export function emitBaseline(ctx: EmitCtx): HclBlock[] {
@@ -182,9 +182,9 @@ function emitCustomerCmks(ctx: EmitCtx, blocks: HclBlock[]): void {
   });
 
   // --- KMS: CloudWatch Logs CMK (needs the logs service principal, LITERAL region) ---
-  // Required whenever ANYTHING writes encrypted logs: a log sink, CloudTrail, or any
-  // Lambda (every Lambda emits a CMK-encrypted log group).
-  if (ctx.has("cloudwatch-logs") || ctx.has("cloudtrail") || ctx.has("lambda") || ctx.has("apigw")) {
+  // Required whenever ANYTHING writes an encrypted log group: a log sink, CloudTrail, a
+  // Lambda, API Gateway, or a Fargate task — the LOG_GROUP_KEYS set the emitters share.
+  if (tierHasEncryptedLogGroup(ctx)) {
     blocks.push({
       section: "KMS keys",
       hcl: [

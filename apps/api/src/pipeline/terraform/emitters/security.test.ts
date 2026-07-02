@@ -117,9 +117,9 @@ describe("deterministic Terraform — security-floor nodes (KMS + WAF)", () => {
  * A WAF node with NO CloudFront but a regional target (an ALB) emits a REAL regional
  * web ACL + association — the correct placement when there's no edge distribution.
  */
-function albWafTier(): Tier {
+function albWafTier(name: "budget" | "balanced" = "budget"): Tier {
   return {
-    name: "budget",
+    name,
     summary: "ALB-fronted service protected by a regional WAF",
     nodes: [
       n("waf", "AWS WAF", "regional web ACL"),
@@ -155,5 +155,35 @@ describe("deterministic Terraform — WAF on a regional target (ALB, no CloudFro
     expect(code).toContain('resource "aws_wafv2_web_acl_association" "waf_lb"');
     expect(code).toContain("resource_arn = aws_lb.lb.arn");
     expect(code).toContain("web_acl_arn  = aws_wafv2_web_acl.waf.arn");
+  });
+});
+
+// A paid tier whose ONLY log group comes from Fargate (`/ecs/…`) — no Lambda, API
+// Gateway, CloudTrail, or Logs sink. The Fargate log group references aws_kms_key.cw_logs
+// at paid tiers; the baseline used to gate that CMK on lambda|apigw|cloudtrail|
+// cloudwatch-logs only, so it was never emitted here → dangling ref / kms-key-policy gap.
+describe("deterministic Terraform — paid Fargate-only tier declares the cw_logs CMK", () => {
+  const { code, coverage, gaps } = assembleTier(albWafTier("balanced"), { region: "us-east-1" });
+
+  it("templates the tier with zero wire-up gaps (the Fargate log-group CMK is wired)", () => {
+    expect(coverage.ratio).toBe(1);
+    expect(gaps).toEqual([]);
+    expect(detectWireupGaps(code)).toEqual([]);
+  });
+
+  it("emits the cw_logs CMK the Fargate log group references (no dangling KMS reference)", () => {
+    // The log group asks for the CMK...
+    expect(code).toContain("kms_key_id        = aws_kms_key.cw_logs.arn");
+    // ...and the CMK it names is actually declared, with the literal-region Logs grant.
+    expect(code).toContain('resource "aws_kms_key" "cw_logs"');
+    expect(code).toContain("logs.us-east-1.amazonaws.com");
+    // Every aws_kms_key.<name> reference resolves to a declared resource.
+    const declared = new Set(
+      [...code.matchAll(/resource\s+"aws_kms_key"\s+"([a-z0-9_]+)"/g)].map((m) => m[1]),
+    );
+    const referenced = new Set(
+      [...code.matchAll(/aws_kms_key\.([a-z0-9_]+)\./g)].map((m) => m[1]),
+    );
+    for (const name of referenced) expect(declared).toContain(name);
   });
 });
