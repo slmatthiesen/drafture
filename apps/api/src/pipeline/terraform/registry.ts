@@ -30,6 +30,7 @@ import {
   emitNat,
   emitSqs,
 } from "./emitters/misc.js";
+import { emitKms, emitWaf } from "./emitters/security.js";
 
 export type ServiceEmitter = (node: ArchitectureNode, ctx: EmitCtx) => HclBlock[];
 
@@ -64,4 +65,6 @@ export const REGISTRY: ReadonlyMap<ServiceKey, ServiceEmitter> = new Map<Service
   ["step-functions", emitStepFunctions],
   ["kinesis", emitKinesis],
   ["opensearch", emitOpenSearch],
+  ["kms", emitKms],
+  ["waf", emitWaf],
 ]);
