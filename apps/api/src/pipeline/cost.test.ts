@@ -11,6 +11,7 @@ import type {
 import {
   estimateCosts,
   formatRange,
+  freeAllowance,
   onDemandDisclaimer,
   trafficVolumeScale,
   ASSUMED_MONTHLY_VOLUME,
@@ -689,5 +690,29 @@ describe("traffic as its own axis (Problem 2)", () => {
       REGION,
     );
     expect(out.assumptions.some((a) => /assumed traffic/i.test(a))).toBe(true);
+  });
+});
+
+describe("freeAllowance (AWS always-free tiers subtracted before pricing)", () => {
+  it("zeroes services whose assumed band fits under the free tier", () => {
+    // per-1k-requests band tops out at 1000 (1M ops) — within the 1M free tier.
+    expect(freeAllowance("SQS", "per-1k-requests")).toBe(1_000);
+    expect(freeAllowance("SNS", "per-1k-requests")).toBe(1_000);
+    // Cognito's band is 1k–50k MAU — entirely inside the 50k free tier.
+    expect(freeAllowance("Cognito", "per-mau")).toBe(50_000);
+    // Lambda is free on BOTH its priced units.
+    expect(freeAllowance("Lambda", "gb-second")).toBe(400_000);
+    expect(freeAllowance("Lambda", "per-1k-requests")).toBe(1_000);
+  });
+
+  it("gives SES its 62k app-origin allowance (a partial, not full, discount)", () => {
+    expect(freeAllowance("SES", "per-1k-requests")).toBe(62);
+  });
+
+  it("does NOT free-tier metered services with no always-free allowance", () => {
+    expect(freeAllowance("DynamoDB", "per-1k-wru")).toBe(0); // on-demand requests aren't always-free
+    expect(freeAllowance("RDS", "hour")).toBe(0);
+    expect(freeAllowance("NAT Gateway", "hour")).toBe(0);
+    expect(freeAllowance("SomethingUnknown", "per-1k-requests")).toBe(0);
   });
 });
