@@ -86,7 +86,7 @@ describe("ReferenceConfig", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /show .*terraform/i }));
     const alert = await screen.findByRole("alert");
-    expect(alert).toHaveTextContent(/out of money/i);
-    expect(screen.getByRole("link", { name: /linkedin/i })).toBeInTheDocument();
+    expect(alert).toHaveTextContent(/out of tokens/i);
+    expect(screen.getByRole("link", { name: /clone the project/i })).toBeInTheDocument();
   });
 });
