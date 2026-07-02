@@ -36,6 +36,8 @@ export type ServiceKey =
   | "sqs"
   | "xray"
   | "cloudtrail"
+  | "kms"
+  | "waf"
   | "alb"
   | "fargate"
   | "rds"
@@ -81,6 +83,9 @@ const RULES: Rule[] = [
   { key: "cloudwatch-dashboard", any: ["dashboard"] },
   { key: "cloudwatch-logs", any: ["cloudwatch logs", "cloudwatch log", "log group"] },
   { key: "cloudtrail", any: ["cloudtrail"] },
+  // WAF web ACL. "waf"/"web acl"/"wafv2" appear in no earlier service name, so order is
+  // free; kept with the other security-floor services for readability.
+  { key: "waf", any: ["waf", "web acl", "wafv2"] },
   { key: "secrets-manager", any: ["secrets manager", "secretsmanager"] },
   // SSM Parameter Store (the FREE-floor secrets/config store). Distinct from Secrets
   // Manager (checked above) and from other Systems Manager features (Session Manager).
@@ -108,6 +113,10 @@ const RULES: Rule[] = [
   { key: "ebs", any: ["ebs", "elastic block store", "block store"] },
   { key: "s3", any: ["s3", "simple storage"] },
   { key: "ec2", any: ["ec2", "elastic compute"] },
+  // KMS is matched LAST: "kms" is a broad substring that a service could carry in its
+  // name (e.g. "SSE-KMS"), so every concrete service above claims its node first; only a
+  // node whose service IS Key Management Service falls through to here.
+  { key: "kms", any: ["kms", "key management"] },
 ];
 
 export function normalizeServiceKey(node: Pick<ArchitectureNode, "awsService" | "role">): ServiceKey {

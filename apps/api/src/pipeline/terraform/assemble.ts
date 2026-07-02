@@ -70,6 +70,7 @@ const SECTION_ORDER = [
   "SNS",
   "CloudWatch Logs",
   "CloudWatch Alarms",
+  "WAF",
   "CloudFront",
   "CloudTrail",
   "X-Ray",
