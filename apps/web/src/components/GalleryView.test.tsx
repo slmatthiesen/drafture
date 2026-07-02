@@ -20,8 +20,8 @@ function summary(over: Partial<DesignSummary> & Pick<DesignSummary, "id">): Desi
 }
 
 const DESIGNS: DesignSummary[] = [
-  summary({ id: "a", description: "photo sharing api", tags: ["compute", "data"], upvotes: 5, downvotes: 1, createdAt: 100 }),
-  summary({ id: "b", description: "realtime chat", tags: ["messaging", "realtime"], recommendedTier: "resilient", upvotes: 2, createdAt: 200 }),
+  summary({ id: "a", description: "photo sharing api", tags: ["media"], upvotes: 5, downvotes: 1, createdAt: 100 }),
+  summary({ id: "b", description: "realtime chat", tags: ["chat"], recommendedTier: "resilient", upvotes: 2, createdAt: 200 }),
 ];
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -53,20 +53,20 @@ function renderGallery(): void {
 }
 
 describe("GalleryView", () => {
-  it("lists approved designs with their tags and filters by a facet chip", async () => {
+  it("lists approved designs and filters by a type chip", async () => {
     fetchMock.mockResolvedValue(jsonResponse({ designs: DESIGNS }));
     renderGallery();
 
     expect(await screen.findByText("photo sharing api")).toBeInTheDocument();
     expect(screen.getByText("realtime chat")).toBeInTheDocument();
 
-    // Selecting the "messaging" facet narrows to the design carrying it.
-    fireEvent.click(screen.getByRole("button", { name: "messaging" }));
+    // Selecting the "Chat" type narrows to the design carrying it.
+    fireEvent.click(screen.getByRole("button", { name: "Chat" }));
     expect(screen.queryByText("photo sharing api")).not.toBeInTheDocument();
     expect(screen.getByText("realtime chat")).toBeInTheDocument();
 
-    // Clearing the facet restores the full list.
-    fireEvent.click(screen.getByRole("button", { name: "messaging" }));
+    // Clearing it restores the full list.
+    fireEvent.click(screen.getByRole("button", { name: "Chat" }));
     expect(screen.getByText("photo sharing api")).toBeInTheDocument();
   });
 
