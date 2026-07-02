@@ -244,6 +244,38 @@ const CAPACITY_UNITS: ReadonlySet<string> = new Set([
   "web-acl-month",
 ]);
 
+/**
+ * AWS ALWAYS-FREE monthly allowances, subtracted from the assumed volume BEFORE
+ * pricing — so a low-traffic design isn't billed for usage AWS gives away every
+ * month. This is what made a small app show an ~$11 SES "email floor" and a ~$5.50
+ * Cognito "auth floor" on every tier: the band assumes 100k–1M ops/mo, but the first
+ * chunk is free. Keyed by (service, native unit); the allowance is in the SAME native
+ * unit as {@link ASSUMED_MONTHLY_VOLUME} (e.g. "per-1k-requests" → 1000 = 1M requests).
+ *
+ * ONLY genuinely ALWAYS-FREE tiers are encoded — NOT the 12-month-only ones (S3 5 GB,
+ * API Gateway 1M, RDS 750 hr), which expire and would understate ongoing cost. SES's
+ * 62k/mo is the documented allowance for mail sent from Lambda/EC2 (how these designs
+ * send). Source: AWS Free Tier (always-free column).
+ */
+const FREE_TIER: ReadonlyArray<{ service: RegExp; unit: string; free: number }> = [
+  { service: /\bsqs\b/i, unit: "per-1k-requests", free: 1_000 }, // 1M requests/mo
+  { service: /\bsns\b/i, unit: "per-1k-requests", free: 1_000 }, // 1M publishes/mo
+  { service: /lambda/i, unit: "gb-second", free: 400_000 }, // 400k GB-seconds/mo
+  { service: /lambda/i, unit: "per-1k-requests", free: 1_000 }, // 1M requests/mo
+  { service: /cognito/i, unit: "per-mau", free: 50_000 }, // 50k monthly active users
+  { service: /dynamodb/i, unit: "gb-month", free: 25 }, // 25 GB storage
+  { service: /cloudfront/i, unit: "gb-internet-egress", free: 1_000 }, // 1 TB egress/mo
+  { service: /cloudfront/i, unit: "gb-transfer", free: 1_000 },
+  { service: /cloudfront/i, unit: "per-1k-requests", free: 10_000 }, // 10M requests/mo
+  { service: /\bses\b/i, unit: "per-1k-requests", free: 62 }, // 62k app-origin emails/mo
+];
+
+/** Always-free monthly allowance (native units) for a (service, unit) pair, else 0. */
+export function freeAllowance(service: string, unit: string): number {
+  const hit = FREE_TIER.find((f) => f.unit === unit && f.service.test(service));
+  return hit ? hit.free : 0;
+}
+
 function monthlyBand(unit: string, volumeScale: number): VolumeBand {
   const bytes = TRAFFIC_BYTES_PER_REQUEST[unit];
   if (bytes !== undefined) {
@@ -465,9 +497,14 @@ async function driversForService(
     const usd = isInstanceHour ? INSTANCE_PRICES[instanceType!]! : r.usd;
     const band = monthlyBand(r.unit, volumeScale);
     const effectiveMultiplier = CAPACITY_UNITS.has(r.unit) ? tierMultiplier : 1;
+    // Subtract the AWS always-free monthly allowance before pricing, so usage AWS
+    // gives away doesn't show as a floor (the ~$11 SES / ~$5.50 Cognito problem).
+    const free = freeAllowance(r.service, r.unit);
+    const billableLow = Math.max(0, band.low - free);
+    const billableHigh = Math.max(0, band.high - free);
     const estimateRange = formatRange(
-      usd * band.low * effectiveMultiplier,
-      usd * band.high * effectiveMultiplier,
+      usd * billableLow * effectiveMultiplier,
+      usd * billableHigh * effectiveMultiplier,
     );
     let note = isInstanceHour
       ? `Assumed-throughput estimate: ${instanceType} on-demand (us-east-1). Cost = instance count × running hours; storage/IO billed separately, multi-AZ via the tier multiplier.`
